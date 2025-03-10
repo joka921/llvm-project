@@ -8,6 +8,7 @@
 #include "clang/Tooling/Tooling.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
+#include "clang/Rewrite/Core/Rewriter.h"
 
 // Declares llvm::cl::extrahelp.
 #include "llvm/CodeGen/GlobalISel/LegalizerInfo.h"
@@ -63,7 +64,9 @@ class DeclPrinter : public MatchFinder::MatchCallback {
     SourceRange activeSourceRange;
     std::vector<Res> matches;
 
+    Rewriter& rewriter;
 public :
+    DeclPrinter(Rewriter& rewr) : rewriter(rewr) {}
     void run(const MatchFinder::MatchResult &Result) override {
         //if (const RecordDecl *FS = Result.Nodes.getNodeAs<clang::RecordDecl>("record"))
         //   FS->dump();
@@ -83,7 +86,7 @@ public :
         }
         if (const FieldDecl *Field = Result.Nodes.getNodeAs<clang::FieldDecl>("field")) {
             m.fieldNames.push_back(Field->getNameAsString());
-            Field->dump();
+            //Field->dump();
         }
     }
 
@@ -96,6 +99,88 @@ public :
             llvm::outs() << '\n';
         }
     }
+
+    void rewrite() {
+      for (const auto& m : matches) {
+          const auto& className = m.recordNames.at(0);
+          std::string rewrite = "bool operator==(const " + className + "& otherRhs) const {\n";
+          for (const auto& mem : m.fieldNames) {
+              rewrite += "    if (" + mem + " != otherRhs." + mem + ") return false;\n";
+          }
+          rewrite += "    return true;\n  }";
+          rewriter.ReplaceText(m.operatorRanges, rewrite);
+      }
+    }
+};
+
+class MyASTConsumer : public ASTConsumer {
+public:
+    using P = std::unique_ptr<Rewriter>;
+    MyASTConsumer(P _Rewrite) : Rewrite(std::move(_Rewrite)) {
+        Finder.addMatcher(ClassMatcher, &Callback);
+    }
+
+    void HandleTranslationUnit(ASTContext &Context) override {
+        // Perform matching
+        Finder.matchAST(Context);
+    }
+
+    ~MyASTConsumer() {
+        //Callback.printMembers();
+        Callback.rewrite();
+        Rewrite->getEditBuffer(Rewrite->getSourceMgr().getMainFileID()).write (llvm::outs());
+    }
+
+private:
+    P Rewrite;
+    DeclPrinter Callback{*Rewrite};
+    MatchFinder Finder;
+};
+
+class MyFrontendAction : public ASTFrontendAction {
+public:
+    std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(
+        clang::CompilerInstance &CI, llvm::StringRef InFile) override {
+        // Initialize the Rewriter with the SourceManager from the CompilerInstance
+        auto Rewrite = std::make_unique<Rewriter>();
+
+        // Set the rewriter's buffer to the file being processed
+        Rewrite->setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
+
+        // Set up the callback for replacing text in the source code
+        return std::make_unique<MyASTConsumer>(std::move(Rewrite));
+    }
+    // TODO<joka921> The following was suggested by ChatGPT to modify the files in place.
+    /*
+    bool BeginSourceFileAction(CompilerInstance &CI) override {
+        // Make sure the rewriter is initialized
+        return true;
+    }
+
+    // Save the modified source code back to the file
+    void EndSourceFileAction() override {
+        // Write the modified content back to the original file
+        llvm::errs() << "Writing changes back to file...\n";
+
+        // Get the file path from the compiler instance
+        const FileID &FID = getCompilerInstance().getSourceManager().getMainFileID();
+        const std::string filePath = getCompilerInstance().getSourceManager().getFilename(FID).str();
+
+        // Get the edit buffer that holds the modified source
+        const RewriteBuffer &RewriteBuf = Rewrite.getEditBuffer(FID);
+
+        // Open the file for writing
+        std::error_code EC;
+        llvm::raw_fd_ostream OS(filePath, EC, llvm::sys::fs::OF_Text);
+        if (EC) {
+            llvm::errs() << "Error opening file for writing: " << EC.message() << "\n";
+            return;
+        }
+
+        // Write the modified content to the file
+        RewriteBuf.write(OS);
+    }
+    */
 };
 
 int main(int argc, const char **argv) {
@@ -108,12 +193,7 @@ int main(int argc, const char **argv) {
     CommonOptionsParser &OptionsParser = ExpectedParser.get();
     ClangTool Tool(OptionsParser.getCompilations(),
                    OptionsParser.getSourcePathList());
-
-    DeclPrinter Printer;
-    MatchFinder Finder;
-    Finder.addMatcher(ClassMatcher, &Printer);
-
-    int result =  Tool.run(newFrontendActionFactory(&Finder).get());
-    Printer.printMembers();
+    auto tool = newFrontendActionFactory<MyFrontendAction>();
+    int result =  Tool.run(tool.get());
     return result;
 }

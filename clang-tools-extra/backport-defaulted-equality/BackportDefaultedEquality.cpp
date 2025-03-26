@@ -59,6 +59,7 @@ class DeclPrinter : public MatchFinder::MatchCallback {
         SourceRange operatorRanges;
         std::vector<std::string> recordNames;
         std::vector<std::string> fieldNames;
+        std::vector<std::string> baseClassNames;
     };
 
     SourceRange activeSourceRange;
@@ -82,12 +83,19 @@ public :
             llvm::outs() << "skipping match in included file\n";
             return;
         }
+        //Decl->dump();
         llvm::outs() << "keeping match in main source file\n";
         auto rng = Decl->getSourceRange();
         if (rng != activeSourceRange) {
             activeSourceRange = rng;
             matches.emplace_back();
             matches.back().recordNames.push_back(Decl->getNameAsString());
+            for (const CXXBaseSpecifier& base : Decl->bases()) {
+                auto name = base.getType()->getAsCXXRecordDecl()->getQualifiedNameAsString();
+                llvm::outs() << "Found base class called " << name << '\n';
+                matches.back().baseClassNames.push_back(name);
+
+            }
         }
         auto &m = matches.back();
 
@@ -115,8 +123,12 @@ public :
             for (const auto &m: matches) {
                 const auto &className = m.recordNames.at(0);
                 std::string rewrite = "bool operator==(const " + className + "& otherRhs) const {\n";
+                for (const auto & baseClass: m.baseClassNames) {
+                    rewrite += "    if (!(static_cast<const " + baseClass + "&>(*this) == static_cast<const " + baseClass + "&>(otherRhs))) return false;\n";
+                }
+
                 for (const auto &mem: m.fieldNames) {
-                    rewrite += "    if (" + mem + " != otherRhs." + mem + ") return false;\n";
+                    rewrite += "    if (!(" + mem + " == otherRhs." + mem + ")) return false;\n";
                 }
                 rewrite += "    return true;\n  }";
                 rewriter.ReplaceText(m.operatorRanges, rewrite);

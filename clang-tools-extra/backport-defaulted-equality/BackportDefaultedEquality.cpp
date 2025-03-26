@@ -24,7 +24,7 @@ using namespace clang::ast_matchers;
 
 // Apply a custom category to all command-line options so that they are the
 // only ones displayed.
-static llvm::cl::OptionCategory MyToolCategory("my-tool options");
+static llvm::cl::OptionCategory MyToolCategory("cxx-20-to-17-rewriters");
 
 // CommonOptionsParser declares HelpMessage with a description of the common
 // command-line options related to the compilation database and input files.
@@ -34,10 +34,7 @@ static cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 // A help message for this specific tool can be added afterward.
 static cl::extrahelp MoreHelp("\nMore help text...\n");
 
-static StatementMatcher LoopMatcher =
-        forStmt(hasLoopInit(declStmt(hasSingleDecl(varDecl(
-            hasInitializer(integerLiteral(equals(0)))))))).bind("forLoop");
-
+// A matcher that matches a C++ class with a defaulted `operator==`.
 static DeclarationMatcher ClassMatcher = cxxRecordDecl(
             hasMethod(cxxMethodDecl(
                 allOf(hasName("operator=="), isDefaulted())).bind(
@@ -48,23 +45,21 @@ static DeclarationMatcher ClassMatcher = cxxRecordDecl(
             "record"
         );
 
-class LoopPrinter : public MatchFinder::MatchCallback {
-public :
-    void run(const MatchFinder::MatchResult &Result) override {
-        if (const ForStmt *FS = Result.Nodes.getNodeAs<clang::ForStmt>("forLoop"))
-            FS->dump();
-    }
-};
-
-class DeclPrinter : public MatchFinder::MatchCallback {
+// This class first collects all the matching classes, and then via its `rewrite` method rewrites them.
+class DefaultOperatorsRewriter : public MatchFinder::MatchCallback {
+    // Class for a single matching class
     struct Res {
-        SourceRange operatorRanges;
-        std::vector<std::string> recordNames;
+        // The position of the defaulted operator, needed to later replace it.
+        SourceRange operatorPosition;
+        // The name of the class (without enclosing namespaces)
+        std::string className;
+        // The names of all non-static members of the class.
         std::vector<std::string> fieldNames;
+        // The fully-qualified (including base-classes)
         std::vector<std::string> baseClassNames;
+        bool hasError = false;
     };
 
-    SourceRange activeSourceRange;
     std::vector<Res> matches;
 
     Rewriter &rewriter;
@@ -72,63 +67,53 @@ class DeclPrinter : public MatchFinder::MatchCallback {
     clang::DiagnosticsEngine &diagnosticsEngine;
 
 public :
-    DeclPrinter(Rewriter &rewr, const SourceManager &manager, DiagnosticsEngine &engine) : rewriter(rewr),
+    DefaultOperatorsRewriter(Rewriter &rewr, const SourceManager &manager, DiagnosticsEngine &engine) : rewriter(rewr),
         sourceManager(manager), diagnosticsEngine(engine) {
     }
 
+    // This method is called for each class that matches the matcher defined above.
     void run(const MatchFinder::MatchResult &Result) override {
-        //if (const RecordDecl *FS = Result.Nodes.getNodeAs<clang::RecordDecl>("record"))
-        //   FS->dump();
-
         const CXXRecordDecl *Decl = Result.Nodes.getNodeAs<clang::CXXRecordDecl>("record");
 
+        // Don't rewrite classes that are contained in included header files, only rewrite the currently active file.
         auto fileId = sourceManager.getFileID(Decl->getLocation());
         if (fileId != sourceManager.getMainFileID()) {
-            llvm::outs() << "skipping match in included file\n";
             return;
         }
-        //Decl->dump();
-        llvm::outs() << "keeping match in main source file\n";
-        auto rng = Decl->getSourceRange();
-        if (rng != activeSourceRange) {
-            activeSourceRange = rng;
-            matches.emplace_back();
-            matches.back().recordNames.push_back(Decl->getNameAsString());
-            for (const CXXBaseSpecifier &base: Decl->bases()) {
-                auto name = base.getType()->getAsCXXRecordDecl()->getQualifiedNameAsString();
-                llvm::outs() << "Found base class called " << name << '\n';
-                matches.back().baseClassNames.push_back(name);
-            }
-            for (const FieldDecl *Field :Decl->fields()) {
-                matches.back().fieldNames.push_back(Field->getNameAsString());
-                if (Field->getType()->isArrayType()) {
-                    unsigned diagID = diagnosticsEngine.getCustomDiagID(clang::DiagnosticsEngine::Error,
-                                                                        "Can't rewrite c-style array in a defaulted comparison. Please refactor to `std::array`");
-                    diagnosticsEngine.Report(sourceManager.getFileLoc(Field->getSourceRange().getBegin()), diagID);
-                }
+
+        // Append a results entry for the class that has been found.
+        matches.emplace_back();
+        matches.back().className = Decl->getNameAsString();
+        // Store all the base classes.
+        for (const CXXBaseSpecifier &base: Decl->bases()) {
+            auto name = base.getType()->getAsCXXRecordDecl()->getQualifiedNameAsString();
+            matches.back().baseClassNames.push_back(name);
+        }
+        // Store all the non-static data members
+        for (const FieldDecl *Field: Decl->fields()) {
+            matches.back().fieldNames.push_back(Field->getNameAsString());
+            if (Field->getType()->isArrayType()) {
+                unsigned diagID = diagnosticsEngine.getCustomDiagID(clang::DiagnosticsEngine::Error,
+                                                                    "Can't rewrite c-style array in a defaulted comparison. Please refactor to `std::array`");
+                matches.back().hasError = true;
+                diagnosticsEngine.Report(sourceManager.getFileLoc(Field->getSourceRange().getBegin()), diagID);
             }
         }
-        auto &m = matches.back();
-
+    // Store the position of the defaulted operator.
         if (const CXXMethodDecl *Decl = Result.Nodes.getNodeAs<clang::CXXMethodDecl>("method")) {
-            m.operatorRanges = Decl->getSourceRange();
-            //Decl->dump();
+            matches.back().operatorPosition = Decl->getSourceRange();
         }
     }
 
-    void printMembers() const {
-        for (const auto &m: matches) {
-            llvm::outs() << "Printing a struct of name " << m.recordNames.at(0);
-            for (const auto &s: m.fieldNames) {
-                llvm::outs() << "\n  " << s;
-            }
-            llvm::outs() << '\n';
-        }
-    }
-
+    // This function can be manually called once all the matching classes have been processed.
+    // It performs the actual rewrite.
     void rewrite() {
         for (const auto &m: matches) {
-            const auto &className = m.recordNames.at(0);
+            if (m.hasError) {
+                continue;
+            }
+            const auto &className = m.className;
+            // Set up the actual code string for the rewritten operator.
             std::string rewrite = "bool operator==(const " + className + "& otherRhs) const {\n";
             for (const auto &baseClass: m.baseClassNames) {
                 rewrite += "    if (!(static_cast<const " + baseClass + "&>(*this) == static_cast<const " + baseClass +
@@ -139,7 +124,7 @@ public :
                 rewrite += "    if (!(" + mem + " == otherRhs." + mem + ")) return false;\n";
             }
             rewrite += "    return true;\n  }";
-            rewriter.ReplaceText(m.operatorRanges, rewrite);
+            rewriter.ReplaceText(m.operatorPosition, rewrite);
         }
     }
 };
@@ -148,7 +133,7 @@ class MyASTConsumer : public ASTConsumer {
 public:
     using P = std::unique_ptr<Rewriter>;
 
-    MyASTConsumer(DeclPrinter &callback) : Callback(callback) {
+    MyASTConsumer(DefaultOperatorsRewriter &callback) : Callback(callback) {
         Finder.addMatcher(ClassMatcher, &Callback);
     }
 
@@ -157,35 +142,31 @@ public:
         Finder.matchAST(Context);
     }
 
-    ~MyASTConsumer() {
-        //Callback.printMembers();
-        //Callback.rewrite();
-        //Rewrite.getEditBuffer(Rewrite->getSourceMgr().getMainFileID()).write (llvm::outs());
-    }
-
 private:
     //Rewriter& Rewrite;
-    DeclPrinter &Callback;
+    DefaultOperatorsRewriter &Callback;
     MatchFinder Finder;
 };
 
-class MyFrontendAction : public ASTFrontendAction {
+// This class handles inputs on a per-file base.
+class RewriteDefaultOperatorsFrontendAction : public ASTFrontendAction {
     std::unique_ptr<Rewriter> Rewrite = std::make_unique<Rewriter>();
     const SourceManager *SM;
-    std::unique_ptr<DeclPrinter> Printer;
+    std::unique_ptr<DefaultOperatorsRewriter> defaultOperatorsRewriter;
 
 public:
+    // This function sets up the `DefaultOperatorsRewriter`.
     std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(
         clang::CompilerInstance &CI, llvm::StringRef InFile) override {
         // Initialize the Rewriter with the SourceManager from the CompilerInstance
         SM = &CI.getSourceManager();
-        Printer = std::make_unique<DeclPrinter>(*Rewrite, *SM, CI.getDiagnostics());
+        defaultOperatorsRewriter = std::make_unique<DefaultOperatorsRewriter>(*Rewrite, *SM, CI.getDiagnostics());
 
         // Set the rewriter's buffer to the file being processed
         Rewrite->setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
 
         // Set up the callback for replacing text in the source code
-        return std::make_unique<MyASTConsumer>(*Printer);
+        return std::make_unique<MyASTConsumer>(*defaultOperatorsRewriter);
     }
 
     // TODO<joka921> The following was suggested by ChatGPT to modify the files in place.
@@ -196,13 +177,8 @@ public:
 
     // Save the modified source code back to the file
     void EndSourceFileAction() override {
-        Printer->rewrite();
+        defaultOperatorsRewriter->rewrite();
         // Write the modified content back to the original file
-        llvm::errs() << "Writing changes back to file...\n";
-
-        // Get the file path from the compiler instance
-        // Get the source manager from the compiler instance
-        //const SourceManager &SM = getCompilerInstance().getSourceManager();
 
         // Get the location of the main file (source file)
         SourceLocation mainFileLoc = SM->getLocForStartOfFile(SM->getMainFileID());
@@ -210,7 +186,7 @@ public:
         // Get the file name from the source location
         const std::string filePath = SM->getFilename(mainFileLoc).str();
 
-        // Get the edit buffer that holds the modified source
+        // Get the edit buffer that holds the modified source (it has been filled by the call to `rewrite` above.
         const RewriteBuffer &RewriteBuf = Rewrite->getEditBuffer(SM->getMainFileID());
 
         // Open the file for writing
@@ -226,6 +202,7 @@ public:
     }
 };
 
+// Main function that sets up everything and runs the file.
 int main(int argc, const char **argv) {
     auto ExpectedParser = CommonOptionsParser::create(argc, argv, MyToolCategory);
     if (!ExpectedParser) {
@@ -236,7 +213,7 @@ int main(int argc, const char **argv) {
     CommonOptionsParser &OptionsParser = ExpectedParser.get();
     ClangTool Tool(OptionsParser.getCompilations(),
                    OptionsParser.getSourcePathList());
-    auto tool = newFrontendActionFactory<MyFrontendAction>();
+    auto tool = newFrontendActionFactory<RewriteDefaultOperatorsFrontendAction>();
     int result = Tool.run(tool.get());
     return result;
 }

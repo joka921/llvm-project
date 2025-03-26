@@ -1,12 +1,4 @@
-struct C {
-  int x;
-  bool operator==(const C&) const = default;
-  bool f;
-  static int s;
-  unsigned d = 3;
-  int arr[3];
-};
-
+#include "./joka-examples.h"
 struct D {
   void f() {}
   bool operator==(const D&) const { return true;}
@@ -15,7 +7,13 @@ struct D {
 
 struct E {
   int ex;
-  bool operator==(const E&) const = default;
+  bool operator==(const E& otherRhs) const {
+    if (ex != otherRhs.ex) return false;
+    if (ef != otherRhs.ef) return false;
+    if (ed != otherRhs.ed) return false;
+    if (earr != otherRhs.earr) return false;
+    return true;
+  };
   bool ef;
   static int s;
   unsigned ed = 3;

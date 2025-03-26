@@ -7,7 +7,9 @@
 namespace outer {
 namespace blix {
 struct Blix {
- bool operator==(const Blix&) const = default;
+ bool operator==(const Blix& otherRhs) const {
+    return true;
+  };
  };
  }
 
@@ -18,14 +20,12 @@ struct C : public blix::Blix {
     if (!(x == otherRhs.x)) return false;
     if (!(f == otherRhs.f)) return false;
     if (!(d == otherRhs.d)) return false;
-    if (!(arr == otherRhs.arr)) return false;
     return true;
   };
 
     bool f;
     static int s;
     unsigned d = 3;
-    int arr[3][4];
 };
 }
 

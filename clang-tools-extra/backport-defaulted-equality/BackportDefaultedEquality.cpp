@@ -38,11 +38,11 @@ static StatementMatcher LoopMatcher =
         forStmt(hasLoopInit(declStmt(hasSingleDecl(varDecl(
             hasInitializer(integerLiteral(equals(0)))))))).bind("forLoop");
 
-static DeclarationMatcher ClassMatcher = cxxRecordDecl(allOf(forEach(fieldDecl().bind("field")),
-                                                             hasMethod(cxxMethodDecl(
-                                                                 allOf(hasName("operator=="), isDefaulted())).bind(
-                                                                 "method"))
-        ))
+static DeclarationMatcher ClassMatcher = cxxRecordDecl(
+            hasMethod(cxxMethodDecl(
+                allOf(hasName("operator=="), isDefaulted())).bind(
+                "method"))
+        )
         .
         bind(
             "record"
@@ -68,8 +68,8 @@ class DeclPrinter : public MatchFinder::MatchCallback {
     std::vector<Res> matches;
 
     Rewriter &rewriter;
-    clang::DiagnosticsEngine &diagnosticsEngine;
     const SourceManager &sourceManager;
+    clang::DiagnosticsEngine &diagnosticsEngine;
 
 public :
     DeclPrinter(Rewriter &rewr, const SourceManager &manager, DiagnosticsEngine &engine) : rewriter(rewr),
@@ -113,14 +113,6 @@ public :
         if (const CXXMethodDecl *Decl = Result.Nodes.getNodeAs<clang::CXXMethodDecl>("method")) {
             m.operatorRanges = Decl->getSourceRange();
             //Decl->dump();
-        }
-        if (const FieldDecl *Field = Result.Nodes.getNodeAs<clang::FieldDecl>("field")) {
-            m.fieldNames.push_back(Field->getNameAsString());
-            if (Field->getType()->isArrayType()) {
-                unsigned diagID = diagnosticsEngine.getCustomDiagID(clang::DiagnosticsEngine::Error,
-                                                                    "Can't rewrite c-style array in a defaulted comparison. Please refactor to `std::array`");
-                diagnosticsEngine.Report(sourceManager.getFileLoc(Field->getSourceRange().getBegin()), diagID);
-            }
         }
     }
 

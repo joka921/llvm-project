@@ -7,12 +7,18 @@
 namespace outer {
 namespace blix {
 struct Blix {
- bool operator==(const Blix& otherRhs) const {
-    return true;
-  };
+ bool operator<=>(const Blix& otherRhs) const = default;
  };
  }
 
+ struct Bla {
+template <typename T, int NumColumns = 0>
+class Templated {
+  bool operator==(const Templated& ) const {
+    return true;
+  }
+};
+};
 struct C : public blix::Blix {
     int x;
     bool operator==(const C& otherRhs) const {

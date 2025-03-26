@@ -37,7 +37,7 @@ static cl::extrahelp MoreHelp("\nMore help text...\n");
 // A matcher that matches a C++ class with a defaulted `operator==`.
 static DeclarationMatcher ClassMatcher = cxxRecordDecl(
             hasMethod(cxxMethodDecl(
-                allOf(hasName("operator=="), isDefaulted())).bind(
+                allOf(unless(isImplicit()), hasName("operator=="), isDefaulted())).bind(
                 "method"))
         )
         .
@@ -101,6 +101,8 @@ public :
         }
     // Store the position of the defaulted operator.
         if (const CXXMethodDecl *Decl = Result.Nodes.getNodeAs<clang::CXXMethodDecl>("method")) {
+            auto name = Decl->getNameAsString();
+            outs() << "foudn operator with name '" << name << "'\n";
             matches.back().operatorPosition = Decl->getSourceRange();
         }
     }
@@ -114,7 +116,8 @@ public :
             }
             const auto &className = m.className;
             // Set up the actual code string for the rewritten operator.
-            std::string rewrite = "bool operator==(const " + className + "& otherRhs) const {\n";
+            std::string nameOfOther = m.baseClassNames.empty() && m.fieldNames.empty() ? "" : "otherRhs";
+            std::string rewrite = "bool operator==(const " + className + "& " + nameOfOther + ") const {\n";
             for (const auto &baseClass: m.baseClassNames) {
                 rewrite += "    if (!(static_cast<const " + baseClass + "&>(*this) == static_cast<const " + baseClass +
                         "&>(otherRhs))) return false;\n";

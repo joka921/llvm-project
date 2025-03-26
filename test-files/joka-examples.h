@@ -20,7 +20,7 @@ struct C : public blix::Blix {
     if (!(d == otherRhs.d)) return false;
     if (!(arr == otherRhs.arr)) return false;
     return true;
-  }
+  };
 
     bool f;
     static int s;

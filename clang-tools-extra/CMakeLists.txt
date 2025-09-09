@@ -50,3 +50,4 @@ if(CLANG_INCLUDE_TESTS)
 endif()
 
 add_subdirectory(backport-defaulted-equality)
+add_subdirectory(rewrite-generators)

@@ -57,7 +57,8 @@ class DefaultOperatorsRewriter : public MatchFinder::MatchCallback {
     // Class for a single matching class
     struct Res {
         // The position of the defaulted operator, needed to later replace it.
-        std::vector<std::pair<Ops, SourceRange> > operatorPosition;
+        // The bool means `isConstexpr`
+        std::vector<std::tuple<Ops, SourceRange, bool> > operatorPosition;
         // The name of the class (without enclosing namespaces)
         std::string className;
         // The names of all non-static members of the class.
@@ -138,7 +139,7 @@ public :
             auto name = Decl->getNameAsString();
             outs() << "foudn operator with name '" << name << "'\n";
             */
-            matches.back().operatorPosition.emplace_back(op, Decl->getSourceRange());
+            matches.back().operatorPosition.emplace_back(op, Decl->getSourceRange(), Decl->isConstexpr());
         }
     }
 
@@ -170,11 +171,12 @@ public :
     // This function can be manually called once all the matching classes have been processed.
     // It performs the actual rewrite.
     template<typename Match>
-    std::string getRewrite(const Match &m, Ops op) {
+    std::string getRewrite(const Match &m, Ops op, bool isConstexpr) {
         const auto &className = m.className;
         // Set up the actual code string for the rewritten operator.
         std::string nameOfOther = m.baseClassNames.empty() && m.fieldNames.empty() ? "" : "otherRhs";
-        std::string rewrite = "bool operator" + std::string{getRep(op)} + "(const " + className + "& " + nameOfOther + ") const {\n";
+    std::string constexprStr = isConstexpr ? "constexpr " : "";
+        std::string rewrite = constexprStr + "bool operator" + std::string{getRep(op)} + "(const " + className + "& " + nameOfOther + ") const {\n";
         for (const auto &baseClass: m.baseClassNames) {
             rewrite += getRewriteFragment("static_cast<const " + baseClass + "&>(*this)",
                                           "static_cast<const " + baseClass + "&>(otherRhs)", op);
@@ -190,14 +192,14 @@ public :
     void rewriteClass(const Res &m) {
         // Set up the actual code string for the rewritten operator.
         std::vector<std::pair<SourceRange, std::string> > rewrites;
-        for (const auto &[op, range]: m.operatorPosition) {
+        for (const auto &[op, range, isConstexpr]: m.operatorPosition) {
             auto it = std::find_if(rewrites.begin(), rewrites.end(),
                                    [&range = range](const auto &el) { return el.first == range; });
             if (it == rewrites.end()) {
                 rewrites.emplace_back(range, "");
                 it = rewrites.end() - 1;
             }
-            it->second += getRewrite(m, op);
+            it->second += getRewrite(m, op, isConstexpr);
         }
         for (const auto &[range, rewrite]: rewrites) {
             rewriter.ReplaceText(range, rewrite);

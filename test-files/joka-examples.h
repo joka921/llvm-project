@@ -15,22 +15,22 @@ struct Blix {
  };
 
 struct Blax {
-  bool operator==(const Blax& otherRhs) const {
+  constexpr bool operator==(const Blax& otherRhs) const {
     if (!(blubb ==  otherRhs.blubb)) { return false;}
     return true;
-  }bool operator<(const Blax& otherRhs) const {
+  }constexpr bool operator<(const Blax& otherRhs) const {
     if (!(blubb ==  otherRhs.blubb)) { return blubb < otherRhs.blubb;}
     return false;
-  }bool operator<=(const Blax& otherRhs) const {
+  }constexpr bool operator<=(const Blax& otherRhs) const {
     if (!(blubb ==  otherRhs.blubb)) { return blubb <= otherRhs.blubb;}
     return true;
-  }bool operator>(const Blax& otherRhs) const {
+  }constexpr bool operator>(const Blax& otherRhs) const {
     if (!(blubb ==  otherRhs.blubb)) { return blubb > otherRhs.blubb;}
     return false;
-  }bool operator>=(const Blax& otherRhs) const {
+  }constexpr bool operator>=(const Blax& otherRhs) const {
     if (!(blubb ==  otherRhs.blubb)) { return blubb >= otherRhs.blubb;}
     return true;
-  }bool operator!=(const Blax& otherRhs) const {
+  }constexpr bool operator!=(const Blax& otherRhs) const {
     if (!(blubb ==  otherRhs.blubb)) { return true;}
     return false;
   };

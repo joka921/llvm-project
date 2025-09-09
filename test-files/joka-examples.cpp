@@ -2,23 +2,23 @@
 struct D {
   void f() {}
   bool operator==(const D& otherRhs) const {
-    if (!(b == otherRhs.b)) return false;
+    if (!(b ==  otherRhs.b)) { return false;}
     return true;
   };
-  bool b;
-};
+    bool b;
+  };
 
-struct E {
-  int ex;
-  bool operator==(const E& otherRhs) const {
-    if (!(ex == otherRhs.ex)) return false;
-    if (!(ef == otherRhs.ef)) return false;
-    if (!(ed == otherRhs.ed)) return false;
+  struct E {
+    int ex;
+    bool operator==(const E& otherRhs) const {
+    if (!(ex ==  otherRhs.ex)) { return false;}
+    if (!(ef ==  otherRhs.ef)) { return false;}
+    if (!(ed ==  otherRhs.ed)) { return false;}
     return true;
   };
-  bool ef;
-  static int s;
-  unsigned ed = 3;
+    bool ef;
+    static int s;
+    unsigned ed = 3;
 };
 
 void f() {

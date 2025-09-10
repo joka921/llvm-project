@@ -88,6 +88,12 @@ public:
     }
 };
 
+struct ScopeInfo {
+    const CompoundStmt* compoundStmt;
+    std::vector<std::string> variablesInScope;
+    SourceLocation scopeEnd;
+};
+
 class CoroutineBodyRewriter : public RecursiveASTVisitor<CoroutineBodyRewriter> {
 private:
     const std::set<LocalVariable>& localVariables;
@@ -97,6 +103,8 @@ private:
     std::vector<std::pair<SourceRange, std::string>> declReplacements;
     std::vector<std::pair<SourceRange, std::string>> refReplacements;
     std::set<SourceLocation> processedDeclarations;
+    std::vector<ScopeInfo> scopeStack;
+    std::vector<std::pair<SourceLocation, std::string>> destructorInsertions;
 
 public:
     CoroutineBodyRewriter(const std::set<LocalVariable>& vars, Rewriter& rewr, const SourceManager& SM)
@@ -105,6 +113,40 @@ public:
         for (const auto& var : localVariables) {
             variableNames.insert(var.name);
         }
+    }
+
+    // Track compound statements (scopes)
+    bool VisitCompoundStmt(CompoundStmt* compoundStmt) {
+        std::cout << "  DEBUG: Entering scope (CompoundStmt)\n";
+        
+        // Create scope info
+        ScopeInfo scope;
+        scope.compoundStmt = compoundStmt;
+        scope.scopeEnd = compoundStmt->getRBracLoc();
+        
+        // Push scope onto stack
+        scopeStack.push_back(scope);
+        
+        // Traverse children manually to have control over when we pop the scope
+        for (auto* child : compoundStmt->children()) {
+            if (child) {
+                TraverseStmt(child);
+            }
+        }
+        
+        // Before popping scope, insert destructor calls
+        if (!scopeStack.empty() && !scopeStack.back().variablesInScope.empty()) {
+            insertDestructorsForScope(scopeStack.back());
+        }
+        
+        // Pop scope
+        if (!scopeStack.empty()) {
+            scopeStack.pop_back();
+        }
+        
+        std::cout << "  DEBUG: Exiting scope (CompoundStmt)\n";
+        
+        return false; // We handled traversal manually
     }
 
     // Handle variable declarations - collect for later processing
@@ -121,6 +163,12 @@ public:
                         continue; // Already processed this declaration
                     }
                     processedDeclarations.insert(declLoc);
+                    
+                    // Add variable to current scope
+                    if (!scopeStack.empty()) {
+                        scopeStack.back().variablesInScope.push_back(varName);
+                        std::cout << "    DEBUG: Added variable '" << varName << "' to current scope\n";
+                    }
                     
                     // Build construct call
                     std::string constructCall = "_coro_state." + varName + ".construct(";
@@ -346,6 +394,29 @@ private:
         return rewriteVariableReferencesInText(exprText, excludeVar);
     }
 
+    void insertDestructorsForScope(const ScopeInfo& scope) {
+        std::cout << "    DEBUG: Inserting destructors for scope with " << scope.variablesInScope.size() << " variables\n";
+        
+        if (scope.variablesInScope.empty()) {
+            return;
+        }
+        
+        // Insert destructors in reverse order (LIFO - last constructed, first destroyed)
+        std::string destructorCalls;
+        for (auto it = scope.variablesInScope.rbegin(); it != scope.variablesInScope.rend(); ++it) {
+            const std::string& varName = *it;
+            std::cout << "      DEBUG: Adding destructor call for variable: " << varName << "\n";
+            destructorCalls += "  _coro_state." + varName + ".destroy();\n";
+        }
+        
+        if (!destructorCalls.empty()) {
+            // Insert before the closing brace of the scope
+            SourceLocation insertLoc = scope.scopeEnd;
+            destructorInsertions.emplace_back(insertLoc, destructorCalls);
+            std::cout << "    DEBUG: Scheduled destructor insertions before scope end\n";
+        }
+    }
+
     bool isPartOfDeclaration(const DeclRefExpr* declRef) {
         // Check if this reference is part of a declaration statement we're processing
         const Stmt* parent = declRef;
@@ -367,6 +438,7 @@ private:
 
 public:
     void applyReplacements() {
+        // First apply all the text replacements (declarations and references)
         std::vector<std::pair<SourceRange, std::string>> allReplacements;
         
         // Combine all replacements
@@ -383,6 +455,20 @@ public:
             std::cout << "  Applying replacement: " << replacement.second << "\n";
             rewriter.ReplaceText(replacement.first, replacement.second);
         }
+        
+        // Then apply destructor insertions
+        std::sort(destructorInsertions.begin(), destructorInsertions.end(),
+                 [&](const std::pair<SourceLocation, std::string>& a, const std::pair<SourceLocation, std::string>& b) {
+                     return sourceManager.getFileOffset(a.first) > sourceManager.getFileOffset(b.first);
+                 });
+        
+        for (const auto& insertion : destructorInsertions) {
+            std::cout << "  Inserting destructors: " << insertion.second;
+            rewriter.InsertTextBefore(insertion.first, insertion.second);
+        }
+        
+        std::cout << "  Applied " << allReplacements.size() << " replacements and " 
+                  << destructorInsertions.size() << " destructor insertions\n";
     }
 };
 

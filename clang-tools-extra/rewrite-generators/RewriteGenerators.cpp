@@ -167,13 +167,46 @@ private:
     }
 
     std::string generateCoroImplStruct(const CoroutineInfo& coro) {
-        std::string structCode = "\n  struct _detail_coro_impl {\n";
+        std::string structCode = "\n  // Templated wrapper for manual object lifecycle management\n";
+        structCode += "  template<typename T>\n";
+        structCode += "  struct _coro_storage {\n";
+        structCode += "    alignas(T) char buffer[sizeof(T)];\n";
+        structCode += "    bool constructed = false;\n";
+        structCode += "\n";
+        structCode += "    template<typename... Args>\n";
+        structCode += "    void construct(Args&&... args) {\n";
+        structCode += "      new(buffer) T(std::forward<Args>(args)...);\n";
+        structCode += "      constructed = true;\n";
+        structCode += "    }\n";
+        structCode += "\n";
+        structCode += "    void destroy() {\n";
+        structCode += "      if (constructed) {\n";
+        structCode += "        reinterpret_cast<T*>(buffer)->~T();\n";
+        structCode += "        constructed = false;\n";
+        structCode += "      }\n";
+        structCode += "    }\n";
+        structCode += "\n";
+        structCode += "    T& get() {\n";
+        structCode += "      return *reinterpret_cast<T*>(buffer);\n";
+        structCode += "    }\n";
+        structCode += "\n";
+        structCode += "    const T& get() const {\n";
+        structCode += "      return *reinterpret_cast<const T*>(buffer);\n";
+        structCode += "    }\n";
+        structCode += "\n";
+        structCode += "    ~_coro_storage() {\n";
+        structCode += "      destroy();\n";
+        structCode += "    }\n";
+        structCode += "  };\n";
+        structCode += "\n";
+        
+        structCode += "  struct _detail_coro_impl {\n";
         
         if (coro.localVariables.empty()) {
             structCode += "    // No local variables found in this coroutine\n";
         } else {
             for (const auto& var : coro.localVariables) {
-                structCode += "    " + var.type + " " + var.name + "{};\n";
+                structCode += "    _coro_storage<" + var.type + "> " + var.name + ";\n";
             }
         }
         

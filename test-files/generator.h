@@ -321,36 +321,38 @@ bool co_await_impl(auto&& awaiter, auto handle) {
                   "await_suspend with symmetric transfer is not yet supported");
   }
 }
-#define CO_YIELD(value)                                   \
+
+#define CO_YIELD(index, value)                                   \
+  // TODO<joka921> Fix the dangling references in case we have an implicit conversion. \
   {                                                       \
     auto&& awaiter = promise().yield_value(value);        \
-    curState = __LINE__;                                  \
+    this->curState = index;                                  \
     if (!co_await_impl(awaiter, Hdl::from_promise(pt))) { \
       return;                                             \
     }                                                     \
   }                                                       \
   [[fallthrough]];                                        \
-  case __LINE__:
+  case index:
 
-template <typename Derived, typename PromiseType, typename... payloadVars>
-struct GeneratorStateMachineMixin {
+template <typename Derived, typename PromiseType, typename StateType>
+struct CoroImpl {
   HandleFrame frm;
   PromiseType pt;
   static void CHECK() {
-    static_assert(offsetof(GeneratorStateMachineMixin, pt) -
-                      offsetof(GeneratorStateMachineMixin, frm) ==
+    static_assert(offsetof(CoroImpl, pt) -
+                      offsetof(CoroImpl, frm) ==
                   sizeof(HandleFrame));
   }
   size_t curState = 0;
-  std::tuple<payloadVars...> payLoad;
+  StateType state;
   using Hdl = Handle<PromiseType>;
 
   PromiseType& promise() { return pt; }
 
   static auto cast(void* blubb) {
-    return static_cast<Derived*>(reinterpret_cast<GeneratorStateMachineMixin*>(
+    return static_cast<Derived*>(reinterpret_cast<CoroImpl*>(
         reinterpret_cast<char*>(blubb) -
-        offsetof(GeneratorStateMachineMixin, frm)));
+        offsetof(CoroImpl, frm)));
   }
 
   static void resume(void* blubb) { cast(blubb)->doStep(); }
@@ -362,12 +364,12 @@ struct GeneratorStateMachineMixin {
     return false;
   }
 
-  GeneratorStateMachineMixin() {
+  CoroImpl() {
     CHECK();
     frm.target = this;
-    frm.resumeFunc = &GeneratorStateMachineMixin::resume;
-    frm.destroyFunc = &GeneratorStateMachineMixin::destroy;
-    frm.doneFunc = &GeneratorStateMachineMixin::done;
+    frm.resumeFunc = &CoroImpl::resume;
+    frm.destroyFunc = &CoroImpl::destroy;
+    frm.doneFunc = &CoroImpl::done;
   }
 
   static auto make() {
@@ -377,22 +379,21 @@ struct GeneratorStateMachineMixin {
   }
 };
 
-#define GENERATOR_HEADER(returnType, ...)                              \
+#define COROUTINE_HEADER(returnType, StateType)                              \
   using PromiseType =                                                  \
-      cppcoro::generator<returnType, int, Handle>::promise_type;       \
+      returnType::promise_type;       \
   struct GeneratorStateMachine                                         \
-      : GeneratorStateMachineMixin<GeneratorStateMachine, PromiseType, \
-                                   __VA_ARGS__> {                      \
-    void doStep() {
-#define GENERATOR_FOOTER \
+      : CoroImpl<GeneratorStateMachine, PromiseType, \
+                                   StateType> {                      \
+    void doStep() { \
+switch (this->curState) {      \
+case 0:
+#define COROUTINE_FOOTER \
   }                      \
   }                      \
   }                      \
   ;                      \
   return GeneratorStateMachine::make();
-#define GENERATOR_HEADER_2 \
-  switch (curState) {      \
-    case 0:
 
 template<typename T>
 struct _coro_storage {

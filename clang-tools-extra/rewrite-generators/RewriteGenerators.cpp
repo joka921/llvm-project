@@ -94,6 +94,17 @@ struct ScopeInfo {
     SourceLocation scopeEnd;
 };
 
+struct CoroutineStatement {
+    enum Type { YIELD, AWAIT };
+    Type type;
+    const Stmt* stmt;  // CoawaitExpr* or CoyieldExpr*
+    const Expr* operand; // The expression being yielded/awaited
+    unsigned index;
+    SourceLocation keywordLoc;
+    SourceLocation operandStart;
+    SourceLocation operandEnd;
+};
+
 class CoroutineBodyRewriter : public RecursiveASTVisitor<CoroutineBodyRewriter> {
 private:
     const std::set<LocalVariable>& localVariables;
@@ -105,10 +116,12 @@ private:
     std::set<SourceLocation> processedDeclarations;
     std::vector<ScopeInfo> scopeStack;
     std::vector<std::pair<SourceLocation, std::string>> destructorInsertions;
+    std::vector<CoroutineStatement> coroutineStatements;
+    unsigned nextCoroStatementIndex;
 
 public:
     CoroutineBodyRewriter(const std::set<LocalVariable>& vars, Rewriter& rewr, const SourceManager& SM)
-        : localVariables(vars), rewriter(rewr), sourceManager(SM) {
+        : localVariables(vars), rewriter(rewr), sourceManager(SM), nextCoroStatementIndex(0) {
         // Create a set of variable names for quick lookup
         for (const auto& var : localVariables) {
             variableNames.insert(var.name);
@@ -187,6 +200,58 @@ public:
             }
         }
         return true; // Continue traversing
+    }
+
+    // Handle co_yield expressions
+    bool VisitCoyieldExpr(CoyieldExpr* coyield) {
+        std::cout << "  Found co_yield expression\n";
+        
+        CoroutineStatement coroStmt;
+        coroStmt.type = CoroutineStatement::YIELD;
+        coroStmt.stmt = coyield;
+        coroStmt.operand = coyield->getOperand();
+        coroStmt.index = nextCoroStatementIndex++;
+        
+        // Find the location of the co_yield keyword
+        coroStmt.keywordLoc = coyield->getKeywordLoc();
+        
+        // Get the operand range
+        if (coroStmt.operand) {
+            coroStmt.operandStart = coroStmt.operand->getBeginLoc();
+            coroStmt.operandEnd = coroStmt.operand->getEndLoc();
+        }
+        
+        coroutineStatements.push_back(coroStmt);
+        
+        std::cout << "    DEBUG: Added co_yield with index " << coroStmt.index << "\n";
+        
+        return true;
+    }
+    
+    // Handle co_await expressions  
+    bool VisitCoawaitExpr(CoawaitExpr* coawait) {
+        std::cout << "  Found co_await expression\n";
+        
+        CoroutineStatement coroStmt;
+        coroStmt.type = CoroutineStatement::AWAIT;
+        coroStmt.stmt = coawait;
+        coroStmt.operand = coawait->getOperand();
+        coroStmt.index = nextCoroStatementIndex++;
+        
+        // Find the location of the co_await keyword
+        coroStmt.keywordLoc = coawait->getKeywordLoc();
+        
+        // Get the operand range
+        if (coroStmt.operand) {
+            coroStmt.operandStart = coroStmt.operand->getBeginLoc();
+            coroStmt.operandEnd = coroStmt.operand->getEndLoc();
+        }
+        
+        coroutineStatements.push_back(coroStmt);
+        
+        std::cout << "    DEBUG: Added co_await with index " << coroStmt.index << "\n";
+        
+        return true;
     }
 
     // Handle variable references - but not in declaration contexts
@@ -436,6 +501,55 @@ private:
         return false;
     }
 
+    void applyCoroutineStatementReplacements() {
+        std::cout << "  DEBUG: Applying coroutine statement replacements for " << coroutineStatements.size() << " statements\n";
+        
+        // Sort coroutine statements by location in reverse order to avoid invalidating positions  
+        std::sort(coroutineStatements.begin(), coroutineStatements.end(),
+                 [&](const CoroutineStatement& a, const CoroutineStatement& b) {
+                     return sourceManager.getFileOffset(a.keywordLoc) > sourceManager.getFileOffset(b.keywordLoc);
+                 });
+        
+        for (const auto& coroStmt : coroutineStatements) {
+            if (coroStmt.type == CoroutineStatement::YIELD) {
+                std::cout << "    DEBUG: Replacing co_yield with CO_YIELD(" << coroStmt.index << ", ...)\n";
+                
+                // Replace "co_yield" with "CO_YIELD(index, "
+                std::string macroStart = "CO_YIELD(" + std::to_string(coroStmt.index) + ", ";
+                
+                // Find the end of "co_yield" keyword
+                SourceLocation keywordEnd = Lexer::getLocForEndOfToken(coroStmt.keywordLoc, 0, sourceManager, LangOptions());
+                SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
+                rewriter.ReplaceText(keywordRange, macroStart);
+                
+                // Add closing parenthesis after the operand
+                if (coroStmt.operand) {
+                    SourceLocation operandEnd = Lexer::getLocForEndOfToken(coroStmt.operandEnd, 0, sourceManager, LangOptions());
+                    rewriter.InsertTextBefore(operandEnd, ")");
+                }
+                
+            } else if (coroStmt.type == CoroutineStatement::AWAIT) {
+                std::cout << "    DEBUG: Replacing co_await with CO_AWAIT(" << coroStmt.index << ", ...)\n";
+                
+                // Replace "co_await" with "CO_AWAIT(index, "
+                std::string macroStart = "CO_AWAIT(" + std::to_string(coroStmt.index) + ", ";
+                
+                // Find the end of "co_await" keyword  
+                SourceLocation keywordEnd = Lexer::getLocForEndOfToken(coroStmt.keywordLoc, 0, sourceManager, LangOptions());
+                SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
+                rewriter.ReplaceText(keywordRange, macroStart);
+                
+                // Add closing parenthesis after the operand
+                if (coroStmt.operand) {
+                    SourceLocation operandEnd = Lexer::getLocForEndOfToken(coroStmt.operandEnd, 0, sourceManager, LangOptions());
+                    rewriter.InsertTextBefore(operandEnd, ")");
+                }
+            }
+        }
+        
+        std::cout << "  Applied " << coroutineStatements.size() << " coroutine statement replacements\n";
+    }
+
 public:
     void applyReplacements() {
         // First apply all the text replacements (declarations and references)
@@ -467,8 +581,12 @@ public:
             rewriter.InsertTextBefore(insertion.first, insertion.second);
         }
         
-        std::cout << "  Applied " << allReplacements.size() << " replacements and " 
-                  << destructorInsertions.size() << " destructor insertions\n";
+        // Finally apply coroutine statement replacements
+        applyCoroutineStatementReplacements();
+        
+        std::cout << "  Applied " << allReplacements.size() << " replacements, " 
+                  << destructorInsertions.size() << " destructor insertions, and "
+                  << coroutineStatements.size() << " coroutine statement replacements\n";
     }
     
     // Getter methods for accessing replacements without applying them

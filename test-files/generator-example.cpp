@@ -17,19 +17,25 @@ cppcoro::generator<int> gen() {
 */
 
 cppcoro::generator<int> gen() {
-  // _coro_storage struct assumed to be available in global namespace
-  struct _detail_coro_impl {
-    _coro_storage<class std::vector<int, class std::allocator<int>>> v;
-    _coro_storage<int> x;
-  } _coro_state;
+    // _coro_storage and CoroImpl assumed to be available in global namespace
+    struct _detail_coro_impl {
+        _coro_storage<class std::vector<int, class std::allocator<int>>> v;
+        _coro_storage<int> x;
+    };
 
+    class _detail_coro_statemachine_impl : public CoroImpl<_detail_coro_impl> {
+    public:
+        using CoroImpl<_detail_coro_impl>::CoroImpl; // Inherit constructors
 
-  _coro_state.x.construct(3);;
-  {
-    _coro_state.v.construct(std::initializer_list{3, 2});
-    co_yield _coro_state.v.get()[1] + _coro_state.x.get();
-    _coro_state.v.destroy();
-}
-  co_yield _coro_state.x.get()-2;
-  _coro_state.x.destroy();
+        void run() {
+            this->state.x.construct(3); {
+                this->state.v.construct({3, 2});;
+                co_yield  this->state.v.get()[1] + this->state.x.get();
+                this->state.v.destroy();
+            }
+            co_yield
+            this->state.x.get() - 2;
+            this->state.x.destroy();
+        }
+    };
 }

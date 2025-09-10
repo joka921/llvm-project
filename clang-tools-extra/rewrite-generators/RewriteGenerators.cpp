@@ -170,8 +170,8 @@ public:
                         std::cout << "    DEBUG: Added variable '" << varName << "' to current scope\n";
                     }
                     
-                    // Build construct call
-                    std::string constructCall = "_coro_state." + varName + ".construct(";
+                    // Build construct call  
+                    std::string constructCall = "this->state." + varName + ".construct(";
                     
                     if (varDecl->hasInit()) {
                         std::string initCode = getInitializationArguments(varDecl);
@@ -199,7 +199,7 @@ public:
                 if (!isPartOfDeclaration(declRef)) {
                     std::cout << "  Found variable reference: " << varName << "\n";
                     
-                    std::string getCall = "_coro_state." + varName + ".get()";
+                    std::string getCall = "this->state." + varName + ".get()";
                     SourceRange refRange = declRef->getSourceRange();
                     refReplacements.emplace_back(refRange, getCall);
                 }
@@ -283,7 +283,7 @@ private:
                 continue; // Don't replace the variable we're currently declaring
             }
             
-            std::string replacement = "_coro_state." + varName + ".get()";
+            std::string replacement = "this->state." + varName + ".get()";
             
             size_t pos = 0;
             while ((pos = result.find(varName, pos)) != std::string::npos) {
@@ -352,7 +352,7 @@ private:
         // Replace variable references in the expression
         std::string originalText = exprText;
         for (const auto& varName : variableNames) {
-            std::string replacement = "_coro_state." + varName + ".get()";
+            std::string replacement = "this->state." + varName + ".get()";
             
             size_t pos = 0;
             while ((pos = exprText.find(varName, pos)) != std::string::npos) {
@@ -406,7 +406,7 @@ private:
         for (auto it = scope.variablesInScope.rbegin(); it != scope.variablesInScope.rend(); ++it) {
             const std::string& varName = *it;
             std::cout << "      DEBUG: Adding destructor call for variable: " << varName << "\n";
-            destructorCalls += "  _coro_state." + varName + ".destroy();\n";
+            destructorCalls += "    this->state." + varName + ".destroy();\n";
         }
         
         if (!destructorCalls.empty()) {
@@ -469,6 +469,19 @@ public:
         
         std::cout << "  Applied " << allReplacements.size() << " replacements and " 
                   << destructorInsertions.size() << " destructor insertions\n";
+    }
+    
+    // Getter methods for accessing replacements without applying them
+    const std::vector<std::pair<SourceRange, std::string>>& getDeclReplacements() const {
+        return declReplacements;
+    }
+    
+    const std::vector<std::pair<SourceRange, std::string>>& getRefReplacements() const {
+        return refReplacements;
+    }
+    
+    const std::vector<std::pair<SourceLocation, std::string>>& getDestructorInsertions() const {
+        return destructorInsertions;
     }
 };
 
@@ -551,7 +564,7 @@ private:
     }
 
     std::string generateCoroImplStruct(const CoroutineInfo& coro) {
-        std::string structCode = "\n  // _coro_storage struct assumed to be available in global namespace\n";
+        std::string structCode = "\n  // _coro_storage and CoroImpl assumed to be available in global namespace\n";
         
         /*
         // Commented out - assumed to be available globally
@@ -588,6 +601,7 @@ private:
         structCode += "\n";
         */
         
+        // Generate the data structure
         structCode += "  struct _detail_coro_impl {\n";
         
         if (coro.localVariables.empty()) {
@@ -598,7 +612,16 @@ private:
             }
         }
         
-        structCode += "  } _coro_state;\n\n";
+        structCode += "  };\n\n";
+        
+        // Generate the state machine class with run method header
+        // The coroutine body will follow immediately after this
+        structCode += "  class _detail_coro_statemachine_impl : public CoroImpl<_detail_coro_impl> {\n";
+        structCode += "  public:\n";
+        structCode += "    using CoroImpl<_detail_coro_impl>::CoroImpl; // Inherit constructors\n";
+        structCode += "\n";
+        structCode += "    void run() { ";
+        
         return structCode;
     }
 
@@ -696,10 +719,156 @@ public:
             // First traverse to collect all replacements
             bodyRewriter.TraverseStmt(const_cast<Stmt*>(bodyStmt));
             
-            // Then apply all replacements at once
+            // Apply all the variable rewrites in place (construct/destroy calls, get() access)
+            std::cout << "  DEBUG: Applying all variable transformations in place\n";
             bodyRewriter.applyReplacements();
             
+            // Now wrap the transformed code with run() method braces
+            std::cout << "  DEBUG: Wrapping transformed code with run() method\n";
+            wrapBodyWithRunMethod(coro);
+            
             std::cout << "Completed body rewriting for: " << coro.function->getQualifiedNameAsString() << "\n";
+        }
+    }
+    
+    std::string getTransformedBodyText(const Stmt* bodyStmt, CoroutineBodyRewriter& bodyRewriter) {
+        // Get the compound statement body
+        if (auto* compoundStmt = dyn_cast<CompoundStmt>(bodyStmt)) {
+            // Get the inner part (without the outer braces)
+            SourceLocation startLoc = Lexer::getLocForEndOfToken(compoundStmt->getLBracLoc(), 0, sourceManager, langOptions);
+            SourceLocation endLoc = compoundStmt->getRBracLoc();
+            
+            SourceRange innerRange(startLoc, endLoc);
+            CharSourceRange charRange = CharSourceRange::getCharRange(innerRange);
+            std::string bodyText = Lexer::getSourceText(charRange, sourceManager, langOptions).str();
+            
+            // Apply transformations in memory
+            std::string transformedText = applyTransformationsInMemory(bodyText, bodyRewriter);
+            
+            return transformedText;
+        }
+        return "";
+    }
+    
+    std::string applyTransformationsInMemory(const std::string& originalText, CoroutineBodyRewriter& bodyRewriter) {
+        std::string result = originalText;
+        
+        // Get all the replacements that would have been made
+        const auto& declReplacements = bodyRewriter.getDeclReplacements();
+        const auto& refReplacements = bodyRewriter.getRefReplacements();
+        const auto& destructorInsertions = bodyRewriter.getDestructorInsertions();
+        
+        // For now, we'll do simple text-based transformations
+        // In a full implementation, we would need more sophisticated source location mapping
+        
+        std::cout << "    DEBUG: Original text length: " << originalText.length() << "\n";
+        std::cout << "    DEBUG: Found " << declReplacements.size() << " declaration replacements\n";
+        std::cout << "    DEBUG: Found " << refReplacements.size() << " reference replacements\n";
+        std::cout << "    DEBUG: Found " << destructorInsertions.size() << " destructor insertions\n";
+        
+        // Simple regex-based replacement for now
+        // TODO: Implement proper source location mapping for precise replacements
+        
+        return result;
+    }
+    
+    void replaceEntireBodyWithStateMachine(const CoroutineInfo& coro) {
+        std::cout << "  DEBUG: Replacing entire body with state machine instantiation\n";
+        
+        const Stmt* originalBody = coro.function->getBody();
+        if (auto* coroBody = dyn_cast<CoroutineBodyStmt>(originalBody)) {
+            originalBody = coroBody->getBody();
+        }
+        
+        if (auto* compoundStmt = dyn_cast<CompoundStmt>(originalBody)) {
+            SourceLocation lbraceLoc = compoundStmt->getLBracLoc();
+            SourceLocation rbraceLoc = compoundStmt->getRBracLoc();
+            
+            std::cout << "  DEBUG: LBrace location: " << lbraceLoc.printToString(sourceManager) << "\n";
+            std::cout << "  DEBUG: RBrace location: " << rbraceLoc.printToString(sourceManager) << "\n";
+            
+            // Validate basic locations
+            if (lbraceLoc.isInvalid() || rbraceLoc.isInvalid()) {
+                std::cout << "  ERROR: Invalid brace locations\n";
+                return;
+            }
+            
+            // Get the full range including braces
+            SourceRange fullRange = compoundStmt->getSourceRange();
+            std::cout << "  DEBUG: Full compound statement range: " 
+                      << fullRange.getBegin().printToString(sourceManager) << " to "
+                      << fullRange.getEnd().printToString(sourceManager) << "\n";
+            
+            // Get the original text to see what we're working with
+            CharSourceRange charRange = CharSourceRange::getCharRange(fullRange);
+            std::string originalText = Lexer::getSourceText(charRange, sourceManager, langOptions).str();
+            std::cout << "  DEBUG: Original compound statement text: '" << originalText << "'\n";
+            std::cout << "  DEBUG: Original text length: " << originalText.length() << "\n";
+            
+            // Calculate file offsets for debugging
+            unsigned startOffset = sourceManager.getFileOffset(fullRange.getBegin());
+            unsigned endOffset = sourceManager.getFileOffset(fullRange.getEnd());
+            std::cout << "  DEBUG: File offset range: " << startOffset << " to " << endOffset 
+                      << " (length: " << (endOffset - startOffset + 1) << ")\n";
+            
+            // Try a safer approach: replace the entire compound statement
+            std::string stateMachineCall = "{\n    _detail_coro_statemachine_impl stateMachine;\n    stateMachine.run();\n  }";
+            
+            std::cout << "  DEBUG: About to replace with: '" << stateMachineCall << "'\n";
+            std::cout << "  DEBUG: Replacement length: " << stateMachineCall.length() << "\n";
+            
+            // Use the full range instead of trying to calculate inner range
+                rewriter.ReplaceText(fullRange, stateMachineCall);
+            /*
+                try {
+                rewriter.ReplaceText(fullRange, stateMachineCall);
+                std::cout << "  DEBUG: Successfully replaced compound statement\n";
+            } catch (...) {
+                std::cout << "  ERROR: Exception during replacement\n";
+            }
+            */
+        }
+    }
+    
+
+    void wrapBodyWithRunMethod(const CoroutineInfo& coro) {
+        std::cout << "  DEBUG: Adding closing braces after coroutine body for: " << coro.function->getQualifiedNameAsString() << "\n";
+        
+        const Stmt* bodyStmt = coro.function->getBody();
+        if (!bodyStmt) {
+            std::cout << "  ERROR: Function has no body to wrap\n";
+            return;
+        }
+        
+        // Handle CoroutineBodyStmt wrapper
+        if (auto* coroBody = dyn_cast<CoroutineBodyStmt>(bodyStmt)) {
+            bodyStmt = coroBody->getBody();
+        }
+        
+        if (auto* compoundStmt = dyn_cast<CompoundStmt>(bodyStmt)) {
+            SourceLocation rbraceLoc = compoundStmt->getRBracLoc();
+            
+            std::cout << "  DEBUG: Found compound statement closing brace\n";
+            std::cout << "  DEBUG: RBrace location: " << rbraceLoc.printToString(sourceManager) << "\n";
+            
+            if (rbraceLoc.isValid()) {
+                // Insert "} };" after the closing brace to close run method and class
+                // Find the location right after the closing brace
+                SourceLocation afterRbrace = Lexer::getLocForEndOfToken(rbraceLoc, 0, sourceManager, langOptions);
+                if (afterRbrace.isValid()) {
+                    std::string runMethodEnd = "\n  };\n }\n";
+                    rewriter.InsertTextBefore(afterRbrace, runMethodEnd);
+                    std::cout << "  DEBUG: Inserted closing braces after coroutine body\n";
+                } else {
+                    std::cout << "  ERROR: Could not find location after closing brace\n";
+                }
+                
+                std::cout << "  DEBUG: Successfully added closing braces\n";
+            } else {
+                std::cout << "  ERROR: Invalid closing brace location for compound statement\n";
+            }
+        } else {
+            std::cout << "  ERROR: Body is not a compound statement, cannot add closing braces\n";
         }
     }
 

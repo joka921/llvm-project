@@ -121,7 +121,7 @@ private:
 
 public:
     CoroutineBodyRewriter(const std::set<LocalVariable>& vars, Rewriter& rewr, const SourceManager& SM)
-        : localVariables(vars), rewriter(rewr), sourceManager(SM), nextCoroStatementIndex(0) {
+        : localVariables(vars), rewriter(rewr), sourceManager(SM), nextCoroStatementIndex(1) {
         // Create a set of variable names for quick lookup
         for (const auto& var : localVariables) {
             variableNames.insert(var.name);
@@ -634,6 +634,80 @@ private:
         collector.TraverseStmt(const_cast<Stmt*>(body));
     }
 
+    std::string replaceLastTemplateArgWithHandle(const std::string& returnType) {
+        std::cout << "    DEBUG: replaceLastTemplateArgWithHandle input: '" << returnType << "'\n";
+        
+        // Find the template arguments by looking for < and >
+        size_t openAngle = returnType.find('<');
+        if (openAngle == std::string::npos) {
+            std::cout << "    DEBUG: No template arguments found, returning unchanged\n";
+            return returnType;
+        }
+        
+        // Find the matching closing angle bracket
+        size_t closeAngle = returnType.rfind('>');
+        if (closeAngle == std::string::npos || closeAngle <= openAngle) {
+            std::cout << "    DEBUG: Invalid template syntax, returning unchanged\n";
+            return returnType;
+        }
+        
+        // Extract the template arguments part
+        std::string templateArgs = returnType.substr(openAngle + 1, closeAngle - openAngle - 1);
+        std::cout << "    DEBUG: Template arguments: '" << templateArgs << "'\n";
+        
+        // Parse template arguments (simple comma splitting, ignoring nested templates for now)
+        std::vector<std::string> args;
+        size_t start = 0;
+        int depth = 0;
+        for (size_t i = 0; i <= templateArgs.length(); ++i) {
+            if (i == templateArgs.length() || (templateArgs[i] == ',' && depth == 0)) {
+                if (i > start) {
+                    std::string arg = templateArgs.substr(start, i - start);
+                    // Trim whitespace
+                    size_t first = arg.find_first_not_of(" \t");
+                    size_t last = arg.find_last_not_of(" \t");
+                    if (first != std::string::npos && last != std::string::npos) {
+                        arg = arg.substr(first, last - first + 1);
+                    }
+                    args.push_back(arg);
+                }
+                start = i + 1;
+            } else if (templateArgs[i] == '<') {
+                depth++;
+            } else if (templateArgs[i] == '>') {
+                depth--;
+            }
+        }
+        
+        std::cout << "    DEBUG: Parsed " << args.size() << " template arguments:\n";
+        for (size_t i = 0; i < args.size(); ++i) {
+            std::cout << "      [" << i << "]: '" << args[i] << "'\n";
+        }
+        
+        if (args.empty()) {
+            std::cout << "    DEBUG: No template arguments found after parsing\n";
+            return returnType;
+        }
+        
+        // Replace the last argument with Handle
+        std::cout << "    DEBUG: Replacing last argument '" << args.back() << "' with 'Handle'\n";
+        args.back() = "Handle";
+        
+        // Reconstruct the type
+        std::string prefix = returnType.substr(0, openAngle + 1);
+        std::string suffix = returnType.substr(closeAngle);
+        
+        std::string newTemplateArgs;
+        for (size_t i = 0; i < args.size(); ++i) {
+            if (i > 0) newTemplateArgs += ", ";
+            newTemplateArgs += args[i];
+        }
+        
+        std::string result = prefix + newTemplateArgs + suffix;
+        std::cout << "    DEBUG: replaceLastTemplateArgWithHandle output: '" << result << "'\n";
+        return result;
+    }
+
     SourceLocation findStructInsertionPoint(const FunctionDecl* funcDecl) {
         std::cout << "DEBUG: findStructInsertionPoint called for function: " << funcDecl->getQualifiedNameAsString() << "\n";
         
@@ -682,6 +756,29 @@ private:
     }
 
     std::string generateCoroImplStruct(const CoroutineInfo& coro) {
+        // Extract the return type from the coroutine function
+        std::string returnType = "auto"; // Default fallback
+        if (coro.function) {
+            QualType retType = coro.function->getReturnType();
+            
+            // Use canonical type to handle implicitly defaulted template arguments
+            QualType canonicalType = retType.getCanonicalType();
+            
+            PrintingPolicy policy(astContext->getLangOpts());
+            policy.SuppressScope = false;
+            policy.PrintCanonicalTypes = true; // Print canonical types to see defaulted args
+            
+            std::string originalReturnType = canonicalType.getAsString(policy);
+            std::cout << "  DEBUG: Original canonical return type: " << originalReturnType << "\n";
+            
+            // Also print the non-canonical version for comparison
+            std::string nonCanonicalType = retType.getAsString(policy);
+            std::cout << "  DEBUG: Non-canonical return type: " << nonCanonicalType << "\n";
+            
+            // Replace last template argument with HANDLE (work on canonical type)
+            returnType = replaceLastTemplateArgWithHandle(originalReturnType);
+            std::cout << "  DEBUG: Modified return type: " << returnType << "\n";
+        }
         std::string structCode = "\n  // _coro_storage and CoroImpl assumed to be available in global namespace\n";
         
         /*
@@ -732,13 +829,12 @@ private:
         
         structCode += "  };\n\n";
         
-        // Generate the state machine class with run method header
+        // Add typedef to avoid comma issues in macro call
+        structCode += "  using _ActualCoroType = " + returnType + ";\n";
+        
+        // Generate the COROUTINE_HEADER macro call
         // The coroutine body will follow immediately after this
-        structCode += "  class _detail_coro_statemachine_impl : public CoroImpl<_detail_coro_impl> {\n";
-        structCode += "  public:\n";
-        structCode += "    using CoroImpl<_detail_coro_impl>::CoroImpl; // Inherit constructors\n";
-        structCode += "\n";
-        structCode += "    void run() { ";
+        structCode += "  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) ";
         
         return structCode;
     }
@@ -799,6 +895,45 @@ public:
         return true;
     }
 
+    void updateFunctionReturnType(const CoroutineInfo& coro) {
+        std::cout << "Updating function return type for: " << coro.function->getQualifiedNameAsString() << "\n";
+        
+        if (!coro.function) {
+            std::cout << "  ERROR: No function to update\n";
+            return;
+        }
+        
+        // Get the return type location
+        SourceRange returnTypeRange = coro.function->getReturnTypeSourceRange();
+        if (returnTypeRange.isInvalid()) {
+            std::cout << "  ERROR: Invalid return type source range\n";
+            return;
+        }
+        
+        // Use the same logic as generateCoroImplStruct to get the canonical type
+        QualType retType = coro.function->getReturnType();
+        QualType canonicalType = retType.getCanonicalType();
+        
+        PrintingPolicy policy(astContext->getLangOpts());
+        policy.SuppressScope = false;
+        policy.PrintCanonicalTypes = true;
+        
+        std::string originalReturnType = canonicalType.getAsString(policy);
+        
+        // Replace last template argument with Handle (same as typedef)
+        std::string modifiedReturnType = replaceLastTemplateArgWithHandle(originalReturnType);
+        
+        std::cout << "  DEBUG: Original canonical return type: " << originalReturnType << "\n";
+        std::cout << "  DEBUG: Modified return type: " << modifiedReturnType << "\n";
+        
+        if (originalReturnType != modifiedReturnType) {
+            rewriter.ReplaceText(returnTypeRange, modifiedReturnType);
+            std::cout << "  Updated function return type\n";
+        } else {
+            std::cout << "  Return type unchanged (no template arguments found)\n";
+        }
+    }
+
     void performRewrites() {
         for (const auto& coro : coroutines) {
             if (coro.hasError) {
@@ -811,6 +946,9 @@ public:
                 rewriter.InsertTextBefore(coro.insertionPoint, structCode);
                 std::cout << "Inserted _detail_coro_impl struct into " 
                          << coro.function->getQualifiedNameAsString() << "\n";
+                
+                // Update the function's return type before rewriting the body
+                updateFunctionReturnType(coro);
                 
                 // Now rewrite the coroutine body to use the storage wrappers
                 rewriteCoroutineBody(coro);
@@ -970,16 +1108,10 @@ public:
             std::cout << "  DEBUG: RBrace location: " << rbraceLoc.printToString(sourceManager) << "\n";
             
             if (rbraceLoc.isValid()) {
-                // Insert "} };" after the closing brace to close run method and class
-                // Find the location right after the closing brace
-                SourceLocation afterRbrace = Lexer::getLocForEndOfToken(rbraceLoc, 0, sourceManager, langOptions);
-                if (afterRbrace.isValid()) {
-                    std::string runMethodEnd = "\n  };\n }\n";
-                    rewriter.InsertTextBefore(afterRbrace, runMethodEnd);
-                    std::cout << "  DEBUG: Inserted closing braces after coroutine body\n";
-                } else {
-                    std::cout << "  ERROR: Could not find location after closing brace\n";
-                }
+                // Replace exactly one character (the closing brace) with COROUTINE_FOOTER + closing brace
+                std::string coroutineFooterAndBrace = "COROUTINE_FOOTER\n}";
+                rewriter.ReplaceText(rbraceLoc, 1, coroutineFooterAndBrace);
+                std::cout << "  DEBUG: Replaced closing brace with COROUTINE_FOOTER + brace\n";
                 
                 std::cout << "  DEBUG: Successfully added closing braces\n";
             } else {

@@ -70,7 +70,26 @@ public:
         // Create a new match entry
         matches.emplace_back();
         UsingEnumInfo &info = matches.back();
-        info.sourceRange = Decl->getSourceRange();
+        
+        // Extend the source range to include the semicolon
+        SourceRange range = Decl->getSourceRange();
+        SourceLocation endLoc = range.getEnd();
+        
+        // Find the semicolon after the declaration
+        SourceLocation semiLoc = endLoc.getLocWithOffset(1);
+        while (semiLoc.isValid()) {
+            const char *semiPtr = sourceManager.getCharacterData(semiLoc);
+            if (*semiPtr == ';') {
+                endLoc = semiLoc;
+                break;
+            }
+            if (*semiPtr == '\n' || *semiPtr == '\0') {
+                break;
+            }
+            semiLoc = semiLoc.getLocWithOffset(1);
+        }
+        
+        info.sourceRange = SourceRange(range.getBegin(), endLoc);
 
         // Get the enum declaration
         const EnumDecl *enumDecl = Decl->getEnumDecl();
@@ -82,7 +101,7 @@ public:
             return;
         }
 
-        info.enumName = enumDecl->getNameAsString();
+        info.enumName = enumDecl->getQualifiedNameAsString();
 
         // Collect all enumerators from the enum
         for (const EnumConstantDecl *enumConstant : enumDecl->enumerators()) {
@@ -102,9 +121,11 @@ public:
         std::string replacement;
         
         for (size_t i = 0; i < info.enumerators.size(); ++i) {
-            replacement += "using " + info.enumName + "::" + info.enumerators[i] + ";";
+            replacement += "using " + info.enumName + "::" + info.enumerators[i];
             if (i < info.enumerators.size() - 1) {
-                replacement += "\n";
+                replacement += ";\n";
+            } else {
+                replacement += ";";
             }
         }
         

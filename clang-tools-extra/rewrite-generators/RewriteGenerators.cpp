@@ -35,9 +35,22 @@ struct LocalVariable {
     }
 };
 
+struct RangedForLoop {
+    const CXXForRangeStmt* stmt;
+    std::string loopVarName;
+    std::string loopVarType;
+    std::string rangeExpr;
+    std::string rangeVarName;   // e.g., "__range_0"
+    std::string beginVarName;   // e.g., "__begin_0"
+    std::string endVarName;     // e.g., "__end_0"
+    unsigned index;
+    SourceRange fullRange;
+};
+
 struct CoroutineInfo {
     const FunctionDecl* function;
     std::set<LocalVariable> localVariables;
+    std::vector<RangedForLoop> rangedForLoops; // Add ranged-for loop info
     SourceLocation insertionPoint;
     bool hasError = false;
 };
@@ -105,6 +118,7 @@ struct CoroutineStatement {
     SourceLocation operandEnd;
 };
 
+
 class CoroutineBodyRewriter : public RecursiveASTVisitor<CoroutineBodyRewriter> {
 private:
     const std::set<LocalVariable>& localVariables;
@@ -118,10 +132,16 @@ private:
     std::vector<std::pair<SourceLocation, std::string>> destructorInsertions;
     std::vector<CoroutineStatement> coroutineStatements;
     unsigned nextCoroStatementIndex;
+    std::vector<RangedForLoop> rangedForLoops;
+    unsigned nextRangedForIndex;
+    
+    // Global replacement vector for ALL types of replacements
+public:
+    std::vector<std::pair<SourceRange, std::string>> globalReplacements;
 
 public:
     CoroutineBodyRewriter(const std::set<LocalVariable>& vars, Rewriter& rewr, const SourceManager& SM)
-        : localVariables(vars), rewriter(rewr), sourceManager(SM), nextCoroStatementIndex(1) {
+        : localVariables(vars), rewriter(rewr), sourceManager(SM), nextCoroStatementIndex(1), nextRangedForIndex(0) {
         // Create a set of variable names for quick lookup
         for (const auto& var : localVariables) {
             variableNames.insert(var.name);
@@ -252,6 +272,93 @@ public:
         std::cout << "    DEBUG: Added co_await with index " << coroStmt.index << "\n";
         
         return true;
+    }
+
+    // Handle ranged-for loops
+    bool VisitCXXForRangeStmt(CXXForRangeStmt* forRange) {
+        std::cout << "\n=== RANGED-FOR LOOP DETECTION ===\n";
+        std::cout << "  Found ranged-for loop at: " << forRange->getSourceRange().getBegin().printToString(sourceManager) 
+                  << " to " << forRange->getSourceRange().getEnd().printToString(sourceManager) << "\n";
+        
+        RangedForLoop rangedFor;
+        rangedFor.stmt = forRange;
+        rangedFor.index = nextRangedForIndex++;
+        rangedFor.fullRange = forRange->getSourceRange();
+        
+        // Generate unique variable names for this loop
+        rangedFor.rangeVarName = "__range_" + std::to_string(rangedFor.index);
+        rangedFor.beginVarName = "__begin_" + std::to_string(rangedFor.index);
+        rangedFor.endVarName = "__end_" + std::to_string(rangedFor.index);
+        
+        // Extract loop variable information
+        const VarDecl* loopVar = forRange->getLoopVariable();
+        if (loopVar) {
+            rangedFor.loopVarName = loopVar->getNameAsString();
+            QualType loopVarType = loopVar->getType();
+            rangedFor.loopVarType = loopVarType.getAsString();
+            std::cout << "    Loop variable: " << rangedFor.loopVarType << " " << rangedFor.loopVarName 
+                      << " at " << loopVar->getLocation().printToString(sourceManager) << "\n";
+        }
+        
+        // Extract range expression
+        const Expr* rangeExpr = forRange->getRangeInit();
+        if (rangeExpr) {
+            SourceRange rangeRange = rangeExpr->getSourceRange();
+            CharSourceRange charRange = CharSourceRange::getTokenRange(rangeRange);
+            rangedFor.rangeExpr = Lexer::getSourceText(charRange, sourceManager, LangOptions()).str();
+            std::cout << "    Range expression: '" << rangedFor.rangeExpr << "' at " 
+                      << rangeRange.getBegin().printToString(sourceManager) << "\n";
+        }
+        
+        // Extract detailed position information
+        std::cout << "  DETAILED POSITIONS:\n";
+        std::cout << "    For keyword: " << forRange->getForLoc().printToString(sourceManager) << "\n";
+        std::cout << "    Colon location: " << forRange->getColonLoc().printToString(sourceManager) << "\n";
+        std::cout << "    RParenLoc: " << forRange->getRParenLoc().printToString(sourceManager) << "\n";
+        
+        const Stmt* body = forRange->getBody();
+        if (body) {
+            std::cout << "    Body type: " << body->getStmtClassName() << "\n";
+            std::cout << "    Body range: " << body->getSourceRange().getBegin().printToString(sourceManager) 
+                      << " to " << body->getSourceRange().getEnd().printToString(sourceManager) << "\n";
+            
+            if (auto* compoundBody = dyn_cast<CompoundStmt>(body)) {
+                std::cout << "    Body LBraceLoc: " << compoundBody->getLBracLoc().printToString(sourceManager) << "\n";
+                std::cout << "    Body RBraceLoc: " << compoundBody->getRBracLoc().printToString(sourceManager) << "\n";
+                std::cout << "    Body has " << compoundBody->size() << " child statements\n";
+                
+                int childIndex = 0;
+                for (const auto* child : compoundBody->children()) {
+                    if (child) {
+                        std::cout << "      Child[" << childIndex << "]: " << child->getStmtClassName() 
+                                  << " at " << child->getSourceRange().getBegin().printToString(sourceManager) 
+                                  << " to " << child->getSourceRange().getEnd().printToString(sourceManager) << "\n";
+                    }
+                    childIndex++;
+                }
+            }
+        }
+        
+        std::cout << "    Generated variable names: " << rangedFor.rangeVarName 
+                  << ", " << rangedFor.beginVarName << ", " << rangedFor.endVarName << "\n";
+        
+        rangedForLoops.push_back(rangedFor);
+        
+        // CRITICAL: Must manually traverse the loop body since we're overriding VisitCXXForRangeStmt
+        std::cout << "    MANUALLY traversing loop body for normal coroutine rewriting...\n";
+        if (body) {
+            std::cout << "      Starting manual traversal of body: " << body->getStmtClassName() << "\n";
+            TraverseStmt(const_cast<Stmt*>(body));
+            std::cout << "      Completed manual traversal of body\n";
+        } else {
+            std::cout << "      WARNING: No body to traverse\n";
+        }
+        
+        // IMPORTANT: Return false to prevent automatic traversal (we did it manually)
+        std::cout << "    Returning false to prevent double traversal\n";
+        std::cout << "=== END RANGED-FOR DETECTION ===\n\n";
+        
+        return false;
     }
 
     // Handle variable references - but not in declaration contexts
@@ -501,92 +608,284 @@ private:
         return false;
     }
 
-    void applyCoroutineStatementReplacements() {
-        std::cout << "  DEBUG: Applying coroutine statement replacements for " << coroutineStatements.size() << " statements\n";
-        
-        // Sort coroutine statements by location in reverse order to avoid invalidating positions  
-        std::sort(coroutineStatements.begin(), coroutineStatements.end(),
-                 [&](const CoroutineStatement& a, const CoroutineStatement& b) {
-                     return sourceManager.getFileOffset(a.keywordLoc) > sourceManager.getFileOffset(b.keywordLoc);
-                 });
+    void collectCoroutineStatementReplacements() {
+        std::cout << "  DEBUG: Collecting coroutine statement replacements for " << coroutineStatements.size() << " statements\n";
         
         for (const auto& coroStmt : coroutineStatements) {
             if (coroStmt.type == CoroutineStatement::YIELD) {
-                std::cout << "    DEBUG: Replacing co_yield with CO_YIELD(" << coroStmt.index << ", ...)\n";
+                std::cout << "    DEBUG: Collecting co_yield replacement for CO_YIELD(" << coroStmt.index << ", ...)\n";
                 
                 // Replace "co_yield" with "CO_YIELD(index, "
                 std::string macroStart = "CO_YIELD(" + std::to_string(coroStmt.index) + ", ";
                 
                 // Find the end of "co_yield" keyword
                 SourceLocation keywordEnd = Lexer::getLocForEndOfToken(coroStmt.keywordLoc, 0, sourceManager, LangOptions());
-                SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
-                rewriter.ReplaceText(keywordRange, macroStart);
+                
+                // Add to global replacements
+                globalReplacements.emplace_back(coroStmt.keywordLoc, macroStart);
                 
                 // Add closing parenthesis after the operand
                 if (coroStmt.operand) {
                     SourceLocation operandEnd = Lexer::getLocForEndOfToken(coroStmt.operandEnd, 0, sourceManager, LangOptions());
-                    rewriter.InsertTextBefore(operandEnd, ")");
+                    globalReplacements.emplace_back(operandEnd, ")");
                 }
                 
             } else if (coroStmt.type == CoroutineStatement::AWAIT) {
-                std::cout << "    DEBUG: Replacing co_await with CO_AWAIT(" << coroStmt.index << ", ...)\n";
+                std::cout << "    DEBUG: Collecting co_await replacement for CO_AWAIT(" << coroStmt.index << ", ...)\n";
                 
                 // Replace "co_await" with "CO_AWAIT(index, "
                 std::string macroStart = "CO_AWAIT(" + std::to_string(coroStmt.index) + ", ";
                 
                 // Find the end of "co_await" keyword  
                 SourceLocation keywordEnd = Lexer::getLocForEndOfToken(coroStmt.keywordLoc, 0, sourceManager, LangOptions());
-                SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
-                rewriter.ReplaceText(keywordRange, macroStart);
+                
+                // Add to global replacements
+                globalReplacements.emplace_back(coroStmt.keywordLoc, macroStart);
                 
                 // Add closing parenthesis after the operand
                 if (coroStmt.operand) {
                     SourceLocation operandEnd = Lexer::getLocForEndOfToken(coroStmt.operandEnd, 0, sourceManager, LangOptions());
-                    rewriter.InsertTextBefore(operandEnd, ")");
+                    globalReplacements.emplace_back(operandEnd, ")");
                 }
             }
         }
         
-        std::cout << "  Applied " << coroutineStatements.size() << " coroutine statement replacements\n";
+        std::cout << "  Collected " << coroutineStatements.size() << " coroutine statement replacements into global vector\n";
+    }
+
+private:
+    void collectRangedForFooterInsertions() {
+        std::cout << "  DEBUG: Collecting ranged-for footer insertions into global vector\n";
+        
+        for (const auto& rangedFor : rangedForLoops) {
+            // Find the location where FOR_LOOP_FOOTER should be inserted
+            // This should be after the closing brace of the for loop, but before the closing brace of the outer scope
+            const Stmt* body = rangedFor.stmt->getBody();
+            if (body) {
+                if (auto* compoundBody = dyn_cast<CompoundStmt>(body)) {
+                    // Calculate where the footer should go in the transformed code
+                    // In the explicit form, the footer goes after "  }" (the for loop close) but before "}" (scope close)
+                    SourceLocation footerLoc = compoundBody->getRBracLoc();
+                    std::string footerMacro = "  FOR_LOOP_FOOTER(" + std::to_string(rangedFor.index) + ")\n";
+                    globalReplacements.emplace_back(footerLoc, footerMacro);
+                    std::cout << "    Added FOR_LOOP_FOOTER(" << rangedFor.index << ") insertion at " 
+                              << footerLoc.printToString(sourceManager) << "\n";
+                }
+            }
+        }
+        
+        std::cout << "  Collected " << rangedForLoops.size() << " ranged-for footer insertions into global vector\n";
+    }
+
+public:
+    void collectRangedForLoopReplacements() {
+        std::cout << "  DEBUG: Collecting ranged-for loop bulk replacements for " << rangedForLoops.size() << " loops\n";
+        
+        // First collect footer insertions into global vector
+        collectRangedForFooterInsertions();
+        
+        // Ranged-for loop replacements are range-based (SourceRange), not insertion-based (SourceLocation)
+        // So we need to apply them immediately, similar to other range replacements
+        // Sort ranged-for loops by location in reverse order to avoid invalidating positions
+        std::sort(rangedForLoops.begin(), rangedForLoops.end(),
+                 [&](const RangedForLoop& a, const RangedForLoop& b) {
+                     return sourceManager.getFileOffset(a.fullRange.getBegin()) > sourceManager.getFileOffset(b.fullRange.getBegin());
+                 });
+        
+        for (const auto& rangedFor : rangedForLoops) {
+            std::cout << "\n=== APPLYING RANGED-FOR BULK REPLACEMENT ===\n";
+            std::cout << "    DEBUG: Bulk replacing ranged-for loop " << rangedFor.index << "\n";
+            std::cout << "    Replacement target range: " << rangedFor.fullRange.getBegin().printToString(sourceManager) 
+                      << " to " << rangedFor.fullRange.getEnd().printToString(sourceManager) << "\n";
+            
+            // Get original text for comparison
+            CharSourceRange originalRange = CharSourceRange::getTokenRange(rangedFor.fullRange);
+            std::string originalText = Lexer::getSourceText(originalRange, sourceManager, LangOptions()).str();
+            std::cout << "    Original text being replaced: '" << originalText << "'\n";
+            std::cout << "    Original text length: " << originalText.length() << " characters\n";
+            
+            // Generate the explicit loop form (includes FOR_LOOP_HEADER but NOT FOR_LOOP_FOOTER)
+            std::string explicitLoop = generateExplicitLoopForm(rangedFor);
+            globalReplacements.emplace_back(rangedFor.fullRange, explicitLoop);
+
+            /*
+            // Replace the entire ranged-for statement
+            std::cout << "    About to call rewriter.ReplaceText(...)\n";
+            rewriter.ReplaceText(rangedFor.fullRange, explicitLoop);
+            std::cout << "    SUCCESS: Bulk replaced ranged-for with explicit form\n";
+            std::cout << "=== END APPLYING RANGED-FOR BULK REPLACEMENT ===\n\n";
+            */
+        }
+        
+        std::cout << "  Applied " << rangedForLoops.size() << " ranged-for loop bulk replacements\n";
+    }
+    
+    
+    std::string generateExplicitLoopForm(const RangedForLoop& rangedFor) {
+        std::cout << "\n=== GENERATING EXPLICIT LOOP FORM ===\n";
+        std::cout << "      DEBUG: Generating explicit loop form for loop " << rangedFor.index << "\n";
+        std::cout << "      Original ranged-for range: " << rangedFor.fullRange.getBegin().printToString(sourceManager) 
+                  << " to " << rangedFor.fullRange.getEnd().printToString(sourceManager) << "\n";
+        
+        // Get the loop body - keep it as-is for now, it will be processed by normal coroutine rewriting
+        std::string loopBody = "";
+        const Stmt* body = rangedFor.stmt->getBody();
+        if (body) {
+            SourceRange bodyRange = body->getSourceRange();
+            CharSourceRange charRange = CharSourceRange::getTokenRange(bodyRange);
+            loopBody = Lexer::getSourceText(charRange, sourceManager, LangOptions()).str();
+            
+            std::cout << "      Original loop body range: " << bodyRange.getBegin().printToString(sourceManager) 
+                      << " to " << bodyRange.getEnd().printToString(sourceManager) << "\n";
+            std::cout << "      Original loop body text: '" << loopBody << "'\n";
+            std::cout << "      Original loop body length: " << loopBody.length() << " characters\n";
+        } else {
+            std::cout << "      ERROR: No loop body found!\n";
+        }
+        
+        std::string result = "{\n";
+        std::cout << "      Building replacement text:\n";
+        
+        // Use external FOR_LOOP_HEADER macro for initialization
+        std::string headerMacro = "  FOR_LOOP_HEADER(" + std::to_string(rangedFor.index) + ")\n";
+        result += headerMacro;
+        std::cout << "        1. Added header: '" << headerMacro.substr(0, headerMacro.length()-1) << "'\n";
+        
+        // for (; this->state.__begin.get() != this->state.__end.get(); ++this->state.__begin.get()) {
+        std::string forLine = "  for (; this->state." + rangedFor.beginVarName + ".get() != this->state." + rangedFor.endVarName + ".get(); ++this->state." + rangedFor.beginVarName + ".get()) {\n";
+        result += forLine;
+        std::cout << "        2. Added for line: '" << forLine.substr(0, forLine.length()-1) << "'\n";
+        
+        // range_declaration = *this->state.__begin.get();
+        std::string loopVarDecl = "    " + rangedFor.loopVarType + " " + rangedFor.loopVarName + " = *this->state." + rangedFor.beginVarName + ".get();\n";
+        result += loopVarDecl;
+        std::cout << "        3. Added loop var decl: '" << loopVarDecl.substr(0, loopVarDecl.length()-1) << "'\n";
+        
+        // Insert the loop body (without the outer braces if it's a compound statement)
+        std::cout << "        4. Processing loop body...\n";
+        if (loopBody.size() >= 2 && loopBody.front() == '{' && loopBody.back() == '}') {
+            // Remove outer braces and add the inner content with proper indentation
+            std::string innerBody = loopBody.substr(1, loopBody.size() - 2);
+            std::cout << "           Detected compound body, extracting inner: '" << innerBody << "'\n";
+            result += "    " + innerBody + "\n";
+        } else {
+            std::cout << "           Using body as-is: '" << loopBody << "'\n";
+            result += "    " + loopBody + "\n";
+        }
+        
+        // Close the for loop - NOTE: FOR_LOOP_FOOTER will be added via global replacements
+        std::string forClose = "  }\n"; // Close the for loop
+        result += forClose;
+        std::cout << "        5. Added for close: '" << forClose.substr(0, forClose.length()-1) << "'\n";
+        
+        std::string scopeClose = "}"; // Close the outer scope
+        result += scopeClose;
+        std::cout << "        6. Added scope close: '" << scopeClose << "'\n";
+        
+        std::cout << "      FINAL Generated explicit loop text (length=" << result.length() << "):\n";
+        std::cout << "=== START GENERATED TEXT ===\n" << result << "\n=== END GENERATED TEXT ===\n";
+        std::cout << "=== END GENERATING EXPLICIT LOOP FORM ===\n\n";
+        
+        return result;
     }
 
 public:
     void applyReplacements() {
-        // First apply all the text replacements (declarations and references)
-        std::vector<std::pair<SourceRange, std::string>> allReplacements;
+        // Collect all insertion-style replacements into global vector
+        collectCoroutineStatementReplacements();
+        collectDestructorInsertions();
+        // Note: ranged-for footer insertions will be collected in collectRangedForLoopReplacements
         
-        // Combine all replacements
-        allReplacements.insert(allReplacements.end(), declReplacements.begin(), declReplacements.end());
-        allReplacements.insert(allReplacements.end(), refReplacements.begin(), refReplacements.end());
+        // Apply range-style replacements first (declarations and references)  
+        collectRangeReplacements();
         
+        // Apply ranged-for loop bulk replacements (this also collects footer insertions)
+        collectRangedForLoopReplacements();
+        
+        // Finally apply all insertion-style replacements with global sorting
+        applyAllReplacements();
+    }
+    
+    void collectDestructorInsertions() {
+        std::cout << "  DEBUG: Collecting destructor insertions into global vector\n";
+        for (const auto& insertion : destructorInsertions) {
+            globalReplacements.emplace_back(insertion.first, insertion.second);
+        }
+        std::cout << "  Collected " << destructorInsertions.size() << " destructor insertions into global vector\n";
+    }
+    
+    void collectRangeReplacements() {
+        std::cout << "  DEBUG: Collecting range-style replacements (declarations and references) into global vector\n";
+        
+        // Combine all range replacements (declarations and references)
+        globalReplacements.insert(globalReplacements.end(), declReplacements.begin(), declReplacements.end());
+        globalReplacements.insert(globalReplacements.end(), refReplacements.begin(), refReplacements.end());
+
+        /*
+        // Convert SourceRange replacements to multiple SourceLocation insertions if needed
+        // For now, we'll apply range replacements immediately since they can't be easily converted to insertions
         // Sort by source location in reverse order to avoid invalidating positions
-        std::sort(allReplacements.begin(), allReplacements.end(), 
+        std::sort(allRangeReplacements.begin(), allRangeReplacements.end(), 
                  [&](const std::pair<SourceRange, std::string>& a, const std::pair<SourceRange, std::string>& b) {
                      return sourceManager.getFileOffset(a.first.getBegin()) > sourceManager.getFileOffset(b.first.getBegin());
                  });
 
-        for (const auto& replacement : allReplacements) {
-            std::cout << "  Applying replacement: " << replacement.second << "\n";
+        for (const auto& replacement : allRangeReplacements) {
+            std::cout << "  Applying range replacement: " << replacement.second << "\n";
             rewriter.ReplaceText(replacement.first, replacement.second);
         }
         
-        // Then apply destructor insertions
-        std::sort(destructorInsertions.begin(), destructorInsertions.end(),
-                 [&](const std::pair<SourceLocation, std::string>& a, const std::pair<SourceLocation, std::string>& b) {
-                     return sourceManager.getFileOffset(a.first) > sourceManager.getFileOffset(b.first);
+        std::cout << "  Applied " << allRangeReplacements.size() << " range-style replacements\n";
+        */
+    }
+    
+    void applyAllReplacements() {
+        std::cout << "\n=== APPLYING ALL INSERTION-STYLE REPLACEMENTS ===\n";
+        std::cout << "  DEBUG: Sorting and applying " << globalReplacements.size() << " insertion-style replacements\n";
+        
+        // Sort ALL insertion-style replacements by position in reverse order
+        std::stable_sort(globalReplacements.begin(), globalReplacements.end(),
+                 [&](const std::pair<SourceRange, std::string>& a, const std::pair<SourceRange, std::string>& b) {
+                     unsigned offsetA = sourceManager.getFileOffset(a.first.getBegin());
+                     unsigned offsetB = sourceManager.getFileOffset(b.first.getBegin());
+                     if (offsetA == offsetB) {
+                         // Same position - FOR_LOOP_FOOTER comes first (as requested)
+                         bool aIsFooter = a.second.find("FOR_LOOP_FOOTER") != std::string::npos;
+                         bool bIsFooter = b.second.find("FOR_LOOP_FOOTER") != std::string::npos;
+                         if (aIsFooter && !bIsFooter) return true;
+                         if (!aIsFooter && bIsFooter) return false;
+                         // If both or neither are footers, maintain stable order
+                         return false;
+                     }
+                     return offsetA > offsetB; // Reverse order for position safety
                  });
         
-        for (const auto& insertion : destructorInsertions) {
-            std::cout << "  Inserting destructors: " << insertion.second;
-            rewriter.InsertTextBefore(insertion.first, insertion.second);
+        // Apply all replacements in the determined order
+        // TODO<joka921> We have to get a priority to the global replacements.
+        std::optional<std::pair<SourceRange, std::string>> buffer;
+        for (size_t i = 0; i < globalReplacements.size(); ++i) {
+            auto& replacement = globalReplacements[i];
+            if (!buffer.has_value()) {
+                buffer.emplace(std::move(replacement));
+                continue;
+            }
+            if (buffer->first != globalReplacements[i].first) {
+                std::cout << "Inserting at " << buffer->first.printToString(sourceManager)
+                          << ": '" << buffer->second << "'\n";
+                rewriter.ReplaceText(buffer->first, buffer->second);
+                buffer = std::move(replacement);
+                continue;
+            }
+            buffer->second += replacement.second;
+        }
+        if (buffer.has_value()) {
+            std::cout << "Inserting at " << buffer->first.printToString(sourceManager)
+                      << ": '" << buffer->second << "'\n";
+            rewriter.ReplaceText(buffer->first, buffer->second);
         }
         
-        // Finally apply coroutine statement replacements
-        applyCoroutineStatementReplacements();
-        
-        std::cout << "  Applied " << allReplacements.size() << " replacements, " 
-                  << destructorInsertions.size() << " destructor insertions, and "
-                  << coroutineStatements.size() << " coroutine statement replacements\n";
+        std::cout << "  Applied " << globalReplacements.size() << " insertion-style replacements with global sorting\n";
+        std::cout << "=== END APPLYING ALL INSERTION-STYLE REPLACEMENTS ===\n\n";
     }
     
     // Getter methods for accessing replacements without applying them
@@ -600,6 +899,10 @@ public:
     
     const std::vector<std::pair<SourceLocation, std::string>>& getDestructorInsertions() const {
         return destructorInsertions;
+    }
+    
+    const std::vector<RangedForLoop>& getRangedForLoops() const {
+        return rangedForLoops;
     }
 };
 
@@ -819,11 +1122,20 @@ private:
         // Generate the data structure
         structCode += "  struct _detail_coro_impl {\n";
         
+        // Debug: Print all variables that will be added to the struct
+        std::cout << "  DEBUG: generateCoroImplStruct - Processing " << coro.localVariables.size() << " variables:\n";
+        for (const auto& var : coro.localVariables) {
+            std::cout << "    Variable: " << var.type << " " << var.name << "\n";
+        }
+        
+        // Add all local variables (including ranged-for variables)
         if (coro.localVariables.empty()) {
             structCode += "    // No local variables found in this coroutine\n";
         } else {
+            structCode += "    // Local variables (including ranged-for loop variables)\n";
             for (const auto& var : coro.localVariables) {
                 structCode += "    _coro_storage<" + var.type + "> " + var.name + ";\n";
+                std::cout << "  DEBUG: Added to struct: _coro_storage<" << var.type << "> " << var.name << ";\n";
             }
         }
         
@@ -940,18 +1252,18 @@ public:
                 continue;
             }
             
-            std::string structCode = generateCoroImplStruct(coro);
-            
             if (coro.insertionPoint.isValid()) {
-                rewriter.InsertTextBefore(coro.insertionPoint, structCode);
-                std::cout << "Inserted _detail_coro_impl struct into " 
-                         << coro.function->getQualifiedNameAsString() << "\n";
-                
                 // Update the function's return type before rewriting the body
                 updateFunctionReturnType(coro);
                 
-                // Now rewrite the coroutine body to use the storage wrappers
+                // First rewrite the coroutine body (this adds ranged-for variables to localVariables)
                 rewriteCoroutineBody(coro);
+                
+                // THEN generate the struct with all variables (including ranged-for vars)
+                std::string structCode = generateCoroImplStruct(coro);
+                rewriter.InsertTextBefore(coro.insertionPoint, structCode);
+                std::cout << "Inserted _detail_coro_impl struct into " 
+                         << coro.function->getQualifiedNameAsString() << "\n";
             }
         }
     }
@@ -970,19 +1282,61 @@ public:
         }
         
         if (bodyStmt) {
-            CoroutineBodyRewriter bodyRewriter(coro.localVariables, rewriter, sourceManager);
+            // First pass: collect ranged-for loops only (don't apply any replacements yet)
+            CoroutineBodyRewriter initialRewriter(coro.localVariables, rewriter, sourceManager);
+            initialRewriter.TraverseStmt(const_cast<Stmt*>(bodyStmt));
             
-            // First traverse to collect all replacements
-            bodyRewriter.TraverseStmt(const_cast<Stmt*>(bodyStmt));
+            // Get the ranged-for loops and add them to the coroutine info for struct generation
+            const auto& rangedForLoops = initialRewriter.getRangedForLoops();
+            const_cast<CoroutineInfo&>(coro).rangedForLoops = rangedForLoops;
+            std::cout << "  DEBUG: Found " << rangedForLoops.size() << " ranged-for loops\n";
             
-            // Apply all the variable rewrites in place (construct/destroy calls, get() access)
+            // Add ranged-for variables to the local variables set so they appear in the struct
+            for (const auto& rangedFor : rangedForLoops) {
+                LocalVariable rangeVar;
+                rangeVar.name = rangedFor.rangeVarName;
+                rangeVar.type = "decltype(" + rangedFor.rangeExpr + ")";
+                rangeVar.location = rangedFor.fullRange.getBegin();
+                const_cast<CoroutineInfo&>(coro).localVariables.insert(rangeVar);
+                
+                LocalVariable beginVar;
+                beginVar.name = rangedFor.beginVarName;
+                beginVar.type = "decltype(begin(std::declval<decltype(" + rangedFor.rangeExpr + ")>()))";
+                beginVar.location = rangedFor.fullRange.getBegin();
+                const_cast<CoroutineInfo&>(coro).localVariables.insert(beginVar);
+                
+                LocalVariable endVar;
+                endVar.name = rangedFor.endVarName;
+                endVar.type = "decltype(end(std::declval<decltype(" + rangedFor.rangeExpr + ")>()))";
+                endVar.location = rangedFor.fullRange.getBegin();
+                const_cast<CoroutineInfo&>(coro).localVariables.insert(endVar);
+                
+                std::cout << "    Added ranged-for variables to struct: " << rangedFor.rangeVarName 
+                         << ", " << rangedFor.beginVarName << ", " << rangedFor.endVarName << "\n";
+            }
+            
+            // Apply only ranged-for loop replacements first (this transforms ranged-for to explicit loops)
+            //std::cout << "  DEBUG: Applying ranged-for loop transformations\n";
+            //initialRewriter.applyRangedForLoopReplacements();
+            
+            // Second pass: create new rewriter with all variables (including ranged-for vars)
+            // This will process the explicit loops with proper variable rewriting
+            std::cout << "  DEBUG: Creating final rewriter with " << coro.localVariables.size() << " variables:\n";
+            for (const auto& var : coro.localVariables) {
+                std::cout << "    Variable: " << var.type << " " << var.name << "\n";
+            }
+            
+            CoroutineBodyRewriter finalRewriter(coro.localVariables, rewriter, sourceManager);
+            finalRewriter.TraverseStmt(const_cast<Stmt*>(bodyStmt));
+            
+            // Apply all the variable rewrites in place (construct/destroy calls, get() access)  
             std::cout << "  DEBUG: Applying all variable transformations in place\n";
-            bodyRewriter.applyReplacements();
-            
+
             // Now wrap the transformed code with run() method braces
             std::cout << "  DEBUG: Wrapping transformed code with run() method\n";
-            wrapBodyWithRunMethod(coro);
-            
+            wrapBodyWithRunMethod(coro, finalRewriter);
+            finalRewriter.applyReplacements();
+
             std::cout << "Completed body rewriting for: " << coro.function->getQualifiedNameAsString() << "\n";
         }
     }
@@ -1087,7 +1441,7 @@ public:
     }
     
 
-    void wrapBodyWithRunMethod(const CoroutineInfo& coro) {
+    void wrapBodyWithRunMethod(const CoroutineInfo& coro, CoroutineBodyRewriter& body_rewriter) {
         std::cout << "  DEBUG: Adding closing braces after coroutine body for: " << coro.function->getQualifiedNameAsString() << "\n";
         
         const Stmt* bodyStmt = coro.function->getBody();
@@ -1110,7 +1464,8 @@ public:
             if (rbraceLoc.isValid()) {
                 // Replace exactly one character (the closing brace) with COROUTINE_FOOTER + closing brace
                 std::string coroutineFooterAndBrace = "COROUTINE_FOOTER\n}";
-                rewriter.ReplaceText(rbraceLoc, 1, coroutineFooterAndBrace);
+                body_rewriter.globalReplacements.push_back(std::make_pair(rbraceLoc, coroutineFooterAndBrace));
+                //rewriter.ReplaceText(rbraceLoc, 1, coroutineFooterAndBrace);
                 std::cout << "  DEBUG: Replaced closing brace with COROUTINE_FOOTER + brace\n";
                 
                 std::cout << "  DEBUG: Successfully added closing braces\n";

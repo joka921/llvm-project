@@ -51,4 +51,5 @@ endif()
 
 add_subdirectory(backport-defaulted-equality)
 add_subdirectory(backport-using-enum)
+add_subdirectory(backport-starts-with)
 add_subdirectory(rewrite-generators)

@@ -395,30 +395,42 @@ case 0:
   ;                      \
   return GeneratorStateMachine::make();
 
-template<typename T>
+#define FOR_LOOP_HEADER(N)
+
+template<typename Storage, typename Ref>
 struct _coro_storage {
-  alignas(T) char buffer[sizeof(T)];
+  static constexpr bool isOwning_ = std::is_same_v<std::decay_t<Ref>, std::decay_t<Storage>>;
+  alignas(Storage) char buffer[sizeof(Storage)];
   bool constructed = false;
+
+  struct Val {
+    Ref ref_;
+  };
 
   template<typename... Args>
   void construct(Args&&... args) {
-    new(buffer) T(std::forward<Args>(args)...);
+    if constexpr (!isOwning_) {
+    new(buffer) Storage(&args...);
+    } else {
+      new(buffer) Storage(std::forward<Args>(args)...);
+    }
     constructed = true;
   }
 
   void destroy() {
     if (constructed) {
-      reinterpret_cast<T*>(buffer)->~T();
+      reinterpret_cast<Storage*>(buffer)->~Storage();
       constructed = false;
     }
   }
 
-  T& get() {
-    return *reinterpret_cast<T*>(buffer);
-  }
-
-  const T& get() const {
-    return *reinterpret_cast<const T*>(buffer);
+  Val get() {
+    Storage& storage = *reinterpret_cast<Storage*>(buffer);
+    if constexpr (isOwning_) {
+      return Val{static_cast<Ref>(storage)};
+    } else {
+      return Val{static_cast<Ref>(*storage)};
+    }
   }
 
   ~_coro_storage() {

@@ -15,6 +15,7 @@
 #include "llvm/Support/CommandLine.h"
 #include <iostream>
 #include <set>
+#include <limits>
 
 using namespace clang::tooling;
 using namespace llvm;
@@ -29,8 +30,13 @@ struct LocalVariable {
     std::string name;
     std::string type;
     SourceLocation location;
+    int priority; // Position in file for ordering by first appearance
     
     bool operator<(const LocalVariable& other) const {
+        // First compare by priority (file position), then by name for deterministic ordering
+        if (priority != other.priority) {
+            return priority < other.priority;
+        }
         return name < other.name;
     }
 };
@@ -89,10 +95,12 @@ public:
                     var.name = varDecl->getNameAsString();
                     var.type = getFullyQualifiedTypeName(varDecl->getType());
                     var.location = varDecl->getLocation();
+                    var.priority = sourceManager.getFileOffset(var.location); // Use file offset as priority
                     
                     if (!var.name.empty()) {
                         variables.insert(var);
-                        std::cout << "  Found local variable: " << var.type << " " << var.name << "\n";
+                        std::cout << "  Found local variable: " << var.type << " " << var.name 
+                                  << " (priority: " << var.priority << ")\n";
                     }
                 }
             }
@@ -135,9 +143,9 @@ private:
     std::vector<RangedForLoop> rangedForLoops;
     unsigned nextRangedForIndex;
     
-    // Global replacement vector for ALL types of replacements
+    // Global replacement vector for ALL types of replacements (SourceRange, replacement_string, priority)
 public:
-    std::vector<std::pair<SourceRange, std::string>> globalReplacements;
+    std::vector<std::tuple<SourceRange, std::string, int>> globalReplacements;
 
 public:
     CoroutineBodyRewriter(const std::set<LocalVariable>& vars, Rewriter& rewr, const SourceManager& SM)
@@ -573,19 +581,36 @@ private:
             return;
         }
         
-        // Insert destructors in reverse order (LIFO - last constructed, first destroyed)
-        std::string destructorCalls;
-        for (auto it = scope.variablesInScope.rbegin(); it != scope.variablesInScope.rend(); ++it) {
-            const std::string& varName = *it;
-            std::cout << "      DEBUG: Adding destructor call for variable: " << varName << "\n";
-            destructorCalls += "    this->state." + varName + ".destroy();\n";
+        // Find variables in this scope and sort by their priority for proper destruction order
+        std::vector<std::pair<std::string, int>> scopeVarsWithPriority;
+        for (const std::string& varName : scope.variablesInScope) {
+            // Find the variable's priority
+            for (const auto& var : localVariables) {
+                if (var.name == varName) {
+                    scopeVarsWithPriority.emplace_back(varName, var.priority);
+                    break;
+                }
+            }
         }
         
-        if (!destructorCalls.empty()) {
-            // Insert before the closing brace of the scope
-            SourceLocation insertLoc = scope.scopeEnd;
-            destructorInsertions.emplace_back(insertLoc, destructorCalls);
-            std::cout << "    DEBUG: Scheduled destructor insertions before scope end\n";
+        // Sort by priority in reverse order for destruction (highest priority destroyed last)
+        std::sort(scopeVarsWithPriority.begin(), scopeVarsWithPriority.end(),
+                 [](const auto& a, const auto& b) { return a.second > b.second; });
+        
+        // Insert individual destructor calls with negative priority for proper ordering at same location
+        SourceLocation insertLoc = scope.scopeEnd;
+        for (size_t i = 0; i < scopeVarsWithPriority.size(); ++i) {
+            const std::string& varName = scopeVarsWithPriority[i].first;
+            int varPriority = scopeVarsWithPriority[i].second;
+            
+            std::string destructorCall = "    this->state." + varName + ".destroy();\n";
+            
+            // Use negative priority to ensure reverse order at same location
+            int destructorPriority = -varPriority - static_cast<int>(i);
+            
+            destructorInsertions.emplace_back(insertLoc, destructorCall);
+            std::cout << "      DEBUG: Added destructor call for variable: " << varName 
+                      << " with priority: " << destructorPriority << "\n";
         }
     }
 
@@ -618,16 +643,18 @@ private:
                 // Replace "co_yield" with "CO_YIELD(index, "
                 std::string macroStart = "CO_YIELD(" + std::to_string(coroStmt.index) + ", ";
                 
-                // Find the end of "co_yield" keyword
-                SourceLocation keywordEnd = Lexer::getLocForEndOfToken(coroStmt.keywordLoc, 0, sourceManager, LangOptions());
+                // Priority based on index for consistent ordering
+                int priority = static_cast<int>(coroStmt.index);
                 
-                // Add to global replacements
-                globalReplacements.emplace_back(coroStmt.keywordLoc, macroStart);
+                // Create SourceRange from keyword location
+                SourceRange keywordRange(coroStmt.keywordLoc, coroStmt.keywordLoc);
+                globalReplacements.emplace_back(keywordRange, macroStart, priority);
                 
                 // Add closing parenthesis after the operand
                 if (coroStmt.operand) {
                     SourceLocation operandEnd = Lexer::getLocForEndOfToken(coroStmt.operandEnd, 0, sourceManager, LangOptions());
-                    globalReplacements.emplace_back(operandEnd, ")");
+                    SourceRange parenRange(operandEnd, operandEnd);
+                    globalReplacements.emplace_back(parenRange, ")", priority + 1000); // Later priority
                 }
                 
             } else if (coroStmt.type == CoroutineStatement::AWAIT) {
@@ -636,16 +663,18 @@ private:
                 // Replace "co_await" with "CO_AWAIT(index, "
                 std::string macroStart = "CO_AWAIT(" + std::to_string(coroStmt.index) + ", ";
                 
-                // Find the end of "co_await" keyword  
-                SourceLocation keywordEnd = Lexer::getLocForEndOfToken(coroStmt.keywordLoc, 0, sourceManager, LangOptions());
+                // Priority based on index for consistent ordering
+                int priority = static_cast<int>(coroStmt.index);
                 
-                // Add to global replacements
-                globalReplacements.emplace_back(coroStmt.keywordLoc, macroStart);
+                // Create SourceRange from keyword location
+                SourceRange keywordRange(coroStmt.keywordLoc, coroStmt.keywordLoc);
+                globalReplacements.emplace_back(keywordRange, macroStart, priority);
                 
                 // Add closing parenthesis after the operand
                 if (coroStmt.operand) {
                     SourceLocation operandEnd = Lexer::getLocForEndOfToken(coroStmt.operandEnd, 0, sourceManager, LangOptions());
-                    globalReplacements.emplace_back(operandEnd, ")");
+                    SourceRange parenRange(operandEnd, operandEnd);
+                    globalReplacements.emplace_back(parenRange, ")", priority + 1000); // Later priority
                 }
             }
         }
@@ -666,10 +695,15 @@ private:
                     // Calculate where the footer should go in the transformed code
                     // In the explicit form, the footer goes after "  }" (the for loop close) but before "}" (scope close)
                     SourceLocation footerLoc = compoundBody->getRBracLoc();
+                    SourceRange footerRange(footerLoc, footerLoc);
                     std::string footerMacro = "  FOR_LOOP_FOOTER(" + std::to_string(rangedFor.index) + ")\n";
-                    globalReplacements.emplace_back(footerLoc, footerMacro);
+                    
+                    // Use a moderate priority for for-loop footers
+                    int footerPriority = 50000 + static_cast<int>(rangedFor.index);
+                    
+                    globalReplacements.emplace_back(footerRange, footerMacro, footerPriority);
                     std::cout << "    Added FOR_LOOP_FOOTER(" << rangedFor.index << ") insertion at " 
-                              << footerLoc.printToString(sourceManager) << "\n";
+                              << footerLoc.printToString(sourceManager) << " with priority " << footerPriority << "\n";
                 }
             }
         }
@@ -706,7 +740,11 @@ public:
             
             // Generate the explicit loop form (includes FOR_LOOP_HEADER but NOT FOR_LOOP_FOOTER)
             std::string explicitLoop = generateExplicitLoopForm(rangedFor);
-            globalReplacements.emplace_back(rangedFor.fullRange, explicitLoop);
+            
+            // Use ranged-for index as priority for consistent ordering
+            int loopPriority = 10000 + static_cast<int>(rangedFor.index);
+            
+            globalReplacements.emplace_back(rangedFor.fullRange, explicitLoop, loopPriority);
 
             /*
             // Replace the entire ranged-for statement
@@ -808,18 +846,60 @@ public:
     
     void collectDestructorInsertions() {
         std::cout << "  DEBUG: Collecting destructor insertions into global vector\n";
-        for (const auto& insertion : destructorInsertions) {
-            globalReplacements.emplace_back(insertion.first, insertion.second);
+        
+        // destructorInsertions now contain individual destructor calls with their locations
+        // Since we already computed the priorities in insertDestructorsForScope, we need to extract them
+        // For now, we'll assign priorities based on the text content (variable name priority lookup)
+        for (size_t i = 0; i < destructorInsertions.size(); ++i) {
+            const auto& insertion = destructorInsertions[i];
+            SourceRange insertRange(insertion.first, insertion.first);
+            
+            // Extract variable name from destructor call to get its priority
+            std::string destructorCall = insertion.second;
+            int destructorPriority = -static_cast<int>(i); // Negative priority for reverse order
+            
+            // Try to extract variable name for more specific priority
+            size_t statePos = destructorCall.find("this->state.");
+            if (statePos != std::string::npos) {
+                size_t varStart = statePos + strlen("this->state.");
+                size_t dotPos = destructorCall.find(".destroy()", varStart);
+                if (dotPos != std::string::npos) {
+                    std::string varName = destructorCall.substr(varStart, dotPos - varStart);
+                    
+                    // Find the variable's priority for more precise ordering
+                    for (const auto& var : localVariables) {
+                        if (var.name == varName) {
+                            destructorPriority = -var.priority - static_cast<int>(i);
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            globalReplacements.emplace_back(insertRange, insertion.second, destructorPriority);
+            std::cout << "    Added destructor insertion with priority " << destructorPriority << ": " 
+                      << insertion.second.substr(0, 40) << "...\n";
         }
+        
         std::cout << "  Collected " << destructorInsertions.size() << " destructor insertions into global vector\n";
     }
     
     void collectRangeReplacements() {
         std::cout << "  DEBUG: Collecting range-style replacements (declarations and references) into global vector\n";
         
-        // Combine all range replacements (declarations and references)
-        globalReplacements.insert(globalReplacements.end(), declReplacements.begin(), declReplacements.end());
-        globalReplacements.insert(globalReplacements.end(), refReplacements.begin(), refReplacements.end());
+        // Add declaration replacements with priorities
+        for (const auto& declReplacement : declReplacements) {
+            // Use file offset as priority for declarations
+            int declPriority = sourceManager.getFileOffset(declReplacement.first.getBegin());
+            globalReplacements.emplace_back(declReplacement.first, declReplacement.second, declPriority);
+        }
+        
+        // Add reference replacements with priorities  
+        for (const auto& refReplacement : refReplacements) {
+            // Use file offset as priority for references
+            int refPriority = sourceManager.getFileOffset(refReplacement.first.getBegin());
+            globalReplacements.emplace_back(refReplacement.first, refReplacement.second, refPriority);
+        }
 
         /*
         // Convert SourceRange replacements to multiple SourceLocation insertions if needed
@@ -840,52 +920,60 @@ public:
     }
     
     void applyAllReplacements() {
-        std::cout << "\n=== APPLYING ALL INSERTION-STYLE REPLACEMENTS ===\n";
-        std::cout << "  DEBUG: Sorting and applying " << globalReplacements.size() << " insertion-style replacements\n";
+        std::cout << "\n=== APPLYING ALL REPLACEMENTS WITH PRIORITY ===\n";
+        std::cout << "  DEBUG: Sorting and applying " << globalReplacements.size() << " replacements\n";
         
-        // Sort ALL insertion-style replacements by position in reverse order
+        // Sort ALL replacements by position first, then by priority
         std::stable_sort(globalReplacements.begin(), globalReplacements.end(),
-                 [&](const std::pair<SourceRange, std::string>& a, const std::pair<SourceRange, std::string>& b) {
-                     unsigned offsetA = sourceManager.getFileOffset(a.first.getBegin());
-                     unsigned offsetB = sourceManager.getFileOffset(b.first.getBegin());
-                     if (offsetA == offsetB) {
-                         // Same position - FOR_LOOP_FOOTER comes first (as requested)
-                         bool aIsFooter = a.second.find("FOR_LOOP_FOOTER") != std::string::npos;
-                         bool bIsFooter = b.second.find("FOR_LOOP_FOOTER") != std::string::npos;
-                         if (aIsFooter && !bIsFooter) return true;
-                         if (!aIsFooter && bIsFooter) return false;
-                         // If both or neither are footers, maintain stable order
-                         return false;
+                 [&](const std::tuple<SourceRange, std::string, int>& a, const std::tuple<SourceRange, std::string, int>& b) {
+                     unsigned offsetA = sourceManager.getFileOffset(std::get<0>(a).getBegin());
+                     unsigned offsetB = sourceManager.getFileOffset(std::get<0>(b).getBegin());
+                     
+                     if (offsetA != offsetB) {
+                         return offsetA > offsetB; // Reverse order for position safety
                      }
-                     return offsetA > offsetB; // Reverse order for position safety
+                     
+                     // Same position - sort by priority in ascending order
+                     int priorityA = std::get<2>(a);
+                     int priorityB = std::get<2>(b);
+                     return priorityA < priorityB;
                  });
         
         // Apply all replacements in the determined order
-        // TODO<joka921> We have to get a priority to the global replacements.
-        std::optional<std::pair<SourceRange, std::string>> buffer;
+        std::optional<std::tuple<SourceRange, std::string, int>> buffer;
         for (size_t i = 0; i < globalReplacements.size(); ++i) {
             auto& replacement = globalReplacements[i];
+            
             if (!buffer.has_value()) {
-                buffer.emplace(std::move(replacement));
-                continue;
-            }
-            if (buffer->first != globalReplacements[i].first) {
-                std::cout << "Inserting at " << buffer->first.printToString(sourceManager)
-                          << ": '" << buffer->second << "'\n";
-                rewriter.ReplaceText(buffer->first, buffer->second);
                 buffer = std::move(replacement);
                 continue;
             }
-            buffer->second += replacement.second;
-        }
-        if (buffer.has_value()) {
-            std::cout << "Inserting at " << buffer->first.printToString(sourceManager)
-                      << ": '" << buffer->second << "'\n";
-            rewriter.ReplaceText(buffer->first, buffer->second);
+            
+            // Check if this replacement affects the same source range
+            if (std::get<0>(*buffer) != std::get<0>(replacement)) {
+                // Different source range - apply the buffered replacement
+                std::cout << "    [" << i-1 << "] Applying at " << std::get<0>(*buffer).printToString(sourceManager)
+                          << " (priority " << std::get<2>(*buffer) << "): '" << std::get<1>(*buffer) << "'\n";
+                rewriter.ReplaceText(std::get<0>(*buffer), std::get<1>(*buffer));
+                buffer = std::move(replacement);
+                continue;
+            }
+            
+            // Same source range - combine the replacements (higher priority first)
+            std::get<1>(*buffer) += std::get<1>(replacement);
+            std::cout << "    [" << i << "] Combined with priority " << std::get<2>(replacement) 
+                      << ": '" << std::get<1>(replacement) << "'\n";
         }
         
-        std::cout << "  Applied " << globalReplacements.size() << " insertion-style replacements with global sorting\n";
-        std::cout << "=== END APPLYING ALL INSERTION-STYLE REPLACEMENTS ===\n\n";
+        // Apply the final buffered replacement
+        if (buffer.has_value()) {
+            std::cout << "    [final] Applying at " << std::get<0>(*buffer).printToString(sourceManager)
+                      << " (priority " << std::get<2>(*buffer) << "): '" << std::get<1>(*buffer) << "'\n";
+            rewriter.ReplaceText(std::get<0>(*buffer), std::get<1>(*buffer));
+        }
+        
+        std::cout << "  Applied " << globalReplacements.size() << " replacements with priority sorting\n";
+        std::cout << "=== END APPLYING ALL REPLACEMENTS ===\n\n";
     }
     
     // Getter methods for accessing replacements without applying them
@@ -1297,18 +1385,21 @@ public:
                 rangeVar.name = rangedFor.rangeVarName;
                 rangeVar.type = "decltype(" + rangedFor.rangeExpr + ")";
                 rangeVar.location = rangedFor.fullRange.getBegin();
+                rangeVar.priority = sourceManager.getFileOffset(rangeVar.location); // Use file offset as priority
                 const_cast<CoroutineInfo&>(coro).localVariables.insert(rangeVar);
                 
                 LocalVariable beginVar;
                 beginVar.name = rangedFor.beginVarName;
                 beginVar.type = "decltype(begin(std::declval<decltype(" + rangedFor.rangeExpr + ")>()))";
                 beginVar.location = rangedFor.fullRange.getBegin();
+                beginVar.priority = sourceManager.getFileOffset(beginVar.location) + 1; // Slightly later priority
                 const_cast<CoroutineInfo&>(coro).localVariables.insert(beginVar);
                 
                 LocalVariable endVar;
                 endVar.name = rangedFor.endVarName;
                 endVar.type = "decltype(end(std::declval<decltype(" + rangedFor.rangeExpr + ")>()))";
                 endVar.location = rangedFor.fullRange.getBegin();
+                endVar.priority = sourceManager.getFileOffset(endVar.location) + 2; // Even later priority
                 const_cast<CoroutineInfo&>(coro).localVariables.insert(endVar);
                 
                 std::cout << "    Added ranged-for variables to struct: " << rangedFor.rangeVarName 
@@ -1464,9 +1555,13 @@ public:
             if (rbraceLoc.isValid()) {
                 // Replace exactly one character (the closing brace) with COROUTINE_FOOTER + closing brace
                 std::string coroutineFooterAndBrace = "COROUTINE_FOOTER\n}";
-                body_rewriter.globalReplacements.push_back(std::make_pair(rbraceLoc, coroutineFooterAndBrace));
-                //rewriter.ReplaceText(rbraceLoc, 1, coroutineFooterAndBrace);
-                std::cout << "  DEBUG: Replaced closing brace with COROUTINE_FOOTER + brace\n";
+                SourceRange braceRange(rbraceLoc, rbraceLoc);
+                
+                // COROUTINE_FOOTER gets maximum priority as requested
+                int maxPriority = std::numeric_limits<int>::max();
+                
+                body_rewriter.globalReplacements.emplace_back(braceRange, coroutineFooterAndBrace, maxPriority);
+                std::cout << "  DEBUG: Added COROUTINE_FOOTER with maximum priority (" << maxPriority << ")\n";
                 
                 std::cout << "  DEBUG: Successfully added closing braces\n";
             } else {

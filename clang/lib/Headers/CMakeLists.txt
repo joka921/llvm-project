@@ -387,7 +387,8 @@ set(zos_wrapper_files
 
 include(GetClangResourceDir)
 get_clang_resource_dir(output_dir PREFIX ${LLVM_LIBRARY_OUTPUT_INTDIR}/.. SUBDIR include)
-set(out_files)
+set(out_files
+        ../../../clang-tools-extra/rewrite-generators/Helpers.h)
 set(generated_files)
 
 set(arm_common_generated_files)

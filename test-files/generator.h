@@ -397,9 +397,9 @@ case 0:
 
 #define FOR_LOOP_HEADER(N)
 
-template<typename Storage, typename Ref>
+template<typename Ref, bool isOwning>
 struct _coro_storage {
-  static constexpr bool isOwning_ = std::is_same_v<std::decay_t<Ref>, std::decay_t<Storage>>;
+  using Storage = std::conditional_t<isOwning, std::decay_t<Ref>, std::add_pointer_t<std::decay_t<Ref>>>;
   alignas(Storage) char buffer[sizeof(Storage)];
   bool constructed = false;
 
@@ -409,7 +409,7 @@ struct _coro_storage {
 
   template<typename... Args>
   void construct(Args&&... args) {
-    if constexpr (!isOwning_) {
+    if constexpr (!isOwning) {
     new(buffer) Storage(&args...);
     } else {
       new(buffer) Storage(std::forward<Args>(args)...);
@@ -426,7 +426,7 @@ struct _coro_storage {
 
   Val get() {
     Storage& storage = *reinterpret_cast<Storage*>(buffer);
-    if constexpr (isOwning_) {
+    if constexpr (isOwning) {
       return Val{static_cast<Ref>(storage)};
     } else {
       return Val{static_cast<Ref>(*storage)};
@@ -437,4 +437,18 @@ struct _coro_storage {
     destroy();
   }
 };
+
+
+template <typename Ref, bool isOwning>
+struct coro_for_loop_storage {
+  _coro_storage<Ref, isOwning> range_;
+  // TODO<joka921> This doesn't work for nonmember begin and end, but that should work for most cases now.
+  using Begin = decltype(std::declval<Ref>().begin());
+  using End = decltype(std::declval<Ref>().end());
+  _coro_storage<Begin&, true> begin_;
+  _coro_storage<End&, true> end_;
+};
+
+#define CO_GET(arg) this->state.arg.get()
+
 #endif

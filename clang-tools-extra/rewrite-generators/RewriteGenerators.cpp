@@ -18,6 +18,7 @@
 #include <limits>
 #include <map>
 
+#include "./LocalVariableCollector.h"
 using namespace clang::tooling;
 using namespace llvm;
 using namespace clang;
@@ -26,47 +27,11 @@ using namespace clang::ast_matchers;
 // Logging macro for fine-grained control
 #define REWRITE_LOG() std::cout
 
-/// Strips off implicit AST nodes to get to the original subexpression.
-///
-/// This removes wrappers like:
-/// - MaterializeTemporaryExpr
-/// - ExprWithCleanups
-/// - CXXBindTemporaryExpr
-/// - FullExpr
-/// - ConstantExpr
-/// - ImplicitCastExpr (optionally)
-///
-/// @param E The expression to unwrap.
-/// @param IgnoreImplicitCasts Whether to remove implicit casts (true by default).
-/// @return The unwrapped subexpression.
-const Expr* unwrapExpr(const Expr* E, bool IgnoreImplicitCasts = true) {
-    while (true) {
-        if (auto* MTE = dyn_cast<MaterializeTemporaryExpr>(E)) {
-            E = MTE->getSubExpr();
-        } else if (auto* EWCE = dyn_cast<ExprWithCleanups>(E)) {
-            E = EWCE->getSubExpr();
-        } else if (auto* BTE = dyn_cast<CXXBindTemporaryExpr>(E)) {
-            E = BTE->getSubExpr();
-        } else if (auto* FE = dyn_cast<FullExpr>(E)) {
-            E = FE->getSubExpr();
-        } else if (auto* CE = dyn_cast<ConstantExpr>(E)) {
-            E = CE->getSubExpr();
-        } else if (IgnoreImplicitCasts) {
-            if (auto* ICE = dyn_cast<ImplicitCastExpr>(E)) {
-                E = ICE->getSubExpr();
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-    return E;
-}
 
 // Helper function to generate state get() call
 static std::string makeStateGetCall(const std::string &varName) {
-    return "this->state." + varName + ".get()";
+    return "CO_GET(" + varName + ")";
+    //return "this->state." + varName + ".get()";
 }
 
 // Helper function to generate state construct() call
@@ -83,29 +48,12 @@ static llvm::cl::OptionCategory MyToolCategory("coroutine-rewriter");
 static cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 static cl::extrahelp MoreHelp("\nRewrites C++20 coroutines to C++17 compatible state machines.\n");
 
-struct LocalVariable {
-    std::string name;
-    std::string type; // Original type (may be reference)
-    std::string storageType; // Type to store in _coro_storage (first template parameter)
-    std::string referenceType; // Reference type for access (second template parameter)
-    bool isReference; // True if original type is a reference
-    SourceLocation location;
-    int priority; // Position in file for ordering by first appearance
-
-    bool operator<(const LocalVariable &other) const {
-        // First compare by priority (file position), then by name for deterministic ordering
-        if (priority != other.priority) {
-            return priority < other.priority;
-        }
-        return name < other.name;
-    }
-};
 
 struct RangedForLoop {
     const CXXForRangeStmt *stmt;
     std::string loopVarName;
     std::string loopVarType;
-    std::string rangeExpr;
+    Expr* rangeExpr;
     std::string rangeVarName; // e.g., "__range_0"
     std::string beginVarName; // e.g., "__begin_0"
     std::string endVarName; // e.g., "__end_0"
@@ -121,116 +69,6 @@ struct CoroutineInfo {
     bool hasError = false;
 };
 
-class LocalVariableCollector : public RecursiveASTVisitor<LocalVariableCollector> {
-private:
-    std::set<LocalVariable> &variables;
-    const SourceManager &sourceManager;
-    ASTContext &astContext;
-
-public:
-    LocalVariableCollector(std::set<LocalVariable> &vars, const SourceManager &SM, ASTContext &ctx)
-        : variables(vars), sourceManager(SM), astContext(ctx) {
-    }
-
-    std::string getFullyQualifiedTypeName(QualType type) {
-        // Get the canonical type (resolves typedefs, auto, etc.)
-        QualType canonicalType = type.getCanonicalType();
-
-        // Use a printing policy that produces fully qualified names
-        PrintingPolicy policy(astContext.getLangOpts());
-        policy.SuppressScope = false; // Include scope information
-        policy.SuppressTagKeyword = false; // Keep 'struct', 'class', etc.
-        policy.SuppressUnwrittenScope = false; // Include all scopes
-        policy.FullyQualifiedName = true; // Force fully qualified names
-        policy.PrintCanonicalTypes = true; // Print canonical types
-
-        return canonicalType.getAsString(policy);
-    }
-
-    std::pair<std::string, std::string> getStorageAndReferenceTypes(QualType type, const Expr* initializer) {
-        // Get the canonical type (resolves typedefs, auto, etc.)
-        QualType canonicalType = type.getCanonicalType();
-
-        // Use a printing policy that produces fully qualified names
-        PrintingPolicy policy(astContext.getLangOpts());
-        policy.SuppressScope = false; // Include scope information
-        policy.SuppressTagKeyword = false; // Keep 'struct', 'class', etc.
-        policy.SuppressUnwrittenScope = false; // Include all scopes
-        policy.FullyQualifiedName = true; // Force fully qualified names
-        policy.PrintCanonicalTypes = true; // Print canonical types
-
-        std::string storageType;
-        std::string referenceType;
-
-        if (canonicalType->isReferenceType()) {
-            // Variable has reference type (e.g., int& z or auto&& v)
-            referenceType = canonicalType.getAsString(policy); // The exact reference type
-
-            // Get the referent type (what the reference refers to)
-            QualType referentType;
-            if (const ReferenceType *refType = canonicalType->getAs<ReferenceType>()) {
-                referentType = refType->getPointeeType();
-            }
-
-            bool isPrvalue = [&]() mutable{
-                if (!initializer) {
-                    return false;
-                }
-                initializer = unwrapExpr(initializer);
-                llvm::outs() << "Init class: " << initializer->getStmtClassName() << "\n";
-                llvm::outs() << "Type: " << initializer->getType().getAsString() << "\n";
-                return initializer->getValueKind()==VK_PRValue;
-            }();
-            // For now, we'll determine storage type based on simple heuristics
-            // TODO: This should be determined based on the initializing expression (prvalue vs lvalue)
-            // For now, assume we need pointer storage for most reference cases
-            std::string referentTypeStr = referentType.getAsString(policy);
-            storageType = "std::remove_reference_t<" + referenceType + ">";
-            if (!isPrvalue) {
-                storageType = "std::add_pointer_t<" + storageType + ">";
-            }
-        } else {
-            // Variable has object type (e.g., int x or const int y)
-            // Storage type is the object type itself
-            storageType = canonicalType.getAsString(policy);
-
-            // Reference type is the object type with & added
-            referenceType = storageType + " &";
-        }
-
-        return {storageType, referenceType};
-    }
-
-    bool VisitDeclStmt(DeclStmt *declStmt) {
-        for (auto *decl: declStmt->decls()) {
-            if (auto *varDecl = dyn_cast<VarDecl>(decl)) {
-                if (!varDecl->getType()->isFunctionType()) {
-                    LocalVariable var;
-                    var.name = varDecl->getNameAsString();
-                    var.type = getFullyQualifiedTypeName(varDecl->getType());
-
-                    // Get both storage and reference types
-                    auto [storageType, referenceType] = getStorageAndReferenceTypes(varDecl->getType(), varDecl->getInit() );
-                    var.storageType = storageType;
-                    var.referenceType = referenceType;
-                    var.isReference = varDecl->getType().getCanonicalType()->isReferenceType();
-                    var.location = varDecl->getLocation();
-                    var.priority = sourceManager.getFileOffset(var.location); // Use file offset as priority
-
-                    if (!var.name.empty()) {
-                        variables.insert(var);
-                        REWRITE_LOG() << "  Found local variable: " << var.type << " " << var.name
-                                << " (is reference: " << (var.isReference ? "yes" : "no")
-                                << ", storage type: " << var.storageType
-                                << ", reference type: " << var.referenceType
-                                << ", priority: " << var.priority << ")\n";
-                    }
-                }
-            }
-        }
-        return true;
-    }
-};
 
 struct ScopeInfo {
     const CompoundStmt *compoundStmt;
@@ -241,9 +79,10 @@ struct ScopeInfo {
 struct ScopeEndReplacement {
     std::string replacement;
     int priority;
+    bool insertAfterBrace = false;
 
     bool operator<(const ScopeEndReplacement &other) const {
-        return priority < other.priority;
+        return insertAfterBrace != other.insertAfterBrace ? other.insertAfterBrace : priority < other.priority;
     }
 };
 
@@ -277,10 +116,10 @@ private:
     unsigned nextRangedForIndex;
 
     // Map from closing brace position to all replacements that should happen at that position
-    std::map<unsigned, std::vector<ScopeEndReplacement> > scopeEndReplacements;
 
     // Global replacement vector for ALL types of replacements (SourceRange, replacement_string, priority)
 public:
+    std::map<unsigned, std::vector<ScopeEndReplacement> > scopeEndReplacements;
     std::vector<std::tuple<SourceRange, std::string, int> > globalReplacements;
 
 public:
@@ -445,11 +284,14 @@ public:
         // Extract range expression
         const Expr *rangeExpr = forRange->getRangeInit();
         if (rangeExpr) {
+            rangedFor.rangeExpr = forRange->getRangeInit();
+            /*
             SourceRange rangeRange = rangeExpr->getSourceRange();
             CharSourceRange charRange = CharSourceRange::getTokenRange(rangeRange);
-            rangedFor.rangeExpr = Lexer::getSourceText(charRange, sourceManager, LangOptions()).str();
+            //rangedFor.rangeExpr = Lexer::getSourceText(charRange, sourceManager, LangOptions()).str();
             REWRITE_LOG() << "    Range expression: '" << rangedFor.rangeExpr << "' at "
                     << rangeRange.getBegin().printToString(sourceManager) << "\n";
+                    */
         }
 
         // Extract detailed position information
@@ -864,6 +706,7 @@ private:
                         ScopeEndReplacement replacement;
                         replacement.replacement = destroyCalls[i];
                         replacement.priority = basePriority + static_cast<int>(i);
+                        replacement.insertAfterBrace = true;
 
                         scopeEndReplacements[fileOffset].push_back(replacement);
 
@@ -918,11 +761,11 @@ private:
 
             // Generate the construct calls for __range, __begin, __end followed by the for loop
             std::string constructCalls =
-                    makeStateConstructCall(rangedFor.rangeVarName, rangedFor.rangeExpr) + ";\n" +
-                    "    " + makeStateConstructCall(rangedFor.beginVarName, "begin(" + makeStateGetCall(
-                        rangedFor.rangeVarName) + ")") + ";\n" +
-                    "    " + makeStateConstructCall(rangedFor.endVarName, "end(" + makeStateGetCall(
-                        rangedFor.rangeVarName) + ")") + ";\n" +
+                    makeStateConstructCall(rangedFor.rangeVarName, getSourceText(rangedFor.rangeExpr, sourceManager)) + ";\n" +
+                    "    " + makeStateConstructCall(rangedFor.beginVarName, makeStateGetCall(
+                        rangedFor.rangeVarName) + ".begin()") + ";\n" +
+                    "    " + makeStateConstructCall(rangedFor.endVarName, makeStateGetCall(
+                        rangedFor.rangeVarName) + ".end()") + ";\n" +
                     "    for (; " + makeStateGetCall(rangedFor.beginVarName) + " != " + makeStateGetCall(
                         rangedFor.endVarName) +
                     "; ++" + makeStateGetCall(rangedFor.beginVarName) + ")";
@@ -1101,12 +944,20 @@ private:
 
             // Concatenate all destructor calls and append the closing brace
             std::string concatenatedReplacement;
+
+            bool insertedBrace = false;
+            auto insertBrace = [&concatenatedReplacement, &insertedBrace]() {
+                if (!std::exchange(insertedBrace, true)) { concatenatedReplacement += "}";}
+            };
             for (const auto &replacement: sortedReplacements) {
+                if (replacement.insertAfterBrace) {
+                    insertBrace();
+                }
                 concatenatedReplacement += replacement.replacement;
                 REWRITE_LOG() << "      Added (priority " << replacement.priority << "): " << replacement.replacement.
                         substr(0, 40) << "...\n";
             }
-            concatenatedReplacement += "}"; // Append the closing brace
+            //concatenatedReplacement += "}"; // Append the closing brace
 
             // Convert file offset back to SourceLocation
             SourceLocation braceLocation = sourceManager.getLocForStartOfFile(sourceManager.getMainFileID()).
@@ -1116,6 +967,8 @@ private:
             // Use minimum priority among all replacements for this position
             int minPriority = sortedReplacements.empty() ? 0 : sortedReplacements[0].priority;
 
+            insertBrace();
+            concatenatedReplacement += "}\n"; // Re-add the brace after the concatenated replacement.
             globalReplacements.emplace_back(braceRange, concatenatedReplacement, minPriority);
 
             REWRITE_LOG() << "    Added concatenated replacement (" << concatenatedReplacement.length() << " chars) at "
@@ -1127,8 +980,6 @@ private:
 
 public:
     void applyReplacements() {
-        // First process scope end replacements (destructors + closing braces)
-        collectScopeEndReplacements();
 
         // Collect all insertion-style replacements into global vector
         collectCoroutineStatementReplacements();
@@ -1140,6 +991,9 @@ public:
 
         // Apply ranged-for loop bulk replacements (this also collects footer insertions)
         collectRangedForLoopReplacements();
+
+        // First process scope end replacements (destructors + closing braces)
+        collectScopeEndReplacements();
 
         // Finally apply all insertion-style replacements with global sorting
         applyAllReplacements();
@@ -1377,36 +1231,36 @@ private:
 
         const Stmt *bodyStmt = funcDecl->getBody();
         if (!bodyStmt) {
-            REWRITE_LOG() << "DEBUG: Function has no body\n";
+            //REWRITE_LOG() << "DEBUG: Function has no body\n";
             return SourceLocation();
         }
 
-        REWRITE_LOG() << "DEBUG: Function has body, type: " << bodyStmt->getStmtClassName() << "\n";
+        //REWRITE_LOG() << "DEBUG: Function has body, type: " << bodyStmt->getStmtClassName() << "\n";
 
         // Handle CoroutineBodyStmt wrapper
         if (auto *coroBody = dyn_cast<CoroutineBodyStmt>(bodyStmt)) {
-            REWRITE_LOG() << "DEBUG: Body is CoroutineBodyStmt, getting inner body\n";
+            //REWRITE_LOG() << "DEBUG: Body is CoroutineBodyStmt, getting inner body\n";
             bodyStmt = coroBody->getBody();
             if (!bodyStmt) {
-                REWRITE_LOG() << "DEBUG: CoroutineBodyStmt has no inner body\n";
+                //REWRITE_LOG() << "DEBUG: CoroutineBodyStmt has no inner body\n";
                 return SourceLocation();
             }
-            REWRITE_LOG() << "DEBUG: Inner body type: " << bodyStmt->getStmtClassName() << "\n";
+            //REWRITE_LOG() << "DEBUG: Inner body type: " << bodyStmt->getStmtClassName() << "\n";
         }
 
         if (auto *body = dyn_cast<CompoundStmt>(bodyStmt)) {
-            REWRITE_LOG() << "DEBUG: Body is CompoundStmt\n";
+            //REWRITE_LOG() << "DEBUG: Body is CompoundStmt\n";
             SourceLocation lbracLoc = body->getLBracLoc();
-            REWRITE_LOG() << "DEBUG: getLBracLoc() returned location, checking validity\n";
+            //REWRITE_LOG() << "DEBUG: getLBracLoc() returned location, checking validity\n";
 
             if (lbracLoc.isValid()) {
-                REWRITE_LOG() << "DEBUG: lbracLoc is valid, calling Lexer::getLocForEndOfToken\n";
+                //REWRITE_LOG() << "DEBUG: lbracLoc is valid, calling Lexer::getLocForEndOfToken\n";
                 SourceLocation endLoc = Lexer::getLocForEndOfToken(lbracLoc, 0, sourceManager, langOptions);
                 if (endLoc.isValid()) {
-                    REWRITE_LOG() << "DEBUG: Successfully found insertion point\n";
+                    //REWRITE_LOG() << "DEBUG: Successfully found insertion point\n";
                     return endLoc;
                 } else {
-                    REWRITE_LOG() << "DEBUG: Lexer::getLocForEndOfToken returned invalid location\n";
+                    //REWRITE_LOG() << "DEBUG: Lexer::getLocForEndOfToken returned invalid location\n";
                 }
             } else {
                 REWRITE_LOG() << "DEBUG: lbracLoc is invalid\n";
@@ -1496,12 +1350,14 @@ private:
         } else {
             structCode += "    // Local variables (including ranged-for loop variables)\n";
             for (const auto &var: coro.localVariables) {
-                structCode += "    _coro_storage<" + var.storageType + ", " + var.referenceType + "> " + var.name +
+                structCode += "    _coro_storage<" + var.referenceType + ", " + (var.isOwning ? std::string{"true"} : std::string{"false"}) + "> " + var.name +
                         ";\n";
-                REWRITE_LOG() << "  DEBUG: Added to struct: _coro_storage<" << var.storageType << ", " << var.
+                /*
+                REWRITE_LOG() << "  DEBUG: Added to struct: _coro_storage<" << var.isOwning << ", " << var.
                         referenceType << "> " << var.name
                         << " (original type: " << var.type << ", is reference: " << (var.isReference ? "yes" : "no") <<
                         ");\n";
+                        */
             }
         }
 
@@ -1671,39 +1527,42 @@ public:
                 // The conceptual initializer would be `*iterator`, which is typically an lvalue
                 
                 loopVar.isReference = (loopVar.type.find("&") != std::string::npos);
-                
-                if (loopVar.isReference) {
-                    // Reference loop variables - conceptually initialized with lvalue (*iterator)
-                    // Use pointer storage since we're binding to an existing object
-                    loopVar.referenceType = loopVar.type;
-                    loopVar.storageType = "std::add_pointer_t<std::remove_reference_t<" + loopVar.type + ">>";
-                    REWRITE_LOG() << "    Ranged-for reference variable: " << loopVar.name 
-                                  << " will use pointer storage\n";
-                } else {
-                    // Object loop variables - copy semantics
-                    loopVar.storageType = loopVar.type;
-                    loopVar.referenceType = loopVar.type + " &";
-                    REWRITE_LOG() << "    Ranged-for object variable: " << loopVar.name 
-                                  << " will use direct storage\n";
-                }
+
+                loopVar.referenceType = loopVar.type;
+                loopVar.isOwning = !loopVar.isReference;
                 loopVar.location = rangedFor.fullRange.getBegin();
                 loopVar.priority = sourceManager.getFileOffset(loopVar.location); // Use file offset as priority
                 const_cast<CoroutineInfo &>(coro).localVariables.insert(loopVar);
 
                 LocalVariable rangeVar;
                 rangeVar.name = rangedFor.rangeVarName;
-                rangeVar.type = "decltype(" + rangedFor.rangeExpr + ")";
-                rangeVar.storageType = rangeVar.type; // decltype should not be a reference
+                std::tie(rangeVar.type, rangeVar.isOwning) =
+                        getTypeForAutoRefRefVariable(rangedFor.rangeExpr, *astContext);
                 rangeVar.referenceType = rangeVar.type + " &";
                 rangeVar.isReference = false;
                 rangeVar.location = rangedFor.fullRange.getBegin();
                 rangeVar.priority = sourceManager.getFileOffset(rangeVar.location) + 1; // Slightly later priority
                 const_cast<CoroutineInfo &>(coro).localVariables.insert(rangeVar);
 
+                auto addBeginAndEndVar = [&](const std::string& beginOrEnd, const std::string& name, int priority) {
+                    LocalVariable beginVar;
+                    beginVar.name = name;
+                    beginVar.type = "std::decay_t<decltype(std::declval<" + rangeVar.referenceType + ">()."+ beginOrEnd + "())>";
+                    beginVar.isOwning = true; // Iterator types are typically not references
+                    beginVar.referenceType = beginVar.type + " &";
+                    beginVar.isReference = false;
+                    beginVar.location = rangedFor.fullRange.getBegin();
+                    beginVar.priority = sourceManager.getFileOffset(beginVar.location) + priority;
+                    const_cast<CoroutineInfo &>(coro).localVariables.insert(beginVar);
+                };
+
+                addBeginAndEndVar("begin", rangedFor.beginVarName, 2);
+                addBeginAndEndVar("end", rangedFor.endVarName, 3);
+                /*
                 LocalVariable beginVar;
                 beginVar.name = rangedFor.beginVarName;
                 beginVar.type = "decltype(begin(std::declval<decltype(" + rangedFor.rangeExpr + ")>()))";
-                beginVar.storageType = beginVar.type; // Iterator types are typically not references
+                beginVar.isOwning = true; // Iterator types are typically not references
                 beginVar.referenceType = beginVar.type + " &";
                 beginVar.isReference = false;
                 beginVar.location = rangedFor.fullRange.getBegin();
@@ -1713,7 +1572,7 @@ public:
                 LocalVariable endVar;
                 endVar.name = rangedFor.endVarName;
                 endVar.type = "decltype(end(std::declval<decltype(" + rangedFor.rangeExpr + ")>()))";
-                endVar.storageType = endVar.type; // Iterator types are typically not references
+                endVar.isOwning = true; // Iterator types are typically not references
                 endVar.referenceType = endVar.type + " &";
                 endVar.isReference = false;
                 endVar.location = rangedFor.fullRange.getBegin();
@@ -1723,6 +1582,7 @@ public:
                 REWRITE_LOG() << "    Added ranged-for variables to struct: " << rangedFor.loopVarName
                         << ", " << rangedFor.rangeVarName << ", " << rangedFor.beginVarName
                         << ", " << rangedFor.endVarName << "\n";
+                        */
             }
 
             // Apply only ranged-for loop replacements first (this transforms ranged-for to explicit loops)
@@ -1875,17 +1735,21 @@ public:
             REWRITE_LOG() << "  DEBUG: RBrace location: " << rbraceLoc.printToString(sourceManager) << "\n";
 
             if (rbraceLoc.isValid()) {
-                // Replace exactly one character (the closing brace) with COROUTINE_FOOTER + closing brace
-                std::string coroutineFooterAndBrace = "COROUTINE_FOOTER\n}";
-                SourceRange braceRange(rbraceLoc, rbraceLoc);
+                // Add COROUTINE_FOOTER to the scope end replacements system
+                // This ensures it gets properly ordered with destructor calls
+                unsigned fileOffset = sourceManager.getFileOffset(rbraceLoc);
+                
+                ScopeEndReplacement replacement;
+                replacement.replacement = "COROUTINE_FOOTER\n";
+                // Use maximum priority to ensure COROUTINE_FOOTER comes after all destructors
+                replacement.priority = std::numeric_limits<int>::max();
+                
+                body_rewriter.scopeEndReplacements[fileOffset].push_back(replacement);
+                
+                REWRITE_LOG() << "  DEBUG: Added COROUTINE_FOOTER to scope end replacements with maximum priority (" 
+                              << replacement.priority << ") at file offset " << fileOffset << "\n";
 
-                // COROUTINE_FOOTER gets maximum priority as requested
-                int maxPriority = std::numeric_limits<int>::max();
-
-                body_rewriter.globalReplacements.emplace_back(braceRange, coroutineFooterAndBrace, maxPriority);
-                REWRITE_LOG() << "  DEBUG: Added COROUTINE_FOOTER with maximum priority (" << maxPriority << ")\n";
-
-                REWRITE_LOG() << "  DEBUG: Successfully added closing braces\n";
+                REWRITE_LOG() << "  DEBUG: Successfully added COROUTINE_FOOTER to scope end system\n";
             } else {
                 REWRITE_LOG() << "  ERROR: Invalid closing brace location for compound statement\n";
             }

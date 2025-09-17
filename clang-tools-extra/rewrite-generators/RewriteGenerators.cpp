@@ -1178,6 +1178,23 @@ private:
         return false;
     }
 
+    bool containsTryCatchBlocks(const Stmt *stmt) {
+        if (!stmt) return false;
+
+        if (isa<CXXTryStmt>(stmt)) {
+            return true;
+        }
+
+        for (auto it = stmt->child_begin(); it != stmt->child_end(); ++it) {
+            if (const Stmt *child = *it) {
+                if (containsTryCatchBlocks(child)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     void collectLocalVariables(const Stmt *body, std::set<LocalVariable> &variables) {
         LocalVariableCollector collector(variables, sourceManager, *astContext);
         collector.TraverseStmt(const_cast<Stmt *>(body));
@@ -1456,6 +1473,12 @@ public:
         }
 
         if (containsCoroutineKeywords(funcDecl->getBody())) {
+            // Check if the coroutine contains try-catch blocks - skip if it does
+            if (containsTryCatchBlocks(funcDecl->getBody())) {
+                REWRITE_LOG() << "Skipping coroutine " << funcDecl->getQualifiedNameAsString() 
+                              << " because it contains try-catch blocks (not yet supported)\n";
+                return true; // Skip this coroutine
+            }
             CoroutineInfo coro;
             coro.function = funcDecl;
 

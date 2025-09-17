@@ -460,6 +460,8 @@ struct _coro_storage {
     }
 };
 
+//#define CO_CONSTRUCT(mem, ...) if constexpr (this->state.mem.isOwning) {new(this->state.mem.buffer) decltype(this->state.mem)::Storage{__VA_ARGS__}} else { }
+
 
 template<typename Ref, bool isOwning>
 struct coro_for_loop_storage {

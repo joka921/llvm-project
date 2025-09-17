@@ -43,24 +43,21 @@ cppcoro::generator<int> gen(auto&& x) {
     co_yield V[0] + x;
   }
 }
-*/
-cppcoro::generator<int, cppcoro::NoDetails, Handle> gen(auto&& x) {
-  // _coro_storage and CoroImpl assumed to be available in global namespace
-  struct _detail_coro_impl {
-    // Function parameters
-    decltype(x) x;
-
-    // Local variables (including ranged-for loop variables)
-    _coro_storage<class std::vector<int, class std::allocator<int>>&, true> V;
-  };
-
-  using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) 
+cppcoro::generator<int> gen2(auto&& x) {
   {
-    this->state.V.construct( std::vector{3, 6, 9});
-    CO_YIELD(1,  CO_GET(V)[0] + x);
-      this->state.V.destroy();
-}
-COROUTINE_FOOTER(x)
+    std::vector<int> V = std::vector{3, 6, 9};
+    try {
+    co_yield V[0] + x;
+    } catch (...) {
+    }
+  }
 }
 
+auto lambda = [](int x) -> cppcoro::generator<int> {
+  co_yield x;
+}
+*/
+
+auto lambda = [](int x) -> cppcoro::generator<int> {
+  co_yield x;
+};

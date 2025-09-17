@@ -49,6 +49,16 @@ static std::string makeStateConstructPrefix(const std::string &memberName) {
     return "this->state." + memberName + ".construct(";
 }
 
+// Helper function to generate CO_BRACED_INIT prefix  
+static std::string makeBracedInitPrefix(const std::string &varName) {
+    return "CO_BRACED_INIT(" + varName + ", ";
+}
+
+// Helper function to generate CO_PAREN_INIT prefix
+static std::string makeParenInitPrefix(const std::string &varName) {
+    return "CO_PAREN_INIT(" + varName + ", ";
+}
+
 static llvm::cl::OptionCategory MyToolCategory("coroutine-rewriter");
 static cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 static cl::extrahelp MoreHelp("\nRewrites C++20 coroutines to C++17 compatible state machines.\n");
@@ -213,8 +223,22 @@ public:
                         REWRITE_LOG() << "    DEBUG: Added variable '" << varName << "' to current scope\n";
                     }
 
-                    // Create construct prefix and add replacement for declaration part
-                    std::string constructPrefix = makeStateConstructPrefix(varName);
+                    // Determine initialization form and generate appropriate prefix
+                    InitializationForm form = getInitializationForm(varDecl);
+                    std::string prefix;
+                    
+                    switch (form) {
+                        case BRACED_INIT:
+                            prefix = makeBracedInitPrefix(varName);
+                            break;
+                        case PAREN_INIT:
+                            prefix = makeParenInitPrefix(varName);
+                            break;
+                        case CONSTRUCT_CALL:
+                        default:
+                            prefix = makeStateConstructPrefix(varName);
+                            break;
+                    }
 
                     if (varDecl->hasInit()) {
                         // Get the range for just the declaration part (type + name)
@@ -222,22 +246,69 @@ public:
                         SourceLocation initStart = varDecl->getInit()->getSourceRange().getBegin();
                         SourceRange declOnlyRange(declStart, initStart.getLocWithOffset(-1));
 
-                        // Replace declaration part with construct prefix
-                        declReplacements.emplace_back(declOnlyRange, constructPrefix, true);
-
-                        // Recursively visit the initialization expression
-                        TraverseStmt(varDecl->getInit());
-
-                        // Add closing parenthesis and semicolon at the end
-                        SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
-                        SourceLocation afterInit = Lexer::getLocForEndOfToken(initEnd, 0, sourceManager, LangOptions());
-                        SourceRange closingRange(afterInit, afterInit);
-                        declReplacements.emplace_back(closingRange, ")", false);
+                        // Handle different initialization forms
+                        if (form == BRACED_INIT) {
+                            // For braced initialization, handle ranges properly
+                            std::optional<SourceRange> childrenRange = handleBracedInitialization(varDecl);
+                            
+                            if (childrenRange.has_value()) {
+                                REWRITE_LOG() << "range of children is "<< childrenRange.value().printToString(sourceManager) << '\n';
+                                // Replace everything from declaration start to first child start with prefix
+                                SourceRange prefixRange(declStart, childrenRange->getBegin().getLocWithOffset(-1));
+                                declReplacements.emplace_back(prefixRange, prefix, true);
+                                
+                                // Replace everything from last child end to init end with closing paren
+                                SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
+                                SourceLocation afterLastChild = Lexer::getLocForEndOfToken(childrenRange->getEnd(), 0, sourceManager, LangOptions());
+                                assert(afterLastChild.isValid() && "Invalid location for last child end");
+                                SourceRange suffixRange(afterLastChild, initEnd);
+                                declReplacements.emplace_back(suffixRange, ")", true);
+                            } else {
+                                // Empty braced initialization - replace entire range
+                                SourceRange fullRange(declStart, varDecl->getInit()->getSourceRange().getEnd());
+                                declReplacements.emplace_back(fullRange, prefix + ")", true);
+                            }
+                        } else if (form == PAREN_INIT) {
+                            // For parenthesized initialization, handle ranges properly
+                            std::optional<SourceRange> childrenRange = handleParenthesizedInitialization(varDecl);
+                            
+                            if (childrenRange.has_value()) {
+                                // Replace everything from declaration start to first child start with prefix
+                                SourceRange prefixRange(declStart, childrenRange->getBegin().getLocWithOffset(-1));
+                                declReplacements.emplace_back(prefixRange, prefix, true);
+                                
+                                // Process the arguments (now that prefix replacement is set up)
+                                processParenthesizedArguments(varDecl);
+                                
+                                // Replace everything from last child end to init end with closing paren
+                                SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
+                                SourceLocation afterLastChild = Lexer::getLocForEndOfToken(childrenRange->getEnd(), 0, sourceManager, LangOptions());
+                                SourceRange suffixRange(afterLastChild, initEnd);
+                                declReplacements.emplace_back(suffixRange, ")", true);
+                            } else {
+                                // Empty parenthesized initialization - replace entire range
+                                SourceRange fullRange(declStart, varDecl->getInit()->getSourceRange().getEnd());
+                                declReplacements.emplace_back(fullRange, prefix + ")", true);
+                            }
+                        } else {
+                            // Replace declaration part with appropriate prefix
+                            declReplacements.emplace_back(declOnlyRange, prefix, true);
+                            
+                            // Regular construct() call - recursively visit the initialization expression
+                            TraverseStmt(varDecl->getInit());
+                            
+                            // Add closing parenthesis at the end
+                            SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
+                            SourceLocation afterInit = Lexer::getLocForEndOfToken(initEnd, 0, sourceManager, LangOptions());
+                             assert(afterInit.isValid() && "Invalid location for last child end");
+                            SourceRange closingRange(afterInit, afterInit);
+                            declReplacements.emplace_back(closingRange, ")", false);
+                        }
                     } else {
-                        // No initialization - replace entire declaration with empty construct call
-                        std::string constructCall = constructPrefix + ")";
+                        // No initialization - replace entire declaration with empty call
+                        std::string emptyCall = prefix + ")";
                         SourceRange declRange = varDecl->getSourceRange();
-                        declReplacements.emplace_back(declRange, constructCall, true);
+                        declReplacements.emplace_back(declRange, emptyCall, true);
                     }
                 }
             }
@@ -462,6 +533,253 @@ public:
     }
 
 private:
+    enum InitializationForm {
+        CONSTRUCT_CALL, // Regular construct() call for other types
+        BRACED_INIT,    // Braced initialization like {1, 2}
+        PAREN_INIT      // Parenthesized initialization like (1, 2)
+    };
+
+    InitializationForm getInitializationForm(const VarDecl *varDecl) {
+        if (!varDecl->hasInit()) {
+            return CONSTRUCT_CALL;
+        }
+
+        const Expr *init = unwrapExpr(varDecl->getInit());
+        
+        // Check for braced initialization list
+        if (isa<InitListExpr>(init) || isa<CXXStdInitializerListExpr>(init)) {
+            REWRITE_LOG() << "    DEBUG: Detected braced initialization\n";
+            return BRACED_INIT;
+        }
+        
+        // Check for constructor call (parenthesized initialization)
+        if (isa<CXXConstructExpr>(init)) {
+            const auto *constructExpr = cast<CXXConstructExpr>(init);
+            if (constructExpr->isListInitialization()) {
+                return BRACED_INIT;
+            }
+            // If it has argumentsoand is direct initialization, it's likely parenthesized
+            if (constructExpr->getNumArgs() > 0 && constructExpr->isListInitialization() == false) {
+                REWRITE_LOG() << "    DEBUG: Detected parenthesized initialization\n";
+                return PAREN_INIT;
+            }
+        }
+        
+        // Check for temporary object creation with braces (like std::vector{1,2})
+        if (isa<CXXTemporaryObjectExpr>(init)) {
+            const auto *tempExpr = cast<CXXTemporaryObjectExpr>(init);
+            if (tempExpr->isListInitialization()) {
+                REWRITE_LOG() << "    DEBUG: Detected braced temporary object initialization\n";
+                return BRACED_INIT;
+            } else {
+                REWRITE_LOG() << "    DEBUG: Detected parenthesized temporary object initialization\n"; 
+                return PAREN_INIT;
+            }
+        }
+
+        REWRITE_LOG() << "    DEBUG: Using default construct() call\n";
+        return CONSTRUCT_CALL;
+    }
+
+    std::optional<SourceRange> handleParenthesizedInitialization(const VarDecl *varDecl) {
+        if (!varDecl->hasInit()) {
+            return std::nullopt;
+        }
+
+        const Expr *init = unwrapExpr(varDecl->getInit());
+        std::vector<const Expr*> arguments;
+
+        // Extract arguments from parenthesized initialization
+        if (const auto *constructExpr = dyn_cast<CXXConstructExpr>(init)) {
+            // Constructor call like std::vector(1, 2)
+            for (unsigned i = 0; i < constructExpr->getNumArgs(); ++i) {
+                arguments.push_back(constructExpr->getArg(i));
+            }
+        } else if (const auto *tempExpr = dyn_cast<CXXTemporaryObjectExpr>(init)) {
+            // Temporary object with parentheses like std::vector(1, 2)
+            for (unsigned i = 0; i < tempExpr->getNumArgs(); ++i) {
+                arguments.push_back(tempExpr->getArg(i));
+            }
+        }
+
+        if (arguments.empty()) {
+            REWRITE_LOG() << "    DEBUG: No arguments found in parenthesized initialization\n";
+            return std::nullopt;
+        }
+
+        // Find first and last arguments with valid source locations
+        SourceLocation firstValidStart;
+        SourceLocation lastValidEnd;
+        bool foundFirst = false;
+        bool foundLast = false;
+        
+        // Find first argument with valid source location
+        for (const auto *arg : arguments) {
+            SourceRange argRange = arg->getSourceRange();
+            if (argRange.getBegin().isValid() && argRange.getEnd().isValid()) {
+                firstValidStart = argRange.getBegin();
+                foundFirst = true;
+                break;
+            }
+        }
+        
+        // Find last argument with valid source location (search backwards)
+        for (auto it = arguments.rbegin(); it != arguments.rend(); ++it) {
+            SourceRange argRange = (*it)->getSourceRange();
+            if (argRange.getBegin().isValid() && argRange.getEnd().isValid()) {
+                lastValidEnd = argRange.getEnd();
+                foundLast = true;
+                break;
+            }
+        }
+        
+        // If no arguments have valid source locations, return nullopt
+        if (!foundFirst || !foundLast) {
+            REWRITE_LOG() << "    DEBUG: No arguments with valid source locations found in parenthesized initialization\n";
+            return std::nullopt;
+        }
+
+        REWRITE_LOG() << "    DEBUG: Found " << arguments.size() << " parenthesized initialization arguments\n";
+        
+        return SourceRange(firstValidStart, lastValidEnd);
+    }
+
+    void processParenthesizedArguments(const VarDecl *varDecl) {
+        if (!varDecl->hasInit()) {
+            return;
+        }
+
+        const Expr *init = varDecl->getInit();
+        
+        // Process arguments from parenthesized initialization
+        if (const auto *constructExpr = dyn_cast<CXXConstructExpr>(init)) {
+            // Constructor call like std::vector(1, 2)
+            for (unsigned i = 0; i < constructExpr->getNumArgs(); ++i) {
+                TraverseStmt(const_cast<Stmt*>(reinterpret_cast<const Stmt*>(constructExpr->getArg(i))));
+            }
+        } else if (const auto *tempExpr = dyn_cast<CXXTemporaryObjectExpr>(init)) {
+            // Temporary object with parentheses like std::vector(1, 2)  
+            for (unsigned i = 0; i < tempExpr->getNumArgs(); ++i) {
+                TraverseStmt(const_cast<Stmt*>(reinterpret_cast<const Stmt*>(tempExpr->getArg(i))));
+            }
+        }
+        
+        REWRITE_LOG() << "    DEBUG: Processed parenthesized initialization arguments\n";
+    }
+
+    std::optional<SourceRange> handleBracedInitialization(const VarDecl *varDecl) {
+        if (!varDecl->hasInit()) {
+            return std::nullopt;
+        }
+
+        const Expr *init = unwrapExpr(varDecl->getInit());
+        
+        if (const auto *initList = dyn_cast<InitListExpr>(init)) {
+            REWRITE_LOG() << "    DEBUG: Processing InitListExpr with " << initList->getNumInits() << " elements\n";
+            
+            if (initList->getNumInits() == 0) {
+                // Empty initialization list - no children range
+                return std::nullopt;
+            }
+            
+            // Find first and last arguments with valid source locations
+            SourceLocation firstValidStart;
+            SourceLocation lastValidEnd;
+            bool foundFirst = false;
+            bool foundLast = false;
+            
+            // Find first argument with valid source location
+            for (unsigned i = 0; i < initList->getNumInits(); ++i) {
+                const Expr *arg = initList->getInit(i);
+                SourceRange argRange = arg->getSourceRange();
+                if (argRange.getBegin().isValid() && argRange.getEnd().isValid()) {
+                    firstValidStart = argRange.getBegin();
+                    foundFirst = true;
+                    break;
+                }
+            }
+            
+            // Find last argument with valid source location (search backwards)
+            for (int i = initList->getNumInits() - 1; i >= 0; --i) {
+                const Expr *arg = initList->getInit(i);
+                SourceRange argRange = arg->getSourceRange();
+                if (argRange.getBegin().isValid() && argRange.getEnd().isValid()) {
+                    lastValidEnd = argRange.getEnd();
+                    foundLast = true;
+                    break;
+                }
+            }
+            
+            // If no arguments have valid source locations, return nullopt
+            if (!foundFirst || !foundLast) {
+                REWRITE_LOG() << "    DEBUG: No arguments with valid source locations found in InitListExpr\n";
+                return std::nullopt;
+            }
+            
+            SourceRange childrenRange(firstValidStart, lastValidEnd);
+            
+            // Process each initialization element individually
+            for (unsigned i = 0; i < initList->getNumInits(); ++i) {
+                TraverseStmt(const_cast<Stmt*>(reinterpret_cast<const Stmt*>(initList->getInit(i))));
+            }
+            
+            return childrenRange;
+            
+        } else if (const auto *constructExpr = dyn_cast<CXXConstructExpr>(init)) {
+            // Handle CXXConstructExpr with list initialization
+            if (constructExpr->isListInitialization() && constructExpr->getNumArgs() > 0) {
+                REWRITE_LOG() << "    DEBUG: Processing CXXConstructExpr list initialization with " << constructExpr->getNumArgs() << " args\n";
+                
+                // Find first and last arguments with valid source locations
+                SourceLocation firstValidStart;
+                SourceLocation lastValidEnd;
+                bool foundFirst = false;
+                bool foundLast = false;
+                
+                // Find first argument with valid source location
+                for (unsigned i = 0; i < constructExpr->getNumArgs(); ++i) {
+                    const Expr *arg = constructExpr->getArg(i);
+                    SourceRange argRange = arg->getSourceRange();
+                    if (argRange.getBegin().isValid() && argRange.getEnd().isValid()) {
+                        // Skip the `{` before.
+                        firstValidStart = argRange.getBegin().getLocWithOffset(1);
+                        foundFirst = true;
+                        break;
+                    }
+                }
+                
+                // Find last argument with valid source location (search backwards)
+                for (int i = constructExpr->getNumArgs() - 1; i >= 0; --i) {
+                    const Expr *arg = constructExpr->getArg(i);
+                    SourceRange argRange = arg->getSourceRange();
+                    if (argRange.getBegin().isValid() && argRange.getEnd().isValid()) {
+                        // Skip the `}` after.
+                        lastValidEnd = argRange.getEnd().getLocWithOffset(-1);
+                        foundLast = true;
+                        break;
+                    }
+                }
+                
+                // If no arguments have valid source locations, return nullopt
+                if (!foundFirst || !foundLast) {
+                    REWRITE_LOG() << "    DEBUG: No arguments with valid source locations found in CXXConstructExpr\n";
+                    return std::nullopt;
+                }
+                
+                SourceRange argsRange(firstValidStart, lastValidEnd);
+                
+                // Process arguments individually
+                for (unsigned i = 0; i < constructExpr->getNumArgs(); ++i) {
+                    TraverseStmt(const_cast<Stmt*>(reinterpret_cast<const Stmt*>(constructExpr->getArg(i))));
+                }
+                
+                return argsRange;
+            }
+        }
+        
+        return std::nullopt;
+    }
+
     std::string getInitializationArguments(const VarDecl *varDecl) {
         std::string varName = varDecl->getNameAsString();
         REWRITE_LOG() << "    DEBUG: Processing initialization for variable: " << varName << "\n";

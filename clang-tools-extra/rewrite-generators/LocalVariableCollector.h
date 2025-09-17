@@ -107,13 +107,11 @@ public:
 
                     if (!var.name.empty()) {
                         variables.insert(var);
-                        /*
-                        REWRITE_LOG() << "  Found local variable: " << var.type << " " << var.name
+                        std::cout << "  Found local variable: " << var.type << " " << var.name
                                 << " (is reference: " << (var.isReference ? "yes" : "no")
                                 << ", storage type: " << var.isOwning
                                 << ", reference type: " << var.referenceType
                                 << ", priority: " << var.priority << ")\n";
-                                */
                     }
                 }
             }

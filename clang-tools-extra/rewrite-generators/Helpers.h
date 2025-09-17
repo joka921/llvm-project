@@ -54,7 +54,12 @@ std::string getSourceText(const Expr *expr, const SourceManager &sourceManager) 
 }
 
  bool isPrValue(const Expr* initializer) {
-    return initializer && unwrapExpr(initializer)->getValueKind() == VK_PRValue;
+    if (!initializer) {
+        return false;
+    }
+    //initializer->dump();
+    initializer = unwrapExpr(initializer);
+    return initializer->getValueKind() == VK_PRValue || (dyn_cast<InitListExpr>(initializer) != nullptr);
 }
 std::string typeAsString(const QualType& type, const ASTContext &astContext) {
     // Get the canonical type (resolves typedefs, auto, etc.)

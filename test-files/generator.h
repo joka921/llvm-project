@@ -13,313 +13,331 @@
 #include <utility>
 
 namespace cppcoro {
+    struct SuspendAlways {
+        constexpr bool await_ready() const noexcept { return false; }
 
-struct SuspendAlways {
-  constexpr bool await_ready() const noexcept { return false; }
-  constexpr void await_suspend([[maybe_unused]] auto handle) const noexcept {}
-  constexpr void await_resume() const noexcept {}
-};
-// This struct can be `co_await`ed inside a `generator` to obtain a reference to
-// the details object (the value of which is a template parameter to the
-// generator). For an example see `GeneratorTest.cpp`.
-struct GetDetails {};
-static constexpr GetDetails getDetails;
+        constexpr void await_suspend([[maybe_unused]] auto handle) const noexcept {
+        }
 
-// This struct is used as the default of the details object for the case that
-// there are no details
-struct NoDetails {};
+        constexpr void await_resume() const noexcept {
+        }
+    };
 
-template <typename T, typename Details = NoDetails,
-          template <typename...> typename GeneratorHandle =
-              std::coroutine_handle>
-class generator;
+    // This struct can be `co_await`ed inside a `generator` to obtain a reference to
+    // the details object (the value of which is a template parameter to the
+    // generator). For an example see `GeneratorTest.cpp`.
+    struct GetDetails {
+    };
 
-namespace detail {
-template <typename T, typename Details = NoDetails,
-          template <typename...> typename GeneratorHandle =
-              std::coroutine_handle>
-class generator_promise {
- public:
-  // Even if the generator only yields `const` values, the `value_type`
-  // shouldn't be `const` because otherwise several static checks when
-  // interacting with the STL fail.
-  using value_type = std::remove_cvref_t<T>;
-  using reference_type = std::conditional_t<std::is_reference_v<T>, T, T&>;
-  using pointer_type = std::remove_reference_t<T>*;
+    static constexpr GetDetails getDetails;
 
-  generator_promise() = default;
+    // This struct is used as the default of the details object for the case that
+    // there are no details
+    struct NoDetails {
+    };
 
-  generator<T, Details, GeneratorHandle> get_return_object() noexcept;
+    template<typename T, typename Details = NoDetails,
+        template <typename...> typename GeneratorHandle =
+        std::coroutine_handle>
+    class generator;
 
-  constexpr cppcoro::SuspendAlways initial_suspend() const noexcept {
-    return {};
-  }
-  constexpr cppcoro::SuspendAlways final_suspend() const noexcept { return {}; }
+    namespace detail {
+        template<typename T, typename Details = NoDetails,
+            template <typename...> typename GeneratorHandle =
+            std::coroutine_handle>
+        class generator_promise {
+        public:
+            // Even if the generator only yields `const` values, the `value_type`
+            // shouldn't be `const` because otherwise several static checks when
+            // interacting with the STL fail.
+            using value_type = std::remove_cvref_t<T>;
+            using reference_type = std::conditional_t<std::is_reference_v<T>, T, T &>;
+            using pointer_type = std::remove_reference_t<T> *;
 
-  template <typename U = T,
-            std::enable_if_t<!std::is_rvalue_reference<U>::value, int> = 0>
-  cppcoro::SuspendAlways yield_value(
-      std::remove_reference_t<T>& value) noexcept {
-    m_value = std::addressof(value);
-    return {};
-  }
+            generator_promise() = default;
 
-  cppcoro::SuspendAlways yield_value(
-      std::remove_reference_t<T>&& value) noexcept {
-    m_value = std::addressof(value);
-    return {};
-  }
+            generator<T, Details, GeneratorHandle> get_return_object() noexcept;
 
-  void unhandled_exception() { m_exception = std::current_exception(); }
+            constexpr cppcoro::SuspendAlways initial_suspend() const noexcept {
+                return {};
+            }
 
-  void return_void() {}
+            constexpr cppcoro::SuspendAlways final_suspend() const noexcept { return {}; }
 
-  reference_type value() const noexcept {
-    return static_cast<reference_type>(*m_value);
-  }
+            template<typename U = T,
+                std::enable_if_t<!std::is_rvalue_reference<U>::value, int> = 0>
+            cppcoro::SuspendAlways yield_value(
+                std::remove_reference_t<T> &value) noexcept {
+                m_value = std::addressof(value);
+                return {};
+            }
 
-  // Don't allow any use of 'co_await' inside the generator coroutine.
-  template<typename U>
-  void await_transform(U &&value) = delete;
+            cppcoro::SuspendAlways yield_value(
+                std::remove_reference_t<T> &&value) noexcept {
+                m_value = std::addressof(value);
+                return {};
+            }
 
-  void rethrow_if_exception() const {
-    if (m_exception) {
-      std::rethrow_exception(m_exception);
-    }
-  }
+            void unhandled_exception() { m_exception = std::current_exception(); }
 
- private:
-  pointer_type m_value;
-  std::exception_ptr m_exception;
+            void return_void() {
+            }
 
-};
+            reference_type value() const noexcept {
+                return static_cast<reference_type>(*m_value);
+            }
 
-struct generator_sentinel {};
+            // Don't allow any use of 'co_await' inside the generator coroutine.
+            template<typename U>
+            void await_transform(U &&value) = delete;
 
-template <typename T, typename Details,
-          template <typename...> typename GeneratorHandle,
-          bool ConstDummy = false>
-class generator_iterator {
-  using promise_type = generator_promise<T, Details, GeneratorHandle>;
-  using coroutine_handle = GeneratorHandle<promise_type>;
+            void rethrow_if_exception() const {
+                if (m_exception) {
+                    std::rethrow_exception(m_exception);
+                }
+            }
 
- public:
-  using iterator_category = std::input_iterator_tag;
-  // What type should we use for counting elements of a potentially infinite
-  // sequence?
-  using difference_type = std::ptrdiff_t;
-  using value_type = typename promise_type::value_type;
-  using reference = typename promise_type::reference_type;
-  using pointer = typename promise_type::pointer_type;
+        private:
+            pointer_type m_value;
+            std::exception_ptr m_exception;
+        };
 
-  // Iterator needs to be default-constructible to satisfy the Range concept.
-  generator_iterator() noexcept : m_coroutine(nullptr) {}
+        struct generator_sentinel {
+        };
 
-  explicit generator_iterator(coroutine_handle coroutine) noexcept
-      : m_coroutine(coroutine) {}
+        template<typename T, typename Details,
+            template <typename...> typename GeneratorHandle,
+            bool ConstDummy = false>
+        class generator_iterator {
+            using promise_type = generator_promise<T, Details, GeneratorHandle>;
+            using coroutine_handle = GeneratorHandle<promise_type>;
 
-  friend bool operator==(const generator_iterator& it,
-                         generator_sentinel) noexcept {
-    return !it.m_coroutine || it.m_coroutine.done();
-  }
+        public:
+            using iterator_category = std::input_iterator_tag;
+            // What type should we use for counting elements of a potentially infinite
+            // sequence?
+            using difference_type = std::ptrdiff_t;
+            using value_type = typename promise_type::value_type;
+            using reference = typename promise_type::reference_type;
+            using pointer = typename promise_type::pointer_type;
 
-  friend bool operator!=(const generator_iterator& it,
-                         generator_sentinel s) noexcept {
-    return !(it == s);
-  }
+            // Iterator needs to be default-constructible to satisfy the Range concept.
+            generator_iterator() noexcept : m_coroutine(nullptr) {
+            }
 
-  friend bool operator==(generator_sentinel s,
-                         const generator_iterator& it) noexcept {
-    return (it == s);
-  }
+            explicit generator_iterator(coroutine_handle coroutine) noexcept
+                : m_coroutine(coroutine) {
+            }
 
-  friend bool operator!=(generator_sentinel s,
-                         const generator_iterator& it) noexcept {
-    return it != s;
-  }
+            friend bool operator==(const generator_iterator &it,
+                                   generator_sentinel) noexcept {
+                return !it.m_coroutine || it.m_coroutine.done();
+            }
 
-  generator_iterator& operator++() {
-    m_coroutine.resume();
-    if (m_coroutine.done()) {
-      m_coroutine.promise().rethrow_if_exception();
-    }
+            friend bool operator!=(const generator_iterator &it,
+                                   generator_sentinel s) noexcept {
+                return !(it == s);
+            }
 
-    return *this;
-  }
+            friend bool operator==(generator_sentinel s,
+                                   const generator_iterator &it) noexcept {
+                return (it == s);
+            }
 
-  // Need to provide post-increment operator to implement the 'Range' concept.
-  void operator++(int) { (void)operator++(); }
+            friend bool operator!=(generator_sentinel s,
+                                   const generator_iterator &it) noexcept {
+                return it != s;
+            }
 
-  reference operator*() const noexcept { return m_coroutine.promise().value(); }
+            generator_iterator &operator++() {
+                m_coroutine.resume();
+                if (m_coroutine.done()) {
+                    m_coroutine.promise().rethrow_if_exception();
+                }
 
-  pointer operator->() const noexcept { return std::addressof(operator*()); }
+                return *this;
+            }
 
- private:
-  coroutine_handle m_coroutine;
-};
-}  // namespace detail
+            // Need to provide post-increment operator to implement the 'Range' concept.
+            void operator++(int) { (void) operator++(); }
 
-template <typename T, typename Details,
-          template <typename...> typename GeneratorHandle>
-class [[nodiscard]] generator {
- public:
-  using promise_type = detail::generator_promise<T, Details, GeneratorHandle>;
-  using iterator =
-      detail::generator_iterator<T, Details, GeneratorHandle, false>;
-  // TODO<joka921> Check if this fixes anything wrt ::ranges
-  // using const_iterator = detail::generator_iterator<T, Details, true>;
-  using value_type = typename iterator::value_type;
+            reference operator*() const noexcept { return m_coroutine.promise().value(); }
 
-  generator() noexcept : m_coroutine(nullptr) {}
+            pointer operator->() const noexcept { return std::addressof(operator*()); }
 
-  generator(generator&& other) noexcept : m_coroutine(other.m_coroutine) {
-    other.m_coroutine = nullptr;
-  }
+        private:
+            coroutine_handle m_coroutine;
+        };
+    } // namespace detail
 
-  generator(const generator& other) = delete;
+    template<typename T, typename Details,
+        template <typename...> typename GeneratorHandle>
+    class [[nodiscard]] generator {
+    public:
+        using promise_type = detail::generator_promise<T, Details, GeneratorHandle>;
+        using iterator =
+        detail::generator_iterator<T, Details, GeneratorHandle, false>;
+        // TODO<joka921> Check if this fixes anything wrt ::ranges
+        // using const_iterator = detail::generator_iterator<T, Details, true>;
+        using value_type = typename iterator::value_type;
 
-  ~generator() {
-    if (m_coroutine) {
-      m_coroutine.destroy();
-    }
-  }
+        generator() noexcept : m_coroutine(nullptr) {
+        }
 
-  generator& operator=(generator other) noexcept {
-    swap(other);
-    return *this;
-  }
+        generator(generator &&other) noexcept : m_coroutine(other.m_coroutine) {
+            other.m_coroutine = nullptr;
+        }
 
-  iterator begin() {
-    if (m_coroutine) {
-      m_coroutine.resume();
-      if (m_coroutine.done()) {
-        m_coroutine.promise().rethrow_if_exception();
-      }
-    }
+        generator(const generator &other) = delete;
 
-    return iterator{m_coroutine};
-  }
+        ~generator() {
+            if (m_coroutine) {
+                m_coroutine.destroy();
+            }
+        }
 
-  /*
-  iterator begin() const;
-  detail::generator_sentinel end() const;
-  */
+        generator &operator=(generator other) noexcept {
+            swap(other);
+            return *this;
+        }
 
-  detail::generator_sentinel end() noexcept {
-    return detail::generator_sentinel{};
-  }
+        iterator begin() {
+            if (m_coroutine) {
+                m_coroutine.resume();
+                if (m_coroutine.done()) {
+                    m_coroutine.promise().rethrow_if_exception();
+                }
+            }
 
-  /*
-  // Not defined and not useful, but required for range-v3
-  const_iterator begin() const;
-  const_iterator end() const;
-  */
+            return iterator{m_coroutine};
+        }
 
-  void swap(generator& other) noexcept {
-    std::swap(m_coroutine, other.m_coroutine);
-  }
+        /*
+        iterator begin() const;
+        detail::generator_sentinel end() const;
+        */
 
-  const Details& details() const {
-    return m_coroutine ? m_coroutine.promise().details()
+        detail::generator_sentinel end() noexcept {
+            return detail::generator_sentinel{};
+        }
+
+        /*
+        // Not defined and not useful, but required for range-v3
+        const_iterator begin() const;
+        const_iterator end() const;
+        */
+
+        void swap(generator &other) noexcept {
+            std::swap(m_coroutine, other.m_coroutine);
+        }
+
+        const Details &details() const {
+            return m_coroutine
+                       ? m_coroutine.promise().details()
                        : m_details_if_default_constructed;
-  }
-  Details& details() {
-    return m_coroutine ? m_coroutine.promise().details()
+        }
+
+        Details &details() {
+            return m_coroutine
+                       ? m_coroutine.promise().details()
                        : m_details_if_default_constructed;
-  }
+        }
 
-  void setDetailsPointer(Details* pointer) {
-    m_coroutine.promise().setDetailsPointer(pointer);
-  }
+        void setDetailsPointer(Details *pointer) {
+            m_coroutine.promise().setDetailsPointer(pointer);
+        }
 
- private:
-  friend class detail::generator_promise<T, Details, GeneratorHandle>;
+    private:
+        friend class detail::generator_promise<T, Details, GeneratorHandle>;
 
-  // In the case of an empty, default-constructed `generator` object we still
-  // want the call to `details` to return a valid object that in this case is
-  // owned directly by the generator itself.
-  [[no_unique_address]] Details m_details_if_default_constructed;
+        // In the case of an empty, default-constructed `generator` object we still
+        // want the call to `details` to return a valid object that in this case is
+        // owned directly by the generator itself.
+        [[no_unique_address]] Details m_details_if_default_constructed;
 
-  explicit generator(GeneratorHandle<promise_type> coroutine) noexcept
-      : m_coroutine(coroutine) {}
+        explicit generator(GeneratorHandle<promise_type> coroutine) noexcept
+            : m_coroutine(coroutine) {
+        }
 
-  GeneratorHandle<promise_type> m_coroutine;
-};
+        GeneratorHandle<promise_type> m_coroutine;
+    };
 
-template <typename T, typename D, template <typename...> typename H>
-void swap(generator<T, D, H>& a, generator<T, D, H>& b) {
-  a.swap(b);
-}
+    template<typename T, typename D, template <typename...> typename H>
+    void swap(generator<T, D, H> &a, generator<T, D, H> &b) {
+        a.swap(b);
+    }
 
-namespace detail {
-template <typename T, typename Details, template <typename...> typename H>
-generator<T, Details, H>
-generator_promise<T, Details, H>::get_return_object() noexcept {
-  using coroutine_handle = H<generator_promise<T, Details, H>>;
-  return generator<T, Details, H>{coroutine_handle::from_promise(*this)};
-}
-}  // namespace detail
-
-}  // namespace cppcoro
+    namespace detail {
+        template<typename T, typename Details, template <typename...> typename H>
+        generator<T, Details, H>
+        generator_promise<T, Details, H>::get_return_object() noexcept {
+            using coroutine_handle = H<generator_promise<T, Details, H> >;
+            return generator<T, Details, H>{coroutine_handle::from_promise(*this)};
+        }
+    } // namespace detail
+} // namespace cppcoro
 
 struct HandleFrame {
-  using F = void(void*);
-  using B = bool(void*);
-  void* target;
-  F* resumeFunc;
-  F* destroyFunc;
-  B* doneFunc;
+    using F = void(void *);
+    using B = bool(void *);
+    void *target;
+    F *resumeFunc;
+    F *destroyFunc;
+    B *doneFunc;
 };
 
-template <typename Promise = void>
+template<typename Promise = void>
 struct Handle {
-  HandleFrame* ptr;
-  void resume() { ptr->resumeFunc(ptr->target); }
-  static Handle from_promise(Promise& p) {
+    HandleFrame *ptr;
+    void resume() { ptr->resumeFunc(ptr->target); }
+
+    static Handle from_promise(Promise &p) {
+        // TODO<joka921> This has to take into account the alignment.
+        auto ptr = reinterpret_cast<HandleFrame *>(reinterpret_cast<char *>(&p) -
+                                                   sizeof(HandleFrame));
+        /*
+        std::cerr << "Address of frame computed " << reinterpret_cast<intptr_t>(ptr)
+                  << std::endl;
+                  */
+        return Handle{ptr};
+    }
+
+    operator bool() const { return static_cast<bool>(ptr); }
+
+    bool done() const { return ptr->doneFunc(ptr->target); }
+
     // TODO<joka921> This has to take into account the alignment.
-    auto ptr = reinterpret_cast<HandleFrame*>(reinterpret_cast<char*>(&p) -
-                                              sizeof(HandleFrame));
-    /*
-    std::cerr << "Address of frame computed " << reinterpret_cast<intptr_t>(ptr)
-              << std::endl;
-              */
-    return Handle{ptr};
-  }
+    Promise &promise() {
+        return *reinterpret_cast<Promise *>(reinterpret_cast<char *>(ptr) +
+                                            sizeof(HandleFrame));
+    }
 
-  operator bool() const { return static_cast<bool>(ptr); }
+    const Promise &promise() const {
+        return *reinterpret_cast<Promise *>(reinterpret_cast<char *>(ptr) +
+                                            sizeof(HandleFrame));
+    }
 
-  bool done() const { return ptr->doneFunc(ptr->target); }
-
-  // TODO<joka921> This has to take into account the alignment.
-  Promise& promise() {
-    return *reinterpret_cast<Promise*>(reinterpret_cast<char*>(ptr) +
-                                       sizeof(HandleFrame));
-  }
-  const Promise& promise() const {
-    return *reinterpret_cast<Promise*>(reinterpret_cast<char*>(ptr) +
-                                       sizeof(HandleFrame));
-  }
-
-  void destroy() { ptr->destroyFunc(ptr->target); }
+    void destroy() { ptr->destroyFunc(ptr->target); }
 };
 
-template <typename T>
+template<typename T>
 inline constexpr bool alwaysFalse = false;
-bool co_await_impl(auto&& awaiter, auto handle) {
-  if (awaiter.await_ready()) {
-    return true;
-  }
-  using type = decltype(awaiter.await_suspend(handle));
-  static_assert(std::is_void_v<decltype(awaiter.await_resume())>);
-  if constexpr (std::is_void_v<type>) {
-    awaiter.await_suspend(handle);
-    return false;
-  } else if constexpr (std::same_as<type, bool>) {
-    return !awaiter.await_suspend(handle);
-  } else {
-    static_assert(alwaysFalse<type>,
-                  "await_suspend with symmetric transfer is not yet supported");
-  }
+
+bool co_await_impl(auto &&awaiter, auto handle) {
+    if (awaiter.await_ready()) {
+        return true;
+    }
+    using type = decltype(awaiter.await_suspend(handle));
+    static_assert(std::is_void_v<decltype(awaiter.await_resume())>);
+    if constexpr (std::is_void_v<type>) {
+        awaiter.await_suspend(handle);
+        return false;
+    } else if constexpr (std::same_as<type, bool>) {
+        return !awaiter.await_suspend(handle);
+    } else {
+        static_assert(alwaysFalse<type>,
+                      "await_suspend with symmetric transfer is not yet supported");
+    }
 }
 
 #define CO_YIELD(index, value)                                   \
@@ -334,121 +352,125 @@ bool co_await_impl(auto&& awaiter, auto handle) {
   [[fallthrough]];                                        \
   case index:
 
-template <typename Derived, typename PromiseType, typename StateType>
+template<typename Derived, typename PromiseType>
 struct CoroImpl {
-  HandleFrame frm;
-  PromiseType pt;
-  static void CHECK() {
-    static_assert(offsetof(CoroImpl, pt) -
+    HandleFrame frm;
+    PromiseType pt;
+
+    static void CHECK() {
+        static_assert(offsetof(CoroImpl, pt) -
                       offsetof(CoroImpl, frm) ==
-                  sizeof(HandleFrame));
-  }
-  size_t curState = 0;
-  StateType state;
-  using Hdl = Handle<PromiseType>;
+                      sizeof(HandleFrame));
+    }
 
-  PromiseType& promise() { return pt; }
+    size_t curState = 0;
+    using Hdl = Handle<PromiseType>;
 
-  static auto cast(void* blubb) {
-    return static_cast<Derived*>(reinterpret_cast<CoroImpl*>(
-        reinterpret_cast<char*>(blubb) -
-        offsetof(CoroImpl, frm)));
-  }
+    PromiseType &promise() { return pt; }
 
-  static void resume(void* blubb) { cast(blubb)->doStep(); }
+    static auto cast(void *blubb) {
+        return static_cast<Derived *>(reinterpret_cast<CoroImpl *>(
+            reinterpret_cast<char *>(blubb) -
+            offsetof(CoroImpl, frm)));
+    }
 
-  // TODO<joka921> Allocator support.
-  static void destroy(void* blubb) { delete (cast(blubb)); }
-  static bool done([[maybe_unused]] void* blubb) {
-    // TODO extend to more general things.
-    return false;
-  }
+    static void resume(void *blubb) { cast(blubb)->doStep(); }
 
-  CoroImpl() {
-    CHECK();
-    frm.target = this;
-    frm.resumeFunc = &CoroImpl::resume;
-    frm.destroyFunc = &CoroImpl::destroy;
-    frm.doneFunc = &CoroImpl::done;
-  }
+    // TODO<joka921> Allocator support.
+    static void destroy(void *blubb) { delete (cast(blubb)); }
 
-  static auto make() {
-    // TODO allocator support
-    auto* frame = new Derived;
-    return frame->pt.get_return_object();
-  }
+    static bool done([[maybe_unused]] void *blubb) {
+        // TODO extend to more general things.
+        return false;
+    }
+
+    CoroImpl() {
+        CHECK();
+        frm.target = this;
+        frm.resumeFunc = &CoroImpl::resume;
+        frm.destroyFunc = &CoroImpl::destroy;
+        frm.doneFunc = &CoroImpl::done;
+    }
+
+    static auto make() {
+        // TODO allocator support
+        auto *frame = new Derived;
+        return frame->pt.get_return_object();
+    }
 };
 
 #define COROUTINE_HEADER(returnType, StateType)                              \
   using PromiseType =                                                  \
       returnType::promise_type;       \
   struct GeneratorStateMachine                                         \
-      : CoroImpl<GeneratorStateMachine, PromiseType, \
-                                   StateType> {                      \
+      : CoroImpl<GeneratorStateMachine, PromiseType \
+                                   > {                      \
+    StateType state; \
     void doStep() { \
 switch (this->curState) {      \
 case 0:
-#define COROUTINE_FOOTER \
+#define COROUTINE_FOOTER(...) \
   }                      \
   }                      \
   }                      \
   ;                      \
-  return GeneratorStateMachine::make();
+  auto* frame = new GeneratorStateMachine{{}, {__VA_ARGS__}};  \
+  return frame->pt.get_return_object();
 
 #define FOR_LOOP_HEADER(N)
 
 template<typename Ref, bool isOwning>
 struct _coro_storage {
-  using Storage = std::conditional_t<isOwning, std::decay_t<Ref>, std::add_pointer_t<std::decay_t<Ref>>>;
-  alignas(Storage) char buffer[sizeof(Storage)];
-  bool constructed = false;
+    using Storage = std::conditional_t<isOwning, std::decay_t<Ref>, std::add_pointer_t<std::decay_t<Ref> > >;
+    alignas(Storage) char buffer[sizeof(Storage)];
+    bool constructed = false;
 
-  struct Val {
-    Ref ref_;
-  };
+    struct Val {
+        Ref ref_;
+    };
 
-  template<typename... Args>
-  void construct(Args&&... args) {
-    if constexpr (!isOwning) {
-    new(buffer) Storage(&args...);
-    } else {
-      new(buffer) Storage(std::forward<Args>(args)...);
+    template<typename... Args>
+    void construct(Args &&... args) {
+        if constexpr (!isOwning) {
+            new(buffer) Storage(&args...);
+        } else {
+            new(buffer) Storage(std::forward<Args>(args)...);
+        }
+        constructed = true;
     }
-    constructed = true;
-  }
 
-  void destroy() {
-    if (constructed) {
-      reinterpret_cast<Storage*>(buffer)->~Storage();
-      constructed = false;
+    void destroy() {
+        if (constructed) {
+            reinterpret_cast<Storage *>(buffer)->~Storage();
+            constructed = false;
+        }
     }
-  }
 
-  Val get() {
-    Storage& storage = *reinterpret_cast<Storage*>(buffer);
-    if constexpr (isOwning) {
-      return Val{static_cast<Ref>(storage)};
-    } else {
-      return Val{static_cast<Ref>(*storage)};
+    Val get() {
+        Storage &storage = *reinterpret_cast<Storage *>(buffer);
+        if constexpr (isOwning) {
+            return Val{static_cast<Ref>(storage)};
+        } else {
+            return Val{static_cast<Ref>(*storage)};
+        }
     }
-  }
 
-  ~_coro_storage() {
-    destroy();
-  }
+    ~_coro_storage() {
+        destroy();
+    }
 };
 
 
-template <typename Ref, bool isOwning>
+template<typename Ref, bool isOwning>
 struct coro_for_loop_storage {
-  _coro_storage<Ref, isOwning> range_;
-  // TODO<joka921> This doesn't work for nonmember begin and end, but that should work for most cases now.
-  using Begin = decltype(std::declval<Ref>().begin());
-  using End = decltype(std::declval<Ref>().end());
-  _coro_storage<Begin&, true> begin_;
-  _coro_storage<End&, true> end_;
+    _coro_storage<Ref, isOwning> range_;
+    // TODO<joka921> This doesn't work for nonmember begin and end, but that should work for most cases now.
+    using Begin = decltype(std::declval<Ref>().begin());
+    using End = decltype(std::declval<Ref>().end());
+    _coro_storage<Begin &, true> begin_;
+    _coro_storage<End &, true> end_;
 };
 
-#define CO_GET(arg) this->state.arg.get()
+#define CO_GET(arg) this->state.arg.get().ref_
 
 #endif

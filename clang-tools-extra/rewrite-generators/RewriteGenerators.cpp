@@ -66,10 +66,17 @@ struct RangedForLoop {
     SourceRange fullRange;
 };
 
+struct FunctionParameter {
+    std::string name;
+    std::string type;
+    QualType qualType;
+};
+
 struct CoroutineInfo {
     const FunctionDecl *function;
     std::set<LocalVariable> localVariables;
     std::vector<RangedForLoop> rangedForLoops; // Add ranged-for loop info
+    std::vector<FunctionParameter> parameters; // Function parameters
     SourceLocation insertionPoint;
     bool hasError = false;
 };
@@ -988,8 +995,7 @@ private:
             // Use minimum priority among all replacements for this position
             int minPriority = sortedReplacements.empty() ? 0 : sortedReplacements[0].priority;
 
-            insertBrace();
-            concatenatedReplacement += "}\n"; // Re-add the brace after the concatenated replacement.
+            insertBrace();// Re-add the brace after the concatenated replacement.
             globalReplacements.emplace_back(braceRange, concatenatedReplacement, minPriority);
 
             REWRITE_LOG() << "    Added concatenated replacement (" << concatenatedReplacement.length() << " chars) at "
@@ -1175,6 +1181,26 @@ private:
     void collectLocalVariables(const Stmt *body, std::set<LocalVariable> &variables) {
         LocalVariableCollector collector(variables, sourceManager, *astContext);
         collector.TraverseStmt(const_cast<Stmt *>(body));
+    }
+
+    void collectFunctionParameters(const FunctionDecl *funcDecl, std::vector<FunctionParameter> &parameters) {
+        REWRITE_LOG() << "  DEBUG: Collecting function parameters\n";
+        
+        for (const auto *param : funcDecl->parameters()) {
+            FunctionParameter fp;
+            fp.name = param->getNameAsString();
+            fp.qualType = param->getType();
+            
+            // Get the type as string for debugging/logging
+            PrintingPolicy policy(astContext->getLangOpts());
+            fp.type = fp.qualType.getAsString(policy);
+            
+            parameters.push_back(fp);
+            
+            REWRITE_LOG() << "    Found parameter: " << fp.type << " " << fp.name << "\n";
+        }
+        
+        REWRITE_LOG() << "  Found " << parameters.size() << " function parameters\n";
     }
 
     std::string replaceLastTemplateArgWithHandle(const std::string &returnType) {
@@ -1370,6 +1396,17 @@ private:
             REWRITE_LOG() << "    Variable: " << var.type << " " << var.name << "\n";
         }
 
+        // Add function parameters first
+        if (!coro.parameters.empty()) {
+            structCode += "    // Function parameters\n";
+            for (const auto &param : coro.parameters) {
+                std::string paramType = "decltype(" + param.name + ")";
+                structCode += "    " + paramType + " " + param.name + ";\n";
+                REWRITE_LOG() << "    Added parameter to struct: " << paramType << " " << param.name << "\n";
+            }
+            structCode += "\n";
+        }
+
         // Add all local variables (including ranged-for variables)
         if (coro.localVariables.empty()) {
             structCode += "    // No local variables found in this coroutine\n";
@@ -1425,6 +1462,7 @@ public:
             REWRITE_LOG() << "Processing coroutine: " << funcDecl->getQualifiedNameAsString() << "\n";
 
             collectLocalVariables(funcDecl->getBody(), coro.localVariables);
+            collectFunctionParameters(funcDecl, coro.parameters);
 
             coro.insertionPoint = findStructInsertionPoint(funcDecl);
             if (coro.insertionPoint.isInvalid()) {
@@ -1766,7 +1804,19 @@ public:
                 unsigned fileOffset = sourceManager.getFileOffset(rbraceLoc);
                 
                 ScopeEndReplacement replacement;
-                replacement.replacement = "COROUTINE_FOOTER\n";
+                
+                // Build parameter list for COROUTINE_FOOTER
+                std::string paramList;
+                if (!coro.parameters.empty()) {
+                    for (size_t i = 0; i < coro.parameters.size(); ++i) {
+                        if (i > 0) paramList += ", ";
+                        paramList += coro.parameters[i].name;
+                    }
+                    replacement.replacement = "COROUTINE_FOOTER(" + paramList + ")\n";
+                } else {
+                    replacement.replacement = "COROUTINE_FOOTER\n";
+                }
+                
                 // Use maximum priority to ensure COROUTINE_FOOTER comes after all destructors
                 replacement.priority = std::numeric_limits<int>::max();
                 
@@ -1774,6 +1824,7 @@ public:
                 
                 REWRITE_LOG() << "  DEBUG: Added COROUTINE_FOOTER to scope end replacements with maximum priority (" 
                               << replacement.priority << ") at file offset " << fileOffset << "\n";
+                REWRITE_LOG() << "  DEBUG: COROUTINE_FOOTER replacement text: '" << replacement.replacement << "'\n";
 
                 REWRITE_LOG() << "  DEBUG: Successfully added COROUTINE_FOOTER to scope end system\n";
             } else {

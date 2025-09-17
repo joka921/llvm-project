@@ -58,7 +58,7 @@ struct RangedForLoop {
     const CXXForRangeStmt *stmt;
     std::string loopVarName;
     std::string loopVarType;
-    Expr* rangeExpr;
+    Expr *rangeExpr;
     std::string rangeVarName; // e.g., "__range_0"
     std::string beginVarName; // e.g., "__begin_0"
     std::string endVarName; // e.g., "__end_0"
@@ -79,6 +79,11 @@ struct CoroutineInfo {
     std::vector<FunctionParameter> parameters; // Function parameters
     SourceLocation insertionPoint;
     bool hasError = false;
+
+    // Member function information
+    bool isMemberFunction = false;
+    bool isConstMemberFunction = false;
+    std::string className;
 };
 
 
@@ -110,6 +115,8 @@ struct CoroutineStatement {
     SourceLocation operandEnd;
 };
 
+// The bool means `true` for replace, `false` for insert after the beginning.
+using Replacement = std::tuple<SourceRange, std::string, bool>;
 
 class CoroutineBodyRewriter : public RecursiveASTVisitor<CoroutineBodyRewriter> {
 private:
@@ -117,9 +124,10 @@ private:
     Rewriter &rewriter;
     const SourceManager &sourceManager;
     std::set<std::string> variableNames;
-    std::vector<std::pair<SourceRange, std::string> > declReplacements;
-    std::vector<std::pair<SourceRange, std::string> > refReplacements;
+    std::vector<Replacement> declReplacements;
+    std::vector<Replacement> refReplacements;
     std::set<SourceLocation> processedDeclarations;
+    std::set<SourceLocation> processedThisExpressions;
     std::vector<ScopeInfo> scopeStack;
     std::vector<std::pair<SourceLocation, std::string> > destructorInsertions;
     std::vector<CoroutineStatement> coroutineStatements;
@@ -127,16 +135,23 @@ private:
     std::vector<RangedForLoop> rangedForLoops;
     unsigned nextRangedForIndex;
 
+    // Member function information
+    bool isMemberFunction;
+    const CXXRecordDecl *classDecl;
+
     // Map from closing brace position to all replacements that should happen at that position
 
     // Global replacement vector for ALL types of replacements (SourceRange, replacement_string, priority)
 public:
     std::map<unsigned, std::vector<ScopeEndReplacement> > scopeEndReplacements;
-    std::vector<std::tuple<SourceRange, std::string, int> > globalReplacements;
+    // The int is the priority, the `bool` means `true` for replace.
+    std::vector<std::tuple<SourceRange, std::string, int, bool> > globalReplacements;
 
 public:
-    CoroutineBodyRewriter(const std::set<LocalVariable> &vars, Rewriter &rewr, const SourceManager &SM)
-        : localVariables(vars), rewriter(rewr), sourceManager(SM), nextCoroStatementIndex(1), nextRangedForIndex(0) {
+    CoroutineBodyRewriter(const std::set<LocalVariable> &vars, Rewriter &rewr, const SourceManager &SM,
+                          bool isMember = false, const CXXRecordDecl *classRecord = nullptr)
+        : localVariables(vars), rewriter(rewr), sourceManager(SM), nextCoroStatementIndex(1), nextRangedForIndex(0),
+          isMemberFunction(isMember), classDecl(classRecord) {
         // Create a set of variable names for quick lookup
         for (const auto &var: localVariables) {
             variableNames.insert(var.name);
@@ -200,29 +215,29 @@ public:
 
                     // Create construct prefix and add replacement for declaration part
                     std::string constructPrefix = makeStateConstructPrefix(varName);
-                    
+
                     if (varDecl->hasInit()) {
                         // Get the range for just the declaration part (type + name)
                         SourceLocation declStart = varDecl->getSourceRange().getBegin();
                         SourceLocation initStart = varDecl->getInit()->getSourceRange().getBegin();
                         SourceRange declOnlyRange(declStart, initStart.getLocWithOffset(-1));
-                        
+
                         // Replace declaration part with construct prefix
-                        declReplacements.emplace_back(declOnlyRange, constructPrefix);
-                        
+                        declReplacements.emplace_back(declOnlyRange, constructPrefix, true);
+
                         // Recursively visit the initialization expression
                         TraverseStmt(varDecl->getInit());
-                        
+
                         // Add closing parenthesis and semicolon at the end
                         SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
                         SourceLocation afterInit = Lexer::getLocForEndOfToken(initEnd, 0, sourceManager, LangOptions());
                         SourceRange closingRange(afterInit, afterInit);
-                        declReplacements.emplace_back(closingRange, ");");
+                        declReplacements.emplace_back(closingRange, ")", false);
                     } else {
                         // No initialization - replace entire declaration with empty construct call
-                        std::string constructCall = constructPrefix + ");";
+                        std::string constructCall = constructPrefix + ")";
                         SourceRange declRange = varDecl->getSourceRange();
-                        declReplacements.emplace_back(declRange, constructCall);
+                        declReplacements.emplace_back(declRange, constructCall, true);
                     }
                 }
             }
@@ -387,10 +402,62 @@ public:
 
                     std::string getCall = makeStateGetCall(varName);
                     SourceRange refRange = declRef->getSourceRange();
-                    refReplacements.emplace_back(refRange, getCall);
+                    refReplacements.emplace_back(refRange, getCall, true);
                 }
             }
         }
+        return true;
+    }
+
+    // Handle member expressions - replace with __self->
+    bool VisitMemberExpr(MemberExpr *memberExpr) {
+        if (!isMemberFunction) {
+            return true; // Not a member function, nothing to do
+        }
+
+        std::string memberName = memberExpr->getMemberNameInfo().getAsString();
+        std::string replacement = "__self->" + memberName;
+
+        // Check if this is an explicit 'this' access
+        if (auto *explicitThis = dyn_cast<CXXThisExpr>(memberExpr->getBase())) {
+            REWRITE_LOG() << "  Found explicit member access via 'this': " << memberName << "\n";
+
+            // Mark this 'this' expression as processed to avoid double replacement
+            processedThisExpressions.insert(explicitThis->getLocation());
+
+            // Replace the entire "this->member" expression with "__self->member"
+            SourceRange entireExprRange = memberExpr->getSourceRange();
+            refReplacements.emplace_back(entireExprRange, replacement, true);
+        } else if (memberExpr->isImplicitAccess()) {
+            REWRITE_LOG() << "  Found implicit member access: " << memberName << "\n";
+
+            // Replace the entire member expression with "__self->member"
+            SourceRange memberRange = memberExpr->getSourceRange();
+            refReplacements.emplace_back(memberRange, replacement, true);
+        }
+
+        return true;
+    }
+
+    // Handle standalone this expressions (not part of member access)
+    bool VisitCXXThisExpr(CXXThisExpr *thisExpr) {
+        if (!isMemberFunction) {
+            return true; // Not a member function, nothing to do
+        }
+
+        // Check if this 'this' expression was already processed by VisitMemberExpr
+        SourceLocation thisLoc = thisExpr->getLocation();
+        if (processedThisExpressions.count(thisLoc)) {
+            REWRITE_LOG() << "  Skipping 'this' expression (already processed by member access)\n";
+            return true;
+        }
+
+        REWRITE_LOG() << "  Found standalone 'this' expression\n";
+
+        // Replace standalone "this" with "__self"
+        SourceRange thisRange = thisExpr->getSourceRange();
+        refReplacements.emplace_back(thisRange, "__self", true);
+
         return true;
     }
 
@@ -659,43 +726,55 @@ private:
                 REWRITE_LOG() << "    DEBUG: Collecting co_yield replacement for CO_YIELD(" << coroStmt.index <<
                         ", ...)\n";
 
-                // Replace "co_yield" with "CO_YIELD(index, "
+                // Replace "co_yield" keyword with "CO_YIELD(index, " (without closing paren)
                 std::string macroStart = "CO_YIELD(" + std::to_string(coroStmt.index) + ", ";
 
                 // Priority based on index for consistent ordering
                 int priority = static_cast<int>(coroStmt.index);
 
-                // Create SourceRange from keyword location
-                SourceRange keywordRange(coroStmt.keywordLoc, coroStmt.keywordLoc);
-                globalReplacements.emplace_back(keywordRange, macroStart, priority);
+                // Replace just the keyword
+                SourceLocation keywordEnd = Lexer::getLocForEndOfToken(
+                    coroStmt.keywordLoc, 0, sourceManager, LangOptions());
+                SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
+                globalReplacements.emplace_back(keywordRange, macroStart, priority, true);
 
-                // Add closing parenthesis after the operand
+                // Insert closing parenthesis after the operand (if there is one)
                 if (coroStmt.operand) {
                     SourceLocation operandEnd = Lexer::getLocForEndOfToken(
                         coroStmt.operandEnd, 0, sourceManager, LangOptions());
                     SourceRange parenRange(operandEnd, operandEnd);
-                    globalReplacements.emplace_back(parenRange, ")", priority + 1000); // Later priority
+                    globalReplacements.emplace_back(parenRange, ")", priority + 1000, false); // Later priority
+                } else {
+                    // No operand case - just insert closing paren right after the macro start
+                    SourceRange parenRange(keywordEnd, keywordEnd);
+                    globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
                 }
             } else if (coroStmt.type == CoroutineStatement::AWAIT) {
                 REWRITE_LOG() << "    DEBUG: Collecting co_await replacement for CO_AWAIT(" << coroStmt.index <<
                         ", ...)\n";
 
-                // Replace "co_await" with "CO_AWAIT(index, "
+                // Replace "co_await" keyword with "CO_AWAIT(index, " (without closing paren)
                 std::string macroStart = "CO_AWAIT(" + std::to_string(coroStmt.index) + ", ";
 
                 // Priority based on index for consistent ordering
                 int priority = static_cast<int>(coroStmt.index);
 
-                // Create SourceRange from keyword location
-                SourceRange keywordRange(coroStmt.keywordLoc, coroStmt.keywordLoc);
-                globalReplacements.emplace_back(keywordRange, macroStart, priority);
+                // Replace just the keyword
+                SourceLocation keywordEnd = Lexer::getLocForEndOfToken(
+                    coroStmt.keywordLoc, 0, sourceManager, LangOptions());
+                SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
+                globalReplacements.emplace_back(keywordRange, macroStart, priority, true);
 
-                // Add closing parenthesis after the operand
+                // Insert closing parenthesis after the operand (if there is one)
                 if (coroStmt.operand) {
                     SourceLocation operandEnd = Lexer::getLocForEndOfToken(
                         coroStmt.operandEnd, 0, sourceManager, LangOptions());
                     SourceRange parenRange(operandEnd, operandEnd);
-                    globalReplacements.emplace_back(parenRange, ")", priority + 1000); // Later priority
+                    globalReplacements.emplace_back(parenRange, ")", priority + 1000, false); // Later priority
+                } else {
+                    // No operand case - just insert closing paren right after the macro start
+                    SourceRange parenRange(keywordEnd, keywordEnd);
+                    globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
                 }
             }
         }
@@ -789,17 +868,20 @@ private:
 
             // Generate the construct calls for __range, __begin, __end followed by the for loop
             std::string constructCalls =
-                    makeStateConstructCall(rangedFor.rangeVarName, getSourceText(rangedFor.rangeExpr, sourceManager)) + ";\n" +
+                    makeStateConstructCall(rangedFor.rangeVarName,
+                                           getSourceText(rangedFor.rangeExpr, sourceManager)) + ";\n" +
                     "    " + makeStateConstructCall(rangedFor.beginVarName, makeStateGetCall(
-                        rangedFor.rangeVarName) + ".begin()") + ";\n" +
+                                                                                rangedFor.rangeVarName) + ".begin()") +
+                    ";\n" +
                     "    " + makeStateConstructCall(rangedFor.endVarName, makeStateGetCall(
-                        rangedFor.rangeVarName) + ".end()") + ";\n" +
+                                                                              rangedFor.rangeVarName) + ".end()") +
+                    ";\n" +
                     "    for (; " + makeStateGetCall(rangedFor.beginVarName) + " != " + makeStateGetCall(
                         rangedFor.endVarName) +
                     "; ++" + makeStateGetCall(rangedFor.beginVarName) + ")";
 
             int headerPriority = 10000 + static_cast<int>(rangedFor.index);
-            globalReplacements.emplace_back(headerRange, constructCalls, headerPriority);
+            globalReplacements.emplace_back(headerRange, constructCalls, headerPriority, true);
 
             REWRITE_LOG() << "        Added header replacement with construct calls at "
                     << headerRange.printToString(sourceManager) << " (priority " << headerPriority << ")\n";
@@ -826,7 +908,7 @@ private:
                                             ".construct(*" + makeStateGetCall(rangedFor.beginVarName) + ");";
 
                 int constructPriority = 20000 + static_cast<int>(rangedFor.index);
-                globalReplacements.emplace_back(insertRange, constructCall, constructPriority);
+                globalReplacements.emplace_back(insertRange, constructCall, constructPriority, true);
 
                 REWRITE_LOG() << "        Added construct insertion: '" << constructCall << "' after "
                         << lBraceLoc.printToString(sourceManager) << " (priority " << constructPriority << ")\n";
@@ -911,7 +993,7 @@ private:
 
         // Construct the loop variable: this->state.loopVar.construct(*this->state.__begin.get());
         std::string loopVarConstruct = "    " + makeStateConstructCall(rangedFor.loopVarName, "*" + makeStateGetCall(
-                                           rangedFor.beginVarName)) + ";\n";
+                                                                           rangedFor.beginVarName)) + ";\n";
         result += loopVarConstruct;
         REWRITE_LOG() << "        3. Added loop var construct: '" << loopVarConstruct.substr(
             0, loopVarConstruct.length() - 1) << "'\n";
@@ -975,7 +1057,7 @@ private:
 
             bool insertedBrace = false;
             auto insertBrace = [&concatenatedReplacement, &insertedBrace]() {
-                if (!std::exchange(insertedBrace, true)) { concatenatedReplacement += "}";}
+                if (!std::exchange(insertedBrace, true)) { concatenatedReplacement += "}"; }
             };
             for (const auto &replacement: sortedReplacements) {
                 if (replacement.insertAfterBrace) {
@@ -995,8 +1077,9 @@ private:
             // Use minimum priority among all replacements for this position
             int minPriority = sortedReplacements.empty() ? 0 : sortedReplacements[0].priority;
 
-            insertBrace();// Re-add the brace after the concatenated replacement.
-            globalReplacements.emplace_back(braceRange, concatenatedReplacement, minPriority);
+            insertBrace(); // Re-add the brace after the concatenated replacement.
+            // We deliberately remove and reinsert the brace.
+            globalReplacements.emplace_back(braceRange, concatenatedReplacement, minPriority, true);
 
             REWRITE_LOG() << "    Added concatenated replacement (" << concatenatedReplacement.length() << " chars) at "
                     << braceLocation.printToString(sourceManager) << " with priority " << minPriority << "\n";
@@ -1007,7 +1090,6 @@ private:
 
 public:
     void applyReplacements() {
-
         // Collect all insertion-style replacements into global vector
         collectCoroutineStatementReplacements();
         // Note: collectDestructorInsertions() is no longer needed since we use scopeEndReplacements
@@ -1041,15 +1123,19 @@ public:
         // Add declaration replacements with priorities
         for (const auto &declReplacement: declReplacements) {
             // Use file offset as priority for declarations
-            int declPriority = sourceManager.getFileOffset(declReplacement.first.getBegin());
-            globalReplacements.emplace_back(declReplacement.first, declReplacement.second, declPriority);
+            const auto& [range, repl, isReplace] = declReplacement;
+            int declPriority = sourceManager.getFileOffset(range.getBegin());
+            globalReplacements.emplace_back(range, repl, declPriority, isReplace);
         }
 
+        // TODO<joka921> Code duplication
         // Add reference replacements with priorities
         for (const auto &refReplacement: refReplacements) {
             // Use file offset as priority for references
-            int refPriority = sourceManager.getFileOffset(refReplacement.first.getBegin());
-            globalReplacements.emplace_back(refReplacement.first, refReplacement.second, refPriority);
+            const auto& [range, repl, isReplace] = refReplacement;
+            // TODO wrong names because of duplication.
+            int declPriority = sourceManager.getFileOffset(range.getBegin());
+            globalReplacements.emplace_back(range, repl, declPriority, isReplace);
         }
 
         /*
@@ -1076,28 +1162,51 @@ public:
 
         // Sort ALL replacements by position first, then by priority
         std::stable_sort(globalReplacements.begin(), globalReplacements.end(),
-                         [&](const std::tuple<SourceRange, std::string, int> &a,
-                             const std::tuple<SourceRange, std::string, int> &b) {
-                             unsigned offsetA = sourceManager.getFileOffset(std::get<0>(a).getBegin());
-                             unsigned offsetB = sourceManager.getFileOffset(std::get<0>(b).getBegin());
+                         [&](auto &a,
+                             const auto &b) {
+                             const auto& [rangeA, replA, priorityA, isReplaceA] = a;
+                             const auto& [rangeB, replB, priorityB, isReplaceB] = b;
+                             unsigned offsetA = sourceManager.getFileOffset(rangeA.getBegin());
+                             unsigned offsetB = sourceManager.getFileOffset(rangeB.getBegin());
 
                              if (offsetA != offsetB) {
                                  return offsetA > offsetB; // Reverse order for position safety
                              }
 
                              // Same position - sort by priority in ascending order
-                             int priorityA = std::get<2>(a);
-                             int priorityB = std::get<2>(b);
                              if (priorityA != priorityB) {
                                  return priorityA < priorityB;
+                             }
+
+                             if (isReplaceA != isReplaceB) {
+                                 llvm::errs() << "Trying to insert at the same position, this shouldn't happen. " <<  "\n";
                              }
                              return std::get<1>(a) < std::get<1>(b); // Sort by replacement text in ascending order
                          });
         // Deduplicate, such that the arbitrary redundant visits don't appear.
-        globalReplacements.erase(std::unique(globalReplacements.begin(), globalReplacements.end()), globalReplacements.end());
+        globalReplacements.erase(std::unique(globalReplacements.begin(), globalReplacements.end()),
+                                 globalReplacements.end());
 
+        auto isEmptyRange = [](const SourceManager &SM, SourceRange Range) {
+            SourceLocation Begin = SM.getSpellingLoc(Range.getBegin());
+            SourceLocation End = SM.getSpellingLoc(Range.getEnd());
+            return Begin == End;
+        };
+        auto doRewrite = [&](const auto &buf) {
+            //bool isEmpty = isEmptyRange(sourceManager, std::get<0>(buf));
+            bool isEmpty = !std::get<3>(buf);
+            REWRITE_LOG() << " Applying at " << std::get<0>(buf).printToString(
+                        sourceManager)
+                    << " (priority " << std::get<2>(buf) << "), empty: " << isEmpty << ": '" << std::get<1>(buf) <<
+                    "'\n";
+            if (isEmpty) {
+                rewriter.InsertText(std::get<0>(buf).getBegin(), std::get<1>(buf));
+            } else {
+                rewriter.ReplaceText(std::get<0>(buf), std::get<1>(buf));
+            }
+        };
         // Apply all replacements in the determined order
-        std::optional<std::tuple<SourceRange, std::string, int> > buffer;
+        std::optional<std::tuple<SourceRange, std::string, int, bool> > buffer;
         for (size_t i = 0; i < globalReplacements.size(); ++i) {
             auto &replacement = globalReplacements[i];
 
@@ -1109,10 +1218,7 @@ public:
             // Check if this replacement affects the same source range
             if (std::get<0>(*buffer) != std::get<0>(replacement)) {
                 // Different source range - apply the buffered replacement
-                REWRITE_LOG() << "    [" << i - 1 << "] Applying at " << std::get<0>(*buffer).printToString(
-                            sourceManager)
-                        << " (priority " << std::get<2>(*buffer) << "): '" << std::get<1>(*buffer) << "'\n";
-                rewriter.ReplaceText(std::get<0>(*buffer), std::get<1>(*buffer));
+                doRewrite(*buffer);
                 buffer = std::move(replacement);
                 continue;
             }
@@ -1125,8 +1231,7 @@ public:
 
         // Apply the final buffered replacement
         if (buffer.has_value()) {
-            REWRITE_LOG() << "    [final] Applying at " << std::get<0>(*buffer).printToString(sourceManager)
-                    << " (priority " << std::get<2>(*buffer) << "): '" << std::get<1>(*buffer) << "'\n";
+            doRewrite(*buffer);
             rewriter.ReplaceText(std::get<0>(*buffer), std::get<1>(*buffer));
         }
 
@@ -1134,6 +1239,7 @@ public:
         REWRITE_LOG() << "=== END APPLYING ALL REPLACEMENTS ===\n\n";
     }
 
+    /*
     // Getter methods for accessing replacements without applying them
     const std::vector<std::pair<SourceRange, std::string> > &getDeclReplacements() const {
         return declReplacements;
@@ -1147,6 +1253,7 @@ public:
         return destructorInsertions;
     }
 
+    */
     const std::vector<RangedForLoop> &getRangedForLoops() const {
         return rangedForLoops;
     }
@@ -1202,22 +1309,40 @@ private:
 
     void collectFunctionParameters(const FunctionDecl *funcDecl, std::vector<FunctionParameter> &parameters) {
         REWRITE_LOG() << "  DEBUG: Collecting function parameters\n";
-        
-        for (const auto *param : funcDecl->parameters()) {
+
+        for (const auto *param: funcDecl->parameters()) {
             FunctionParameter fp;
             fp.name = param->getNameAsString();
             fp.qualType = param->getType();
-            
+
             // Get the type as string for debugging/logging
             PrintingPolicy policy(astContext->getLangOpts());
             fp.type = fp.qualType.getAsString(policy);
-            
+
             parameters.push_back(fp);
-            
+
             REWRITE_LOG() << "    Found parameter: " << fp.type << " " << fp.name << "\n";
         }
-        
+
         REWRITE_LOG() << "  Found " << parameters.size() << " function parameters\n";
+    }
+
+    void collectMemberFunctionInfo(const FunctionDecl *funcDecl, CoroutineInfo &coro) {
+        if (const auto *methodDecl = dyn_cast<CXXMethodDecl>(funcDecl)) {
+            coro.isMemberFunction = true;
+            coro.isConstMemberFunction = methodDecl->isConst();
+
+            if (const auto *recordDecl = methodDecl->getParent()) {
+                coro.className = recordDecl->getQualifiedNameAsString();
+            }
+
+            REWRITE_LOG() << "  DEBUG: Member function detected\n";
+            REWRITE_LOG() << "    Class: " << coro.className << "\n";
+            REWRITE_LOG() << "    Is const: " << (coro.isConstMemberFunction ? "yes" : "no") << "\n";
+        } else {
+            coro.isMemberFunction = false;
+            REWRITE_LOG() << "  DEBUG: Free function (not a member function)\n";
+        }
     }
 
     std::string replaceLastTemplateArgWithHandle(const std::string &returnType) {
@@ -1413,10 +1538,23 @@ private:
             REWRITE_LOG() << "    Variable: " << var.type << " " << var.name << "\n";
         }
 
-        // Add function parameters first
+        // Add __self member for member functions (must be first)
+        if (coro.isMemberFunction) {
+            structCode += "    // Member function 'this' pointer\n";
+            std::string selfType;
+            if (coro.isConstMemberFunction) {
+                selfType = "const " + coro.className + "*";
+            } else {
+                selfType = coro.className + "*";
+            }
+            structCode += "    " + selfType + " __self;\n\n";
+            REWRITE_LOG() << "    Added __self member to struct: " << selfType << " __self\n";
+        }
+
+        // Add function parameters
         if (!coro.parameters.empty()) {
             structCode += "    // Function parameters\n";
-            for (const auto &param : coro.parameters) {
+            for (const auto &param: coro.parameters) {
                 std::string paramType = "decltype(" + param.name + ")";
                 structCode += "    " + paramType + " " + param.name + ";\n";
                 REWRITE_LOG() << "    Added parameter to struct: " << paramType << " " << param.name << "\n";
@@ -1430,7 +1568,9 @@ private:
         } else {
             structCode += "    // Local variables (including ranged-for loop variables)\n";
             for (const auto &var: coro.localVariables) {
-                structCode += "    _coro_storage<" + var.referenceType + ", " + (var.isOwning ? std::string{"true"} : std::string{"false"}) + "> " + var.name +
+                structCode += "    _coro_storage<" + var.referenceType + ", " + (var.isOwning
+                            ? std::string{"true"}
+                            : std::string{"false"}) + "> " + var.name +
                         ";\n";
                 /*
                 REWRITE_LOG() << "  DEBUG: Added to struct: _coro_storage<" << var.isOwning << ", " << var.
@@ -1475,8 +1615,8 @@ public:
         if (containsCoroutineKeywords(funcDecl->getBody())) {
             // Check if the coroutine contains try-catch blocks - skip if it does
             if (containsTryCatchBlocks(funcDecl->getBody())) {
-                REWRITE_LOG() << "Skipping coroutine " << funcDecl->getQualifiedNameAsString() 
-                              << " because it contains try-catch blocks (not yet supported)\n";
+                REWRITE_LOG() << "Skipping coroutine " << funcDecl->getQualifiedNameAsString()
+                        << " because it contains try-catch blocks (not yet supported)\n";
                 return true; // Skip this coroutine
             }
             CoroutineInfo coro;
@@ -1486,6 +1626,7 @@ public:
 
             collectLocalVariables(funcDecl->getBody(), coro.localVariables);
             collectFunctionParameters(funcDecl, coro.parameters);
+            collectMemberFunctionInfo(funcDecl, coro);
 
             coro.insertionPoint = findStructInsertionPoint(funcDecl);
             if (coro.insertionPoint.isInvalid()) {
@@ -1594,7 +1735,14 @@ public:
 
         if (bodyStmt) {
             // First pass: collect ranged-for loops only (don't apply any replacements yet)
-            CoroutineBodyRewriter initialRewriter(coro.localVariables, rewriter, sourceManager);
+            const CXXRecordDecl *classRecord = nullptr;
+            if (coro.isMemberFunction) {
+                if (const auto *methodDecl = dyn_cast<CXXMethodDecl>(coro.function)) {
+                    classRecord = methodDecl->getParent();
+                }
+            }
+            CoroutineBodyRewriter initialRewriter(coro.localVariables, rewriter, sourceManager,
+                                                  coro.isMemberFunction, classRecord);
             initialRewriter.TraverseStmt(const_cast<Stmt *>(bodyStmt));
 
             // Get the ranged-for loops and add them to the coroutine info for struct generation
@@ -1608,11 +1756,11 @@ public:
                 LocalVariable loopVar;
                 loopVar.name = rangedFor.loopVarName;
                 loopVar.type = rangedFor.loopVarType;
-                
+
                 // For ranged-for loop variables, we need to determine storage based on the loop variable type
                 // Since there's no explicit initializer, we analyze the type directly
                 // The conceptual initializer would be `*iterator`, which is typically an lvalue
-                
+
                 loopVar.isReference = (loopVar.type.find("&") != std::string::npos);
 
                 loopVar.referenceType = loopVar.type;
@@ -1631,10 +1779,11 @@ public:
                 rangeVar.priority = sourceManager.getFileOffset(rangeVar.location) + 1; // Slightly later priority
                 const_cast<CoroutineInfo &>(coro).localVariables.insert(rangeVar);
 
-                auto addBeginAndEndVar = [&](const std::string& beginOrEnd, const std::string& name, int priority) {
+                auto addBeginAndEndVar = [&](const std::string &beginOrEnd, const std::string &name, int priority) {
                     LocalVariable beginVar;
                     beginVar.name = name;
-                    beginVar.type = "std::decay_t<decltype(std::declval<" + rangeVar.referenceType + ">()."+ beginOrEnd + "())>";
+                    beginVar.type = "std::decay_t<decltype(std::declval<" + rangeVar.referenceType + ">()." + beginOrEnd
+                                    + "())>";
                     beginVar.isOwning = true; // Iterator types are typically not references
                     beginVar.referenceType = beginVar.type + " &";
                     beginVar.isReference = false;
@@ -1683,7 +1832,8 @@ public:
                 REWRITE_LOG() << "    Variable: " << var.type << " " << var.name << "\n";
             }
 
-            CoroutineBodyRewriter finalRewriter(coro.localVariables, rewriter, sourceManager);
+            CoroutineBodyRewriter finalRewriter(coro.localVariables, rewriter, sourceManager,
+                                                coro.isMemberFunction, classRecord);
             finalRewriter.TraverseStmt(const_cast<Stmt *>(bodyStmt));
 
             // Apply all the variable rewrites in place (construct/destroy calls, get() access)
@@ -1698,6 +1848,7 @@ public:
         }
     }
 
+    /*
     std::string getTransformedBodyText(const Stmt *bodyStmt, CoroutineBodyRewriter &bodyRewriter) {
         // Get the compound statement body
         if (auto *compoundStmt = dyn_cast<CompoundStmt>(bodyStmt)) {
@@ -1739,6 +1890,7 @@ public:
 
         return result;
     }
+    */
 
     void replaceEntireBodyWithStateMachine(const CoroutineInfo &coro) {
         REWRITE_LOG() << "  DEBUG: Replacing entire body with state machine instantiation\n";
@@ -1825,28 +1977,38 @@ public:
                 // Add COROUTINE_FOOTER to the scope end replacements system
                 // This ensures it gets properly ordered with destructor calls
                 unsigned fileOffset = sourceManager.getFileOffset(rbraceLoc);
-                
+
                 ScopeEndReplacement replacement;
-                
+
                 // Build parameter list for COROUTINE_FOOTER
                 std::string paramList;
+
+                // For member functions, 'this' must be the first argument
+                if (coro.isMemberFunction) {
+                    paramList = "this";
+                }
+
+                // Add function parameters
                 if (!coro.parameters.empty()) {
                     for (size_t i = 0; i < coro.parameters.size(); ++i) {
-                        if (i > 0) paramList += ", ";
+                        if (!paramList.empty()) paramList += ", ";
                         paramList += coro.parameters[i].name;
                     }
+                }
+
+                if (!paramList.empty()) {
                     replacement.replacement = "COROUTINE_FOOTER(" + paramList + ")\n";
                 } else {
-                    replacement.replacement = "COROUTINE_FOOTER\n";
+                    replacement.replacement = "COROUTINE_FOOTER()\n";
                 }
-                
+
                 // Use maximum priority to ensure COROUTINE_FOOTER comes after all destructors
                 replacement.priority = std::numeric_limits<int>::max();
-                
+
                 body_rewriter.scopeEndReplacements[fileOffset].push_back(replacement);
-                
-                REWRITE_LOG() << "  DEBUG: Added COROUTINE_FOOTER to scope end replacements with maximum priority (" 
-                              << replacement.priority << ") at file offset " << fileOffset << "\n";
+
+                REWRITE_LOG() << "  DEBUG: Added COROUTINE_FOOTER to scope end replacements with maximum priority ("
+                        << replacement.priority << ") at file offset " << fileOffset << "\n";
                 REWRITE_LOG() << "  DEBUG: COROUTINE_FOOTER replacement text: '" << replacement.replacement << "'\n";
 
                 REWRITE_LOG() << "  DEBUG: Successfully added COROUTINE_FOOTER to scope end system\n";

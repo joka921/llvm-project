@@ -56,8 +56,47 @@ cppcoro::generator<int> gen2(auto&& x) {
 auto lambda = [](int x) -> cppcoro::generator<int> {
   co_yield x;
 }
+
+class X {
+ int v;
+
+ void g();
+
+ cppcoro::generator<int> gen() {
+   auto x = v;
+   co_yield x;
+   co_yield v;
+
+   g();
+ }
+
+};
 */
 
-auto lambda = [](int x) -> cppcoro::generator<int> {
-  co_yield x;
+class X {
+ int v;
+
+ void g();
+
+ cppcoro::generator<int, cppcoro::NoDetails, Handle> gen() {
+  // _coro_storage and CoroImpl assumed to be available in global namespace
+  struct _detail_coro_impl {
+    // Member function 'this' pointer
+    X* __self;
+
+    // Local variables (including ranged-for loop variables)
+    _coro_storage<int&, true> x;
+  };
+
+  using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
+  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+      this->state.x.construct(__self->v);
+      CO_YIELD(1, CO_GET(x));
+      CO_YIELD(2, __self->v);
+
+      __self->g();
+      this->state.x.destroy();
+  COROUTINE_FOOTER(this)
+ }
+
 };

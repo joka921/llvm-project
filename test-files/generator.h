@@ -460,7 +460,7 @@ struct _coro_storage {
     }
 };
 
-//#define CO_CONSTRUCT(mem, ...) if constexpr (this->state.mem.isOwning) {new(this->state.mem.buffer) decltype(this->state.mem)::Storage{__VA_ARGS__}} else { }
+#define CO_CONSTRUCT_BRACED(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage __VA_ARGS__ ; this->state.mem.constructed=true
 
 
 template<typename Ref, bool isOwning>

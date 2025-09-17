@@ -24,6 +24,7 @@ cppcoro::generator<int> gen() {
 
 cppcoro::generator<int> gen() {
   std::vector<int> V = std::vector{3, 6, 9};
+  int x;
   for (auto& x : V) {
     auto u = V;
     co_yield x;
@@ -42,6 +43,7 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> gen() {
   struct _detail_coro_impl {
     // Local variables (including ranged-for loop variables)
     _coro_storage<class std::vector<int, class std::allocator<int>>&, true> V;
+    _coro_storage<int&, true> x;
     _coro_storage<int &, false> x;
     _coro_storage<std::add_lvalue_reference_t<class std::vector<int, class std::allocator<int>>> &, false> __range_0;
     _coro_storage<std::decay_t<decltype(std::declval<std::add_lvalue_reference_t<class std::vector<int, class std::allocator<int>>> &>().begin())> &, true> __begin_0;
@@ -51,23 +53,28 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> gen() {
   };
 
   using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) 
-  this->state.V.construct(std::vector{3, 6, 9});;
-  this->state.__range_0.construct(V);
-    this->state.__begin_0.construct(CO_GET(__range_0).begin());
-    this->state.__end_0.construct(CO_GET(__range_0).end());
-    for (; CO_GET(__begin_0) != CO_GET(__end_0); ++CO_GET(__begin_0)) {
-    this->state.x.construct(*CO_GET(__begin_0));
-    this->state.u.construct(CO_GET(V));O_GET(V);
-    CO_YIELD(1,  CO_GET(x))
-      this->state.u.destroy();
-    this->state.x.destroy();
-}    this->state.__end_0.destroy();
-    this->state.__begin_0.destroy();
-    this->state.__range_0.destroy();
-}
+  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+        this->state.V.construct(std::vector{3, 6, 9});
+        this->state.x.construct();;
+        this->state.__range_0.construct(V);
+        this->state.__begin_0.construct(CO_GET(__range_0).begin());
+        this->state.__end_0.construct(CO_GET(__range_0).end());
+        for (; CO_GET(__begin_0) != CO_GET(__end_0); ++CO_GET(__begin_0)) {
+          this->state.x.construct(*CO_GET(__begin_0));
+          this->state.u.construct(CO_GET(V));
+          CO_YIELD(1, CO_GET(x))
+          this->state.u.destroy();
+          this->state.x.destroy();
+        }
+        this->state.__end_0.destroy();
+        this->state.__begin_0.destroy();
+        this->state.__range_0.destroy();
+    }
 
+    this->state.x.destroy();
     this->state.V.destroy();
 COROUTINE_FOOTER
-}}
+
+}
+}
 

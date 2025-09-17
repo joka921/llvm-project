@@ -44,6 +44,11 @@ static std::string makeStateDestroyCall(const std::string &memberName) {
     return "this->state." + memberName + ".destroy()";
 }
 
+// Helper function to generate state construct prefix (for declaration replacement)
+static std::string makeStateConstructPrefix(const std::string &memberName) {
+    return "this->state." + memberName + ".construct(";
+}
+
 static llvm::cl::OptionCategory MyToolCategory("coroutine-rewriter");
 static cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 static cl::extrahelp MoreHelp("\nRewrites C++20 coroutines to C++17 compatible state machines.\n");
@@ -186,16 +191,32 @@ public:
                         REWRITE_LOG() << "    DEBUG: Added variable '" << varName << "' to current scope\n";
                     }
 
-                    // Build construct call
-                    std::string initCode;
+                    // Create construct prefix and add replacement for declaration part
+                    std::string constructPrefix = makeStateConstructPrefix(varName);
+                    
                     if (varDecl->hasInit()) {
-                        initCode = getInitializationArguments(varDecl);
+                        // Get the range for just the declaration part (type + name)
+                        SourceLocation declStart = varDecl->getSourceRange().getBegin();
+                        SourceLocation initStart = varDecl->getInit()->getSourceRange().getBegin();
+                        SourceRange declOnlyRange(declStart, initStart.getLocWithOffset(-1));
+                        
+                        // Replace declaration part with construct prefix
+                        declReplacements.emplace_back(declOnlyRange, constructPrefix);
+                        
+                        // Recursively visit the initialization expression
+                        TraverseStmt(varDecl->getInit());
+                        
+                        // Add closing parenthesis and semicolon at the end
+                        SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
+                        SourceLocation afterInit = Lexer::getLocForEndOfToken(initEnd, 0, sourceManager, LangOptions());
+                        SourceRange closingRange(afterInit, afterInit);
+                        declReplacements.emplace_back(closingRange, ");");
+                    } else {
+                        // No initialization - replace entire declaration with empty construct call
+                        std::string constructCall = constructPrefix + ");";
+                        SourceRange declRange = varDecl->getSourceRange();
+                        declReplacements.emplace_back(declRange, constructCall);
                     }
-                    std::string constructCall = makeStateConstructCall(varName, initCode) + ";";
-
-                    // Replace the entire declaration
-                    SourceRange declRange = varDecl->getSourceRange();
-                    declReplacements.emplace_back(declRange, constructCall);
                 }
             }
         }
@@ -1061,8 +1082,13 @@ public:
                              // Same position - sort by priority in ascending order
                              int priorityA = std::get<2>(a);
                              int priorityB = std::get<2>(b);
-                             return priorityA < priorityB;
+                             if (priorityA != priorityB) {
+                                 return priorityA < priorityB;
+                             }
+                             return std::get<1>(a) < std::get<1>(b); // Sort by replacement text in ascending order
                          });
+        // Deduplicate, such that the arbitrary redundant visits don't appear.
+        globalReplacements.erase(std::unique(globalReplacements.begin(), globalReplacements.end()), globalReplacements.end());
 
         // Apply all replacements in the determined order
         std::optional<std::tuple<SourceRange, std::string, int> > buffer;

@@ -179,8 +179,9 @@ public:
         }
     }
 
-    // Track compound statements (scopes)
-    bool VisitCompoundStmt(CompoundStmt *compoundStmt) {
+    // Track compound statements (scopes) - using Traverse for proper pre/post hooks
+    bool TraverseCompoundStmt(CompoundStmt *compoundStmt) {
+        // ===== PRE-TRAVERSAL (before children are visited) =====
         REWRITE_LOG() << "  DEBUG: Entering scope (CompoundStmt)\n";
 
         // Create scope info
@@ -213,13 +214,10 @@ public:
         // Push scope onto stack
         scopeStack.push_back(scope);
 
-        // Traverse children manually to have control over when we pop the scope
-        for (auto *child: compoundStmt->children()) {
-            if (child) {
-                TraverseStmt(child);
-            }
-        }
+        // ===== AUTOMATIC TRAVERSAL OF CHILDREN =====
+        bool result = RecursiveASTVisitor::TraverseCompoundStmt(compoundStmt);
 
+        // ===== POST-TRAVERSAL (after all children have been visited) =====
         // Before popping scope, insert destructor calls
         if (!scopeStack.empty() && !scopeStack.back().variablesInScope.empty()) {
             insertDestructorsForScope(scopeStack.back());
@@ -232,7 +230,7 @@ public:
 
         REWRITE_LOG() << "  DEBUG: Exiting scope (CompoundStmt)\n";
 
-        return false; // We handled traversal manually
+        return result;
     }
 
     // Handle variable declarations - collect for later processing
@@ -401,8 +399,9 @@ public:
         return true;
     }
 
-    // Handle ranged-for loops
-    bool VisitCXXForRangeStmt(CXXForRangeStmt *forRange) {
+    // Handle ranged-for loops - using Traverse for proper pre/post hooks
+    bool TraverseCXXForRangeStmt(CXXForRangeStmt *forRange) {
+        // ===== PRE-TRAVERSAL (ranged-for processing + loop tracking) =====
         REWRITE_LOG() << "\n=== RANGED-FOR LOOP DETECTION ===\n";
         REWRITE_LOG() << "  Found ranged-for loop at: " << forRange->getSourceRange().getBegin().printToString(
                     sourceManager)
@@ -480,24 +479,16 @@ public:
 
         rangedForLoops.push_back(rangedFor);
 
-        // CRITICAL: Must manually traverse the loop body since we're overriding VisitCXXForRangeStmt
-        REWRITE_LOG() << "    MANUALLY traversing loop body for normal coroutine rewriting...\n";
-        if (body) {
-            REWRITE_LOG() << "      Starting manual traversal of body: " << body->getStmtClassName() << "\n";
-            TraverseStmt(const_cast<Stmt *>(body));
-            REWRITE_LOG() << "      Completed manual traversal of body\n";
-        } else {
-            REWRITE_LOG() << "      WARNING: No body to traverse\n";
-        }
+        // ===== AUTOMATIC TRAVERSAL =====
+        bool result = RecursiveASTVisitor::TraverseCXXForRangeStmt(forRange);
 
-        // IMPORTANT: Return false to prevent automatic traversal (we did it manually)
-        REWRITE_LOG() << "    Returning false to prevent double traversal\n";
+        // ===== POST-TRAVERSAL =====
         REWRITE_LOG() << "=== END RANGED-FOR DETECTION ===\n\n";
 
         // Pop from loop stack
         currentLoopStack.pop_back();
 
-        return false;
+        return result;
     }
 
     // Handle variable references - but not in declaration contexts
@@ -571,59 +562,49 @@ public:
         return true;
     }
 
-    // Track loop statements for proper scope handling
-    bool VisitForStmt(ForStmt *forStmt) {
+    // Track for loops for proper scope handling - using Traverse for pre/post hooks
+    bool TraverseForStmt(ForStmt *forStmt) {
+        // ===== PRE-TRAVERSAL =====
         REWRITE_LOG() << "  DEBUG: Found for loop\n";
         currentLoopStack.push_back(forStmt);
 
-        // Traverse children manually to track scopes properly
-        if (forStmt->getInit()) {
-            TraverseStmt(forStmt->getInit());
-        }
-        if (forStmt->getCond()) {
-            TraverseStmt(forStmt->getCond());
-        }
-        if (forStmt->getInc()) {
-            TraverseStmt(forStmt->getInc());
-        }
-        if (forStmt->getBody()) {
-            TraverseStmt(forStmt->getBody());
-        }
+        // ===== AUTOMATIC TRAVERSAL =====
+        bool result = RecursiveASTVisitor::TraverseForStmt(forStmt);
 
+        // ===== POST-TRAVERSAL =====
         currentLoopStack.pop_back();
-        return false; // We handled traversal manually
+
+        return result;
     }
 
-    bool VisitWhileStmt(WhileStmt *whileStmt) {
+    // Track while loops for proper scope handling - using Traverse for pre/post hooks
+    bool TraverseWhileStmt(WhileStmt *whileStmt) {
+        // ===== PRE-TRAVERSAL =====
         REWRITE_LOG() << "  DEBUG: Found while loop\n";
         currentLoopStack.push_back(whileStmt);
 
-        // Traverse children manually
-        if (whileStmt->getCond()) {
-            TraverseStmt(whileStmt->getCond());
-        }
-        if (whileStmt->getBody()) {
-            TraverseStmt(whileStmt->getBody());
-        }
+        // ===== AUTOMATIC TRAVERSAL =====
+        bool result = RecursiveASTVisitor::TraverseWhileStmt(whileStmt);
 
+        // ===== POST-TRAVERSAL =====
         currentLoopStack.pop_back();
-        return false; // We handled traversal manually
+
+        return result;
     }
 
-    bool VisitDoStmt(DoStmt *doStmt) {
+    // Track do-while loops for proper scope handling - using Traverse for pre/post hooks
+    bool TraverseDoStmt(DoStmt *doStmt) {
+        // ===== PRE-TRAVERSAL =====
         REWRITE_LOG() << "  DEBUG: Found do-while loop\n";
         currentLoopStack.push_back(doStmt);
 
-        // Traverse children manually
-        if (doStmt->getBody()) {
-            TraverseStmt(doStmt->getBody());
-        }
-        if (doStmt->getCond()) {
-            TraverseStmt(doStmt->getCond());
-        }
+        // ===== AUTOMATIC TRAVERSAL =====
+        bool result = RecursiveASTVisitor::TraverseDoStmt(doStmt);
 
+        // ===== POST-TRAVERSAL =====
         currentLoopStack.pop_back();
-        return false; // We handled traversal manually
+
+        return result;
     }
 
     // Handle break statements - need to destroy variables in loop scope

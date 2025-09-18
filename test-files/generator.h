@@ -461,8 +461,8 @@ struct _coro_storage {
     }
 };
 
-#define CO_BRACED_INIT(mem, ...) if constexpr (this->state.mem.isOwning) {new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ __VA_ARGS__} ; } else { new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;} this->state.mem.constructed=true
-#define CO_PAREN_INIT(mem, ...) if constexpr (this->state.mem.isOwning) {new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ __VA_ARGS__} ; } else { new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;} this->state.mem.constructed=true
+#define CO_BRACED_INIT(mem, ...) if constexpr (decltype(this->state.mem)::isOwning) {new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ __VA_ARGS__} ; } else { new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ [&](){ return &__VA_ARGS__;}()};} this->state.mem.constructed=true
+#define CO_PAREN_INIT(mem, ...) if constexpr (decltype(this->state.mem)::isOwning) {new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ __VA_ARGS__} ; } else { new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;} this->state.mem.constructed=true
 
 
 template<typename Ref, bool isOwning>

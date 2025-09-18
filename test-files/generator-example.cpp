@@ -118,16 +118,31 @@ auto lambda = [](int x) -> cppcoro::generator<int> {
 }
 */
 
-cppcoro::generator<const int> gen() {
-int i = 0;
-  while (true) {
-  const int& x = {3};
-  if (i < 4) {
-    continue;
-  } else {
-    break;
-  }
-  co_yield x;
-  ++i;
-  }
+
+cppcoro::generator<const int, cppcoro::NoDetails, Handle> gen() {
+  // _coro_storage and CoroImpl assumed to be available in global namespace
+  struct _detail_coro_impl {
+    // Local variables (including ranged-for loop variables)
+    _coro_storage<int &, true> i;
+    _coro_storage<const int &, true> x;
+  };
+
+  using _ActualCoroType = cppcoro::generator<const int, cppcoro::NoDetails, Handle>;
+  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+      this->state.i.construct(0);
+      while (true) {
+        CO_BRACED_INIT(x, 3);
+        if (CO_GET(i) < 4) {
+          this->state.x.destroy();
+          continue;
+        } else {
+          this->state.x.destroy();
+          break;
+        }
+        CO_YIELD(1, CO_GET(x));
+        ++CO_GET(i);
+        this->state.x.destroy();
+      }
+      this->state.i.destroy();
+  COROUTINE_FOOTER()
 }

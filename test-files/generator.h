@@ -419,8 +419,9 @@ case 0:
 
 #define FOR_LOOP_HEADER(N)
 
-template<typename Ref, bool isOwning>
+template<typename Ref, bool isOwningStorage>
 struct _coro_storage {
+    static constexpr bool isOwning = isOwningStorage;
     using Storage = std::conditional_t<isOwning, std::decay_t<Ref>, std::add_pointer_t<std::decay_t<Ref> > >;
     alignas(Storage) char buffer[sizeof(Storage)];
     bool constructed = false;
@@ -460,8 +461,8 @@ struct _coro_storage {
     }
 };
 
-#define CO_BRACED_INIT(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ __VA_ARGS__} ; this->state.mem.constructed=true
-#define CO_PAREN_INIT(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage( __VA_ARGS__ ); this->state.mem.constructed=true
+#define CO_BRACED_INIT(mem, ...) if constexpr (this->state.mem.isOwning) {new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ __VA_ARGS__} ; } else { new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;} this->state.mem.constructed=true
+#define CO_PAREN_INIT(mem, ...) if constexpr (this->state.mem.isOwning) {new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ __VA_ARGS__} ; } else { new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;} this->state.mem.constructed=true
 
 
 template<typename Ref, bool isOwning>

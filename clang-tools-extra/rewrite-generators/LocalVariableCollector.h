@@ -38,10 +38,41 @@ private:
     std::set<LocalVariable> &variables;
     const SourceManager &sourceManager;
     ASTContext &astContext;
+    std::map<std::string, std::vector<SourceLocation>> variableNameLocations;
 
 public:
     LocalVariableCollector(std::set<LocalVariable> &vars, const SourceManager &SM, ASTContext &ctx)
         : variables(vars), sourceManager(SM), astContext(ctx) {
+    }
+
+    bool hasVariableNameCollisions() const {
+        for (const auto &pair : variableNameLocations) {
+            if (pair.second.size() > 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void reportCollisions(DiagnosticsEngine &diags) const {
+        for (const auto &pair : variableNameLocations) {
+            if (pair.second.size() > 1) {
+                const std::string &varName = pair.first;
+                const std::vector<SourceLocation> &locations = pair.second;
+                
+                // Report error for the first location
+                unsigned diagID = diags.getCustomDiagID(DiagnosticsEngine::Error,
+                    "variable name '%0' appears multiple times in coroutine scopes");
+                diags.Report(locations[0], diagID) << varName;
+                
+                // Report notes for subsequent locations
+                unsigned noteID = diags.getCustomDiagID(DiagnosticsEngine::Note,
+                    "previous declaration of '%0' here");
+                for (size_t i = 1; i < locations.size(); ++i) {
+                    diags.Report(locations[i], noteID) << varName;
+                }
+            }
+        }
     }
 
     std::string getFullyQualifiedTypeName(QualType type) {
@@ -106,6 +137,9 @@ public:
                     var.priority = sourceManager.getFileOffset(var.location); // Use file offset as priority
 
                     if (!var.name.empty()) {
+                        // Track variable name for collision detection
+                        variableNameLocations[var.name].push_back(var.location);
+                        
                         variables.insert(var);
                         std::cout << "  Found local variable: " << var.type << " " << var.name
                                 << " (is reference: " << (var.isReference ? "yes" : "no")

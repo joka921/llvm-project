@@ -19,6 +19,7 @@
 #include <map>
 
 #include "./LocalVariableCollector.h"
+#include "llvm/IR/InlineAsm.h"
 using namespace clang::tooling;
 using namespace llvm;
 using namespace clang;
@@ -94,6 +95,10 @@ struct CoroutineInfo {
     bool isMemberFunction = false;
     bool isConstMemberFunction = false;
     std::string className;
+    
+    // Lambda information
+    bool isLambda = false;
+    const LambdaExpr *lambdaExpr = nullptr;
 };
 
 
@@ -101,6 +106,11 @@ struct ScopeInfo {
     const CompoundStmt *compoundStmt;
     std::vector<std::string> variablesInScope;
     SourceLocation scopeEnd;
+
+    // Loop tracking information
+    bool isLoopScope = false;
+    bool isLoopBodyScope = false;  // true if this is the body of a loop (not the header/init)
+    const Stmt *loopStmt = nullptr;  // The loop statement this scope belongs to
 };
 
 struct ScopeEndReplacement {
@@ -139,6 +149,7 @@ private:
     std::set<SourceLocation> processedDeclarations;
     std::set<SourceLocation> processedThisExpressions;
     std::vector<ScopeInfo> scopeStack;
+    std::vector<const Stmt*> currentLoopStack;
     std::vector<std::pair<SourceLocation, std::string> > destructorInsertions;
     std::vector<CoroutineStatement> coroutineStatements;
     unsigned nextCoroStatementIndex;
@@ -176,6 +187,28 @@ public:
         ScopeInfo scope;
         scope.compoundStmt = compoundStmt;
         scope.scopeEnd = compoundStmt->getRBracLoc();
+
+        // Check if this compound statement is part of a loop
+        if (!currentLoopStack.empty()) {
+            scope.isLoopScope = true;
+            scope.loopStmt = currentLoopStack.back();
+
+            // Check if this is the loop body (not header/init)
+            const Stmt *currentLoop = currentLoopStack.back();
+            if (const auto *forStmt = dyn_cast<ForStmt>(currentLoop)) {
+                // For loops: body is the CompoundStmt in getBody()
+                scope.isLoopBodyScope = (forStmt->getBody() == compoundStmt);
+            } else if (const auto *whileStmt = dyn_cast<WhileStmt>(currentLoop)) {
+                // While loops: body is the CompoundStmt in getBody()
+                scope.isLoopBodyScope = (whileStmt->getBody() == compoundStmt);
+            } else if (const auto *doStmt = dyn_cast<DoStmt>(currentLoop)) {
+                // Do-while loops: body is the CompoundStmt in getBody()
+                scope.isLoopBodyScope = (doStmt->getBody() == compoundStmt);
+            } else if (const auto *rangeStmt = dyn_cast<CXXForRangeStmt>(currentLoop)) {
+                // Range-based for loops: body is the CompoundStmt in getBody()
+                scope.isLoopBodyScope = (rangeStmt->getBody() == compoundStmt);
+            }
+        }
 
         // Push scope onto stack
         scopeStack.push_back(scope);
@@ -226,7 +259,7 @@ public:
                     // Determine initialization form and generate appropriate prefix
                     InitializationForm form = getInitializationForm(varDecl);
                     std::string prefix;
-                    
+
                     switch (form) {
                         case BRACED_INIT:
                             prefix = makeBracedInitPrefix(varName);
@@ -250,13 +283,13 @@ public:
                         if (form == BRACED_INIT) {
                             // For braced initialization, handle ranges properly
                             std::optional<SourceRange> childrenRange = handleBracedInitialization(varDecl);
-                            
+
                             if (childrenRange.has_value()) {
                                 REWRITE_LOG() << "range of children is "<< childrenRange.value().printToString(sourceManager) << '\n';
                                 // Replace everything from declaration start to first child start with prefix
                                 SourceRange prefixRange(declStart, childrenRange->getBegin().getLocWithOffset(-1));
                                 declReplacements.emplace_back(prefixRange, prefix, true);
-                                
+
                                 // Replace everything from last child end to init end with closing paren
                                 SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
                                 SourceLocation afterLastChild = Lexer::getLocForEndOfToken(childrenRange->getEnd(), 0, sourceManager, LangOptions());
@@ -271,15 +304,15 @@ public:
                         } else if (form == PAREN_INIT) {
                             // For parenthesized initialization, handle ranges properly
                             std::optional<SourceRange> childrenRange = handleParenthesizedInitialization(varDecl);
-                            
+
                             if (childrenRange.has_value()) {
                                 // Replace everything from declaration start to first child start with prefix
                                 SourceRange prefixRange(declStart, childrenRange->getBegin().getLocWithOffset(-1));
                                 declReplacements.emplace_back(prefixRange, prefix, true);
-                                
+
                                 // Process the arguments (now that prefix replacement is set up)
                                 processParenthesizedArguments(varDecl);
-                                
+
                                 // Replace everything from last child end to init end with closing paren
                                 SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
                                 SourceLocation afterLastChild = Lexer::getLocForEndOfToken(childrenRange->getEnd(), 0, sourceManager, LangOptions());
@@ -293,10 +326,10 @@ public:
                         } else {
                             // Replace declaration part with appropriate prefix
                             declReplacements.emplace_back(declOnlyRange, prefix, true);
-                            
+
                             // Regular construct() call - recursively visit the initialization expression
                             TraverseStmt(varDecl->getInit());
-                            
+
                             // Add closing parenthesis at the end
                             SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
                             SourceLocation afterInit = Lexer::getLocForEndOfToken(initEnd, 0, sourceManager, LangOptions());
@@ -374,6 +407,9 @@ public:
         REWRITE_LOG() << "  Found ranged-for loop at: " << forRange->getSourceRange().getBegin().printToString(
                     sourceManager)
                 << " to " << forRange->getSourceRange().getEnd().printToString(sourceManager) << "\n";
+
+        // Add to loop stack for break/continue tracking
+        currentLoopStack.push_back(forRange);
 
         RangedForLoop rangedFor;
         rangedFor.stmt = forRange;
@@ -458,6 +494,9 @@ public:
         REWRITE_LOG() << "    Returning false to prevent double traversal\n";
         REWRITE_LOG() << "=== END RANGED-FOR DETECTION ===\n\n";
 
+        // Pop from loop stack
+        currentLoopStack.pop_back();
+
         return false;
     }
 
@@ -532,6 +571,81 @@ public:
         return true;
     }
 
+    // Track loop statements for proper scope handling
+    bool VisitForStmt(ForStmt *forStmt) {
+        REWRITE_LOG() << "  DEBUG: Found for loop\n";
+        currentLoopStack.push_back(forStmt);
+
+        // Traverse children manually to track scopes properly
+        if (forStmt->getInit()) {
+            TraverseStmt(forStmt->getInit());
+        }
+        if (forStmt->getCond()) {
+            TraverseStmt(forStmt->getCond());
+        }
+        if (forStmt->getInc()) {
+            TraverseStmt(forStmt->getInc());
+        }
+        if (forStmt->getBody()) {
+            TraverseStmt(forStmt->getBody());
+        }
+
+        currentLoopStack.pop_back();
+        return false; // We handled traversal manually
+    }
+
+    bool VisitWhileStmt(WhileStmt *whileStmt) {
+        REWRITE_LOG() << "  DEBUG: Found while loop\n";
+        currentLoopStack.push_back(whileStmt);
+
+        // Traverse children manually
+        if (whileStmt->getCond()) {
+            TraverseStmt(whileStmt->getCond());
+        }
+        if (whileStmt->getBody()) {
+            TraverseStmt(whileStmt->getBody());
+        }
+
+        currentLoopStack.pop_back();
+        return false; // We handled traversal manually
+    }
+
+    bool VisitDoStmt(DoStmt *doStmt) {
+        REWRITE_LOG() << "  DEBUG: Found do-while loop\n";
+        currentLoopStack.push_back(doStmt);
+
+        // Traverse children manually
+        if (doStmt->getBody()) {
+            TraverseStmt(doStmt->getBody());
+        }
+        if (doStmt->getCond()) {
+            TraverseStmt(doStmt->getCond());
+        }
+
+        currentLoopStack.pop_back();
+        return false; // We handled traversal manually
+    }
+
+    // Handle break statements - need to destroy variables in loop scope
+    bool VisitBreakStmt(BreakStmt *breakStmt) {
+        REWRITE_LOG() << "  Found break statement\n";
+
+        // Find the innermost loop and destroy variables in its scope
+        insertLoopVariableDestructors(breakStmt, true /* is break */);
+
+        return true;
+    }
+
+    // Handle continue statements - need to destroy variables in loop scope
+    bool VisitContinueStmt(ContinueStmt *continueStmt) {
+        REWRITE_LOG() << "  Found continue statement\n";
+
+        // Find the innermost loop and destroy variables in its scope
+        insertLoopVariableDestructors(continueStmt, false /* is continue */);
+
+        return true;
+    }
+
 private:
     enum InitializationForm {
         CONSTRUCT_CALL, // Regular construct() call for other types
@@ -545,13 +659,13 @@ private:
         }
 
         const Expr *init = unwrapExpr(varDecl->getInit());
-        
+
         // Check for braced initialization list
         if (isa<InitListExpr>(init) || isa<CXXStdInitializerListExpr>(init)) {
             REWRITE_LOG() << "    DEBUG: Detected braced initialization\n";
             return BRACED_INIT;
         }
-        
+
         // Check for constructor call (parenthesized initialization)
         if (isa<CXXConstructExpr>(init)) {
             const auto *constructExpr = cast<CXXConstructExpr>(init);
@@ -564,7 +678,7 @@ private:
                 return PAREN_INIT;
             }
         }
-        
+
         // Check for temporary object creation with braces (like std::vector{1,2})
         if (isa<CXXTemporaryObjectExpr>(init)) {
             const auto *tempExpr = cast<CXXTemporaryObjectExpr>(init);
@@ -572,7 +686,7 @@ private:
                 REWRITE_LOG() << "    DEBUG: Detected braced temporary object initialization\n";
                 return BRACED_INIT;
             } else {
-                REWRITE_LOG() << "    DEBUG: Detected parenthesized temporary object initialization\n"; 
+                REWRITE_LOG() << "    DEBUG: Detected parenthesized temporary object initialization\n";
                 return PAREN_INIT;
             }
         }
@@ -612,7 +726,7 @@ private:
         SourceLocation lastValidEnd;
         bool foundFirst = false;
         bool foundLast = false;
-        
+
         // Find first argument with valid source location
         for (const auto *arg : arguments) {
             SourceRange argRange = arg->getSourceRange();
@@ -622,7 +736,7 @@ private:
                 break;
             }
         }
-        
+
         // Find last argument with valid source location (search backwards)
         for (auto it = arguments.rbegin(); it != arguments.rend(); ++it) {
             SourceRange argRange = (*it)->getSourceRange();
@@ -632,7 +746,7 @@ private:
                 break;
             }
         }
-        
+
         // If no arguments have valid source locations, return nullopt
         if (!foundFirst || !foundLast) {
             REWRITE_LOG() << "    DEBUG: No arguments with valid source locations found in parenthesized initialization\n";
@@ -640,7 +754,7 @@ private:
         }
 
         REWRITE_LOG() << "    DEBUG: Found " << arguments.size() << " parenthesized initialization arguments\n";
-        
+
         return SourceRange(firstValidStart, lastValidEnd);
     }
 
@@ -650,7 +764,7 @@ private:
         }
 
         const Expr *init = varDecl->getInit();
-        
+
         // Process arguments from parenthesized initialization
         if (const auto *constructExpr = dyn_cast<CXXConstructExpr>(init)) {
             // Constructor call like std::vector(1, 2)
@@ -658,13 +772,69 @@ private:
                 TraverseStmt(const_cast<Stmt*>(reinterpret_cast<const Stmt*>(constructExpr->getArg(i))));
             }
         } else if (const auto *tempExpr = dyn_cast<CXXTemporaryObjectExpr>(init)) {
-            // Temporary object with parentheses like std::vector(1, 2)  
+            // Temporary object with parentheses like std::vector(1, 2)
             for (unsigned i = 0; i < tempExpr->getNumArgs(); ++i) {
                 TraverseStmt(const_cast<Stmt*>(reinterpret_cast<const Stmt*>(tempExpr->getArg(i))));
             }
         }
-        
+
         REWRITE_LOG() << "    DEBUG: Processed parenthesized initialization arguments\n";
+    }
+
+    void insertLoopVariableDestructors(const Stmt *stmt, bool isBreak) {
+        if (currentLoopStack.empty()) {
+            REWRITE_LOG() << "    DEBUG: No loop context found for " << (isBreak ? "break" : "continue") << "\n";
+            return;
+        }
+
+        // Find all variables that need to be destroyed for break/continue
+        std::vector<std::string> varsToDestroy;
+        const Stmt *innerMostLoop = currentLoopStack.back();
+
+        // Traverse scope stack from innermost to outermost
+        for (auto scopeIt = scopeStack.rbegin(); scopeIt != scopeStack.rend(); ++scopeIt) {
+            const auto &scope = *scopeIt;
+
+            // Stop when we exit the current loop's scopes
+            if (scope.isLoopScope && scope.loopStmt != innerMostLoop) {
+                break;
+            }
+
+            // Both break and continue: only destroy variables from loop body scopes, not header/init scopes
+            bool shouldDestroyFromThisScope = scope.isLoopScope && scope.isLoopBodyScope && scope.loopStmt == innerMostLoop;
+
+            if (shouldDestroyFromThisScope) {
+                for (const auto &varName : scope.variablesInScope) {
+                    // Only destroy variables that are tracked (local variables)
+                    if (variableNames.count(varName)) {
+                        varsToDestroy.push_back(varName);
+                        REWRITE_LOG() << "    DEBUG: Will destroy variable '" << varName
+                                      << "' from " << (scope.isLoopBodyScope ? "body" : "header") << " scope\n";
+                    }
+                }
+            }
+        }
+
+        if (!varsToDestroy.empty()) {
+            REWRITE_LOG() << "    DEBUG: Need to destroy " << varsToDestroy.size()
+                          << " variables for " << (isBreak ? "break" : "continue") << "\n";
+
+            // Insert destructor calls before the break/continue statement
+            SourceLocation insertLoc = stmt->getBeginLoc();
+            std::string destructorCalls;
+
+            // Generate destroy calls in reverse order (LIFO) - variables are already in reverse order from rbegin()
+            for (const auto &varName : varsToDestroy) {
+                destructorCalls += makeStateDestroyCall(varName) + ";\n    ";
+            }
+
+            if (!destructorCalls.empty()) {
+                SourceRange insertRange(insertLoc, insertLoc);
+                refReplacements.emplace_back(insertRange, destructorCalls, false);
+            }
+        } else {
+            REWRITE_LOG() << "    DEBUG: No variables to destroy for " << (isBreak ? "break" : "continue") << "\n";
+        }
     }
 
     std::optional<SourceRange> handleBracedInitialization(const VarDecl *varDecl) {
@@ -673,21 +843,21 @@ private:
         }
 
         const Expr *init = unwrapExpr(varDecl->getInit());
-        
+
         if (const auto *initList = dyn_cast<InitListExpr>(init)) {
             REWRITE_LOG() << "    DEBUG: Processing InitListExpr with " << initList->getNumInits() << " elements\n";
-            
+
             if (initList->getNumInits() == 0) {
                 // Empty initialization list - no children range
                 return std::nullopt;
             }
-            
+
             // Find first and last arguments with valid source locations
             SourceLocation firstValidStart;
             SourceLocation lastValidEnd;
             bool foundFirst = false;
             bool foundLast = false;
-            
+
             // Find first argument with valid source location
             for (unsigned i = 0; i < initList->getNumInits(); ++i) {
                 const Expr *arg = initList->getInit(i);
@@ -698,7 +868,7 @@ private:
                     break;
                 }
             }
-            
+
             // Find last argument with valid source location (search backwards)
             for (int i = initList->getNumInits() - 1; i >= 0; --i) {
                 const Expr *arg = initList->getInit(i);
@@ -709,33 +879,33 @@ private:
                     break;
                 }
             }
-            
+
             // If no arguments have valid source locations, return nullopt
             if (!foundFirst || !foundLast) {
                 REWRITE_LOG() << "    DEBUG: No arguments with valid source locations found in InitListExpr\n";
                 return std::nullopt;
             }
-            
+
             SourceRange childrenRange(firstValidStart, lastValidEnd);
-            
+
             // Process each initialization element individually
             for (unsigned i = 0; i < initList->getNumInits(); ++i) {
                 TraverseStmt(const_cast<Stmt*>(reinterpret_cast<const Stmt*>(initList->getInit(i))));
             }
-            
+
             return childrenRange;
-            
+
         } else if (const auto *constructExpr = dyn_cast<CXXConstructExpr>(init)) {
             // Handle CXXConstructExpr with list initialization
             if (constructExpr->isListInitialization() && constructExpr->getNumArgs() > 0) {
                 REWRITE_LOG() << "    DEBUG: Processing CXXConstructExpr list initialization with " << constructExpr->getNumArgs() << " args\n";
-                
+
                 // Find first and last arguments with valid source locations
                 SourceLocation firstValidStart;
                 SourceLocation lastValidEnd;
                 bool foundFirst = false;
                 bool foundLast = false;
-                
+
                 // Find first argument with valid source location
                 for (unsigned i = 0; i < constructExpr->getNumArgs(); ++i) {
                     const Expr *arg = constructExpr->getArg(i);
@@ -747,7 +917,7 @@ private:
                         break;
                     }
                 }
-                
+
                 // Find last argument with valid source location (search backwards)
                 for (int i = constructExpr->getNumArgs() - 1; i >= 0; --i) {
                     const Expr *arg = constructExpr->getArg(i);
@@ -759,24 +929,24 @@ private:
                         break;
                     }
                 }
-                
+
                 // If no arguments have valid source locations, return nullopt
                 if (!foundFirst || !foundLast) {
                     REWRITE_LOG() << "    DEBUG: No arguments with valid source locations found in CXXConstructExpr\n";
                     return std::nullopt;
                 }
-                
+
                 SourceRange argsRange(firstValidStart, lastValidEnd);
-                
+
                 // Process arguments individually
                 for (unsigned i = 0; i < constructExpr->getNumArgs(); ++i) {
                     TraverseStmt(const_cast<Stmt*>(reinterpret_cast<const Stmt*>(constructExpr->getArg(i))));
                 }
-                
+
                 return argsRange;
             }
         }
-        
+
         return std::nullopt;
     }
 
@@ -1620,9 +1790,18 @@ private:
         return false;
     }
 
-    void collectLocalVariables(const Stmt *body, std::set<LocalVariable> &variables) {
+    bool collectLocalVariables(const Stmt *body, std::set<LocalVariable> &variables) {
         LocalVariableCollector collector(variables, sourceManager, *astContext);
         collector.TraverseStmt(const_cast<Stmt *>(body));
+
+        // Check for variable name collisions
+        if (collector.hasVariableNameCollisions()) {
+            DiagnosticsEngine &diags = astContext->getDiagnostics();
+            collector.reportCollisions(diags);
+            return false; // Collision detected, cannot rewrite
+        }
+
+        return true; // No collisions, safe to rewrite
     }
 
     void collectFunctionParameters(const FunctionDecl *funcDecl, std::vector<FunctionParameter> &parameters) {
@@ -1942,7 +2121,13 @@ public:
 
             REWRITE_LOG() << "Processing coroutine: " << funcDecl->getQualifiedNameAsString() << "\n";
 
-            collectLocalVariables(funcDecl->getBody(), coro.localVariables);
+            // Check for variable name collisions - skip rewriting if found
+            if (!collectLocalVariables(funcDecl->getBody(), coro.localVariables)) {
+                REWRITE_LOG() << "Skipping coroutine " << funcDecl->getQualifiedNameAsString()
+                        << " due to variable name collisions\n";
+                return true; // Skip this coroutine
+            }
+
             collectFunctionParameters(funcDecl, coro.parameters);
             collectMemberFunctionInfo(funcDecl, coro);
 
@@ -1977,7 +2162,98 @@ public:
         return true;
     }
 
+    bool VisitLambdaExpr(LambdaExpr *lambdaExpr) {
+        // Get the call operator (the lambda body function)
+        const CXXMethodDecl *callOperator = lambdaExpr->getCallOperator();
+        if (!callOperator->hasBody()) {
+            return true;
+        }
+
+        auto fileId = sourceManager.getFileID(lambdaExpr->getBeginLoc());
+        if (fileId != sourceManager.getMainFileID()) {
+            return true;
+        }
+
+        if (containsCoroutineKeywords(callOperator->getBody())) {
+            // Check for captures - we don't support lambda coroutines with captures yet
+            unsigned numCaptures = lambdaExpr->capture_size();
+
+            if (numCaptures > 0) {
+                // Report error for lambda coroutines with captures
+                unsigned diagID = diagnosticsEngine.getCustomDiagID(
+                    clang::DiagnosticsEngine::Error,
+                    "coroutine lambdas with captures are not supported");
+                diagnosticsEngine.Report(lambdaExpr->getBeginLoc(), diagID);
+
+                // Also report each capture location for clarity
+                unsigned noteID = diagnosticsEngine.getCustomDiagID(
+                    clang::DiagnosticsEngine::Note,
+                    "capture found here");
+                for (const auto& capture : lambdaExpr->captures()) {
+                    diagnosticsEngine.Report(capture.getLocation(), noteID);
+                }
+
+                REWRITE_LOG() << "Skipping lambda coroutine due to captures\n";
+                return true; // Skip this lambda coroutine
+            }
+
+            // Check if the lambda contains try-catch blocks - skip if it does
+            if (containsTryCatchBlocks(callOperator->getBody())) {
+                REWRITE_LOG() << "Skipping lambda coroutine because it contains try-catch blocks (not yet supported)\n";
+                return true; // Skip this lambda coroutine
+            }
+
+            CoroutineInfo coro;
+            coro.function = callOperator;
+            coro.isLambda = true;
+            coro.lambdaExpr = lambdaExpr;
+
+            REWRITE_LOG() << "Processing lambda coroutine\n";
+
+            // Check for variable name collisions - skip rewriting if found
+            if (!collectLocalVariables(callOperator->getBody(), coro.localVariables)) {
+                REWRITE_LOG() << "Skipping lambda coroutine due to variable name collisions\n";
+                return true; // Skip this lambda coroutine
+            }
+
+            // Collect lambda parameters - they need to be added to the impl struct
+            collectFunctionParameters(callOperator, coro.parameters);
+
+            // Lambda coroutines are not member functions of classes in the traditional sense
+            // collectMemberFunctionInfo is not needed for lambdas
+
+            coro.insertionPoint = findStructInsertionPoint(callOperator);
+            if (coro.insertionPoint.isInvalid()) {
+                unsigned diagID = diagnosticsEngine.getCustomDiagID(
+                    clang::DiagnosticsEngine::Warning,
+                    "Could not find insertion point for lambda _detail_coro_impl struct");
+                diagnosticsEngine.Report(lambdaExpr->getBeginLoc(), diagID);
+                coro.hasError = true;
+
+                // Output the struct code to console as fallback
+                std::string structCode = generateCoroImplStruct(coro);
+                REWRITE_LOG() << "WARNING: Could not insert lambda struct, here's what would have been inserted:\n";
+                REWRITE_LOG() << "========== STRUCT CODE ==========\n";
+                REWRITE_LOG() << structCode;
+                REWRITE_LOG() << "==================================\n";
+            }
+
+            coroutines.push_back(coro);
+
+            REWRITE_LOG() << "  Found " << coro.localVariables.size() << " local variables in lambda\n";
+            REWRITE_LOG() << "  Type: Lambda coroutine\n";
+        }
+
+        return true;
+    }
+
     void updateFunctionReturnType(const CoroutineInfo &coro) {
+        if (coro.isLambda) {
+            REWRITE_LOG() << "Updating lambda return type\n";
+            updateLambdaReturnType(coro);
+            return;
+        }
+
         REWRITE_LOG() << "Updating function return type for: " << coro.function->getQualifiedNameAsString() << "\n";
 
         if (!coro.function) {
@@ -2014,6 +2290,73 @@ public:
         } else {
             REWRITE_LOG() << "  Return type unchanged (no template arguments found)\n";
         }
+    }
+
+    void updateLambdaReturnType(const CoroutineInfo &coro) {
+        if (!coro.lambdaExpr) {
+            REWRITE_LOG() << "  ERROR: No lambda expression to update\n";
+            return;
+        }
+
+        // Check if lambda has an explicit trailing return type
+        if (!coro.lambdaExpr->hasExplicitResultType()) {
+            unsigned diagID = diagnosticsEngine.getCustomDiagID(
+                clang::DiagnosticsEngine::Error,
+                "coroutine lambda must have an explicit trailing return type");
+            diagnosticsEngine.Report(coro.lambdaExpr->getBeginLoc(), diagID);
+            return;
+        }
+
+        // Find and delete the trailing return type by searching for "-> ReturnType"
+        SourceRange lambdaRange = coro.lambdaExpr->getSourceRange();
+        SourceLocation lambdaStart = lambdaRange.getBegin();
+        SourceLocation lambdaEnd = lambdaRange.getEnd();
+        
+        // Get the source text of the entire lambda
+        StringRef lambdaText = rewriter.getRewrittenText(lambdaRange);
+        if (lambdaText.empty()) {
+            // Fallback: get original source text
+            bool invalid = false;
+            lambdaText = sourceManager.getCharacterData(lambdaStart, &invalid);
+            if (invalid) {
+                REWRITE_LOG() << "  ERROR: Cannot get lambda source text\n";
+                return;
+            }
+            
+            // Calculate length manually
+            unsigned startOffset = sourceManager.getFileOffset(lambdaStart);
+            unsigned endOffset = sourceManager.getFileOffset(lambdaEnd);
+            if (endOffset <= startOffset) {
+                REWRITE_LOG() << "  ERROR: Invalid lambda range\n";
+                return;
+            }
+            lambdaText = lambdaText.substr(0, endOffset - startOffset + 1);
+        }
+        
+        // Look for "-> " pattern in the lambda text
+        size_t arrowPos = lambdaText.find("-> ");
+        if (arrowPos == StringRef::npos) {
+            REWRITE_LOG() << "  ERROR: Cannot find trailing return type arrow\n";
+            return;
+        }
+        
+        // Find the opening brace after the return type
+        size_t bracePos = lambdaText.find('{', arrowPos);
+        if (bracePos == StringRef::npos) {
+            REWRITE_LOG() << "  ERROR: Cannot find lambda body opening brace\n";
+            return;
+        }
+        
+        // Calculate the range to delete: from "-> " to just before the '{'
+        SourceLocation deleteStart = lambdaStart.getLocWithOffset(arrowPos);
+        SourceLocation deleteEnd = lambdaStart.getLocWithOffset(bracePos - 1);
+        
+        // Delete the trailing return type (including the "-> " part)
+        SourceRange deleteRange(deleteStart, deleteEnd);
+        rewriter.RemoveText(deleteRange);
+        
+        REWRITE_LOG() << "  Deleted lambda trailing return type from position " << arrowPos 
+                      << " to " << (bracePos - 1) << "\n";
     }
 
     void performRewrites() {

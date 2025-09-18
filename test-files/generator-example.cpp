@@ -5,6 +5,13 @@
 #include "./generator.h"
 #include <vector>
 
+struct X {
+  int i;
+};
+
+struct Y {
+  Y(X) {}
+};
 /*
 cppcoro::generator<int> gen() {
   int x = 3;
@@ -86,22 +93,41 @@ cppcoro::generator<int> gen() {
 }
 
 cppcoro::generator<const int> gen() {
+int i = 0;
+  while (true) {
   const int& x = {3};
+  if (i < 4) {
+    continue;
+  } else {
+    break;
+  }
   co_yield x;
+  ++i;
+  }
+}
+
+
+cppcoro::generator<int> conversion() {
+  Y y = X{3};
+  co_yield 4;
+}
+
+auto lambda = [](int x) -> cppcoro::generator<int> {
+ auto y = x + 2;
+ co_yield y;
 }
 */
 
-cppcoro::generator<const int, cppcoro::NoDetails, Handle> gen() {
-  // _coro_storage and CoroImpl assumed to be available in global namespace
-  struct _detail_coro_impl {
-    // Local variables (including ranged-for loop variables)
-    _coro_storage<const int &, true> x;
-  };
-
-  using _ActualCoroType = cppcoro::generator<const int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) 
-  CO_BRACED_INIT(x, 3);
-  CO_YIELD(1,  CO_GET(x));
-    this->state.x.destroy();
-COROUTINE_FOOTER()
+cppcoro::generator<const int> gen() {
+int i = 0;
+  while (true) {
+  const int& x = {3};
+  if (i < 4) {
+    continue;
+  } else {
+    break;
+  }
+  co_yield x;
+  ++i;
+  }
 }

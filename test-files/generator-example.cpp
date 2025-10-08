@@ -2,6 +2,9 @@
 // Created by kalmbacj on 2025-09-09.
 //
 
+#include <iostream>
+#include <ostream>
+
 #include "./generator.h"
 #include <vector>
 
@@ -109,6 +112,11 @@ int i = 0;
 
 cppcoro::generator<int> conversion() {
   Y y = X{3};
+  Y& z = y;
+  int a = 3;
+  int b(a);
+  int& c(b);
+  int& d{c};
   co_yield 4;
 }
 
@@ -116,33 +124,33 @@ auto lambda = [](int x) -> cppcoro::generator<int> {
  auto y = x + 2;
  co_yield y;
 }
+
+cppcoro::generator<int> temporaries() {
+  int a = 4;
+  co_yield 4;
+  co_yield 4.3;
+  co_yield a;
+  co_yield a + 2;
+}
 */
 
-
-cppcoro::generator<const int, cppcoro::NoDetails, Handle> gen() {
+cppcoro::generator<int, cppcoro::NoDetails, Handle> temporaries() {
   // _coro_storage and CoroImpl assumed to be available in global namespace
   struct _detail_coro_impl {
     // Local variables (including ranged-for loop variables)
-    _coro_storage<int &, true> i;
-    _coro_storage<const int &, true> x;
+    _coro_storage<int&, true> a;
+
+    // Buffer for yielded/awaited temporaries
+    alignas(ql::ranges::max({1, alignof(int), alignof(double), alignof(int), alignof(int), alignof(double), alignof(int)})) char yieldBuffer[ql::ranges::max({1, sizeof(int), sizeof(double), sizeof(int), sizeof(int), sizeof(double), sizeof(int)})];
   };
 
-  using _ActualCoroType = cppcoro::generator<const int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
-      this->state.i.construct(0);
-      while (true) {
-        CO_BRACED_INIT(x, 3);
-        if (CO_GET(i) < 4) {
-          this->state.x.destroy();
-          continue;
-        } else {
-          this->state.x.destroy();
-          break;
-        }
-        CO_YIELD(1, CO_GET(x));
-        ++CO_GET(i);
-        this->state.x.destroy();
-      }
-      this->state.i.destroy();
-  COROUTINE_FOOTER()
+  using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
+  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) 
+  CO_PAREN_INIT_OWNING(a,  4);
+  CO_YIELD_BUFFERED(1,  4);
+  CO_YIELD_BUFFERED(2,  4.3);
+  CO_YIELD(3,  CO_GET(a));
+  CO_YIELD_BUFFERED(4,  CO_GET(a) + 2);
+    this->state.a.destroy();
+COROUTINE_FOOTER()
 }

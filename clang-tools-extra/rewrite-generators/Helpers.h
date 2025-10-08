@@ -86,4 +86,23 @@ std::pair<std::string, bool> getTypeForAutoRefRefVariable(const Expr* initialize
     return {prefix + typeAsString(tp, astContext) + ">", isPrValue(initializer)};
 }
 
+const Expr *getOriginalCoroutineExprArgument(const CoroutineSuspendExpr *expr) {
+    if (!expr) return nullptr;
+
+    const Expr *operand = expr->getOperand();
+    if (!operand) return nullptr;
+
+    operand = operand->IgnoreImplicit();
+
+    // If it's a call (e.g., promise.yield_value(x)), extract the first argument
+    if (const auto *call = dyn_cast<CallExpr>(operand)) {
+        if (call->getNumArgs() > 0) {
+            return call->getArg(0)->IgnoreImplicit();
+        }
+    } else {
+    }
+    llvm::errs() << "call to yield_value or similar is not a CallExpr";
+    return operand;
+}
+
 #endif //LLVM_HELPERS_H

@@ -2,6 +2,7 @@
 // Created by kalmbacj on 2025-09-09.
 //
 
+#include <streambuf>
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
@@ -25,8 +26,22 @@ using namespace llvm;
 using namespace clang;
 using namespace clang::ast_matchers;
 
+
+class NullBuffer : public std::streambuf {
+protected:
+    // Discard characters by pretending to succeed
+    int overflow(int c) override { return traits_type::not_eof(c); }
+};
+
+// Create a global or local instance
+inline std::ostream& null_stream() {
+    static NullBuffer nullBuffer;
+    static std::ostream nullStream(&nullBuffer);
+    return nullStream;
+}
+
 // Logging macro for fine-grained control
-#define REWRITE_LOG() std::cout
+#define REWRITE_LOG() null_stream()
 
 
 // Helper function to generate state get() call
@@ -45,19 +60,22 @@ static std::string makeStateDestroyCall(const std::string &memberName) {
     return "this->state." + memberName + ".destroy()";
 }
 
-// Helper function to generate state construct prefix (for declaration replacement)
-static std::string makeStateConstructPrefix(const std::string &memberName) {
-    return "this->state." + memberName + ".construct(";
-}
-
 // Helper function to generate CO_BRACED_INIT prefix  
-static std::string makeBracedInitPrefix(const std::string &varName) {
-    return "CO_BRACED_INIT(" + varName + ", ";
+static std::string makeBracedInitPrefix(const std::string &varName, bool isOwning) {
+    if (isOwning) {
+        return "CO_BRACED_INIT_OWNING(" + varName + ", ";
+    } else {
+        return "CO_BRACED_INIT(" + varName + ", ";
+    }
 }
 
 // Helper function to generate CO_PAREN_INIT prefix
-static std::string makeParenInitPrefix(const std::string &varName) {
-    return "CO_PAREN_INIT(" + varName + ", ";
+static std::string makeParenInitPrefix(const std::string &varName, bool isOwning) {
+    if (isOwning) {
+        return "CO_PAREN_INIT_OWNING(" + varName + ", ";
+    } else {
+        return "CO_PAREN_INIT(" + varName + ", ";
+    }
 }
 
 static llvm::cl::OptionCategory MyToolCategory("coroutine-rewriter");
@@ -99,6 +117,9 @@ struct CoroutineInfo {
     // Lambda information
     bool isLambda = false;
     const LambdaExpr *lambdaExpr = nullptr;
+    
+    // Temporary type information for yield buffer
+    std::vector<QualType> yieldedOrAwaitedTemporaries;
 };
 
 
@@ -133,6 +154,7 @@ struct CoroutineStatement {
     SourceLocation keywordLoc;
     SourceLocation operandStart;
     SourceLocation operandEnd;
+    bool needsBuffering = false; // True if operand is a temporary
 };
 
 // The bool means `true` for replace, `false` for insert after the beginning.
@@ -143,6 +165,8 @@ private:
     const std::set<LocalVariable> &localVariables;
     Rewriter &rewriter;
     const SourceManager &sourceManager;
+    CoroutineInfo &coroutineInfo;
+    ASTContext *astContext;
     std::set<std::string> variableNames;
     std::vector<Replacement> declReplacements;
     std::vector<Replacement> refReplacements;
@@ -158,7 +182,7 @@ private:
 
     // Member function information
     bool isMemberFunction;
-    const CXXRecordDecl *classDecl;
+    [[maybe_unused]] const CXXRecordDecl *classDecl;
 
     // Map from closing brace position to all replacements that should happen at that position
 
@@ -170,8 +194,8 @@ public:
 
 public:
     CoroutineBodyRewriter(const std::set<LocalVariable> &vars, Rewriter &rewr, const SourceManager &SM,
-                          bool isMember = false, const CXXRecordDecl *classRecord = nullptr)
-        : localVariables(vars), rewriter(rewr), sourceManager(SM), nextCoroStatementIndex(1), nextRangedForIndex(0),
+                          CoroutineInfo &coroInfo, ASTContext &astCtx, bool isMember = false, const CXXRecordDecl *classRecord = nullptr)
+        : localVariables(vars), rewriter(rewr), sourceManager(SM), coroutineInfo(coroInfo), astContext(&astCtx), nextCoroStatementIndex(1), nextRangedForIndex(0),
           isMemberFunction(isMember), classDecl(classRecord) {
         // Create a set of variable names for quick lookup
         for (const auto &var: localVariables) {
@@ -258,16 +282,28 @@ public:
                     InitializationForm form = getInitializationForm(varDecl);
                     std::string prefix;
 
+                    // Look up the variable in localVariables to get owning information
+                    bool isOwning = false;
+                    for (const auto &var : localVariables) {
+                        if (var.name == varName) {
+                            isOwning = var.isOwning;
+                            break;
+                        }
+                    }
+
                     switch (form) {
                         case BRACED_INIT:
-                            prefix = makeBracedInitPrefix(varName);
+                            prefix = makeBracedInitPrefix(varName, isOwning);
+                            REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_BRACED_INIT_OWNING" : "CO_BRACED_INIT") << " for variable '" << varName << "'\n";
                             break;
                         case PAREN_INIT:
-                            prefix = makeParenInitPrefix(varName);
+                            prefix = makeParenInitPrefix(varName, isOwning);
+                            REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_PAREN_INIT_OWNING" : "CO_PAREN_INIT") << " for variable '" << varName << "'\n";
                             break;
                         case CONSTRUCT_CALL:
                         default:
-                            prefix = makeStateConstructPrefix(varName);
+                            prefix = makeParenInitPrefix(varName, isOwning);
+                            REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_PAREN_INIT_OWNING" : "CO_PAREN_INIT") << " for construct call variable '" << varName << "'\n";
                             break;
                     }
 
@@ -311,11 +347,20 @@ public:
                                 // Process the arguments (now that prefix replacement is set up)
                                 processParenthesizedArguments(varDecl);
 
-                                // Replace everything from last child end to init end with closing paren
-                                SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
+                                // Find the actual closing parenthesis of the initialization
                                 SourceLocation afterLastChild = Lexer::getLocForEndOfToken(childrenRange->getEnd(), 0, sourceManager, LangOptions());
-                                SourceRange suffixRange(afterLastChild, initEnd);
-                                declReplacements.emplace_back(suffixRange, ")", true);
+                                
+                                // Search for the closing parenthesis after the last argument
+                                SourceLocation closingParen = findClosingParen(afterLastChild);
+                                if (closingParen.isValid()) {
+                                    SourceRange suffixRange(afterLastChild, closingParen);
+                                    declReplacements.emplace_back(suffixRange, ")", true);
+                                } else {
+                                    REWRITE_LOG() << "    WARNING: Could not find closing parenthesis, using init end\n";
+                                    SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
+                                    SourceRange suffixRange(afterLastChild, initEnd);
+                                    declReplacements.emplace_back(suffixRange, ")", true);
+                                }
                             } else {
                                 // Empty parenthesized initialization - replace entire range
                                 SourceRange fullRange(declStart, varDecl->getInit()->getSourceRange().getEnd());
@@ -354,7 +399,7 @@ public:
         CoroutineStatement coroStmt;
         coroStmt.type = CoroutineStatement::YIELD;
         coroStmt.stmt = coyield;
-        coroStmt.operand = coyield->getOperand();
+        coroStmt.operand = getOriginalCoroutineExprArgument(coyield);
         coroStmt.index = nextCoroStatementIndex++;
 
         // Find the location of the co_yield keyword
@@ -364,6 +409,28 @@ public:
         if (coroStmt.operand) {
             coroStmt.operandStart = coroStmt.operand->getBeginLoc();
             coroStmt.operandEnd = coroStmt.operand->getEndLoc();
+            
+            // Check if the operand expression is a temporary (prvalue)
+            // The operand is what comes after co_yield (e.g., the "3" in "co_yield 3")
+            if (isPrValue(coroStmt.operand)) {
+                std::string operandText = getSourceText(coroStmt.operand, sourceManager);
+                std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
+                REWRITE_LOG() << "    DEBUG: co_yield operand '" << operandText 
+                              << "' (type: " << operandTypeStr << ") is a temporary, will use CO_YIELD_BUFFERED\n";
+                
+                // Store the type of the operand expression for buffer sizing
+                QualType operandType = coroStmt.operand->getType();
+                coroutineInfo.yieldedOrAwaitedTemporaries.push_back(operandType);
+                
+                // Mark this statement as needing buffered macro
+                coroStmt.needsBuffering = true;
+            } else {
+                std::string operandText = getSourceText(coroStmt.operand, sourceManager);
+                std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
+                REWRITE_LOG() << "    DEBUG: co_yield operand '" << operandText
+                              << "' (type: " << operandTypeStr << ") is not a temporary, will use CO_YIELD\n";
+                coroStmt.needsBuffering = false;
+            }
         }
 
         coroutineStatements.push_back(coroStmt);
@@ -380,7 +447,7 @@ public:
         CoroutineStatement coroStmt;
         coroStmt.type = CoroutineStatement::AWAIT;
         coroStmt.stmt = coawait;
-        coroStmt.operand = coawait->getOperand();
+        coroStmt.operand = getOriginalCoroutineExprArgument(coawait);
         coroStmt.index = nextCoroStatementIndex++;
 
         // Find the location of the co_await keyword
@@ -390,6 +457,28 @@ public:
         if (coroStmt.operand) {
             coroStmt.operandStart = coroStmt.operand->getBeginLoc();
             coroStmt.operandEnd = coroStmt.operand->getEndLoc();
+            
+            // Check if the operand expression is a temporary (prvalue)
+            // The operand is what comes after co_await (e.g., the "someFunc()" in "co_await someFunc()")
+            if (isPrValue(coroStmt.operand)) {
+                std::string operandText = getSourceText(coroStmt.operand, sourceManager);
+                std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
+                REWRITE_LOG() << "    DEBUG: co_await operand '" << operandText 
+                              << "' (type: " << operandTypeStr << ") is a temporary, will use CO_AWAIT_BUFFERED\n";
+                
+                // Store the type of the operand expression for buffer sizing
+                QualType operandType = coroStmt.operand->getType();
+                coroutineInfo.yieldedOrAwaitedTemporaries.push_back(operandType);
+                
+                // Mark this statement as needing buffered macro
+                coroStmt.needsBuffering = true;
+            } else {
+                std::string operandText = getSourceText(coroStmt.operand, sourceManager);
+                std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
+                REWRITE_LOG() << "    DEBUG: co_await operand '" << operandText
+                              << "' (type: " << operandTypeStr << ") is not a temporary, will use CO_AWAIT\n";
+                coroStmt.needsBuffering = false;
+            }
         }
 
         coroutineStatements.push_back(coroStmt);
@@ -737,6 +826,40 @@ private:
         REWRITE_LOG() << "    DEBUG: Found " << arguments.size() << " parenthesized initialization arguments\n";
 
         return SourceRange(firstValidStart, lastValidEnd);
+    }
+
+    // Helper function to find the closing parenthesis starting from a given location
+    SourceLocation findClosingParen(SourceLocation startLoc) {
+        if (!startLoc.isValid()) {
+            return SourceLocation();
+        }
+
+        // Get the source buffer
+        bool invalid = false;
+        const char *bufferStart = sourceManager.getCharacterData(startLoc, &invalid);
+        if (invalid) {
+            return SourceLocation();
+        }
+
+        // Search for the closing parenthesis, skipping nested parentheses
+        const char *current = bufferStart;
+        int parenDepth = 0;
+        
+        while (*current != '\0') {
+            if (*current == '(') {
+                parenDepth++;
+            } else if (*current == ')') {
+                if (parenDepth == 0) {
+                    // Found the matching closing parenthesis
+                    return startLoc.getLocWithOffset(current - bufferStart);
+                }
+                parenDepth--;
+            }
+            current++;
+        }
+
+        // Didn't find a matching closing parenthesis
+        return SourceLocation();
     }
 
     void processParenthesizedArguments(const VarDecl *varDecl) {
@@ -1192,11 +1315,12 @@ private:
 
         for (const auto &coroStmt: coroutineStatements) {
             if (coroStmt.type == CoroutineStatement::YIELD) {
-                REWRITE_LOG() << "    DEBUG: Collecting co_yield replacement for CO_YIELD(" << coroStmt.index <<
+                std::string macroName = coroStmt.needsBuffering ? "CO_YIELD_BUFFERED" : "CO_YIELD";
+                REWRITE_LOG() << "    DEBUG: Collecting co_yield replacement for " << macroName << "(" << coroStmt.index <<
                         ", ...)\n";
 
-                // Replace "co_yield" keyword with "CO_YIELD(index, " (without closing paren)
-                std::string macroStart = "CO_YIELD(" + std::to_string(coroStmt.index) + ", ";
+                // Replace "co_yield" keyword with appropriate macro (without closing paren)
+                std::string macroStart = macroName + "(" + std::to_string(coroStmt.index) + ", ";
 
                 // Priority based on index for consistent ordering
                 int priority = static_cast<int>(coroStmt.index);
@@ -1219,11 +1343,12 @@ private:
                     globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
                 }
             } else if (coroStmt.type == CoroutineStatement::AWAIT) {
-                REWRITE_LOG() << "    DEBUG: Collecting co_await replacement for CO_AWAIT(" << coroStmt.index <<
+                std::string macroName = coroStmt.needsBuffering ? "CO_AWAIT_BUFFERED" : "CO_AWAIT";
+                REWRITE_LOG() << "    DEBUG: Collecting co_await replacement for " << macroName << "(" << coroStmt.index <<
                         ", ...)\n";
 
-                // Replace "co_await" keyword with "CO_AWAIT(index, " (without closing paren)
-                std::string macroStart = "CO_AWAIT(" + std::to_string(coroStmt.index) + ", ";
+                // Replace "co_await" keyword with appropriate macro (without closing paren)
+                std::string macroStart = macroName + "(" + std::to_string(coroStmt.index) + ", ";
 
                 // Priority based on index for consistent ordering
                 int priority = static_cast<int>(coroStmt.index);
@@ -2059,6 +2184,50 @@ private:
             }
         }
 
+        // Add yield buffer for temporaries if needed
+        if (!coro.yieldedOrAwaitedTemporaries.empty()) {
+            structCode += "\n    // Buffer for yielded/awaited temporaries\n";
+            
+            // Calculate max size and alignment
+            size_t maxSize = 0;
+            size_t maxAlignment = 1;
+            
+            REWRITE_LOG() << "  DEBUG: Calculating buffer size for " << coro.yieldedOrAwaitedTemporaries.size() << " temporary types:\n";
+            
+            for (const auto &tempType : coro.yieldedOrAwaitedTemporaries) {
+                // Get type string for logging
+                std::string typeStr = typeAsString(tempType, *astContext);
+                REWRITE_LOG() << "    Temporary type: " << typeStr << "\n";
+                
+                // Calculate size and alignment (we'll use sizeof and alignof expressions)
+                // Note: We can't calculate actual sizes at compile time of the rewriter,
+                // so we'll generate code that calculates it at compile time of the target
+            }
+            
+            // Generate buffer with max size/alignment using template metaprogramming
+            structCode += "    alignas(ql::ranges::max({1, ";
+            bool first = true;
+            for (const auto &tempType : coro.yieldedOrAwaitedTemporaries) {
+                if (!first) structCode += ", ";
+                first = false;
+                std::string typeStr = typeAsString(tempType, *astContext);
+                structCode += "alignof(" + typeStr + ")";
+            }
+            structCode += "})) ";
+
+            structCode += "char yieldBuffer[ql::ranges::max({1, ";
+            first = true;
+            for (const auto &tempType : coro.yieldedOrAwaitedTemporaries) {
+                if (!first) structCode += ", ";
+                first = false;
+                std::string typeStr = typeAsString(tempType, *astContext);
+                structCode += "sizeof(" + typeStr + ")";
+            }
+            structCode += "})];\n";
+            
+            REWRITE_LOG() << "    Added yieldBuffer to struct with max size/alignment of " << coro.yieldedOrAwaitedTemporaries.size() << " types\n";
+        }
+
         structCode += "  };\n\n";
 
         // Add typedef to avoid comma issues in macro call
@@ -2294,7 +2463,8 @@ public:
         SourceLocation lambdaEnd = lambdaRange.getEnd();
         
         // Get the source text of the entire lambda
-        StringRef lambdaText = rewriter.getRewrittenText(lambdaRange);
+        auto txt = rewriter.getRewrittenText(lambdaRange);
+        StringRef lambdaText = txt;
         if (lambdaText.empty()) {
             // Fallback: get original source text
             bool invalid = false;
@@ -2341,7 +2511,7 @@ public:
     }
 
     void performRewrites() {
-        for (const auto &coro: coroutines) {
+        for (auto &coro: coroutines) {
             if (coro.hasError) {
                 continue;
             }
@@ -2362,7 +2532,7 @@ public:
         }
     }
 
-    void rewriteCoroutineBody(const CoroutineInfo &coro) {
+    void rewriteCoroutineBody(CoroutineInfo &coro) {
         REWRITE_LOG() << "Rewriting coroutine body for: " << coro.function->getQualifiedNameAsString() << "\n";
 
         const Stmt *bodyStmt = coro.function->getBody();
@@ -2384,7 +2554,7 @@ public:
                 }
             }
             CoroutineBodyRewriter initialRewriter(coro.localVariables, rewriter, sourceManager,
-                                                  coro.isMemberFunction, classRecord);
+                                                  coro, *astContext, coro.isMemberFunction, classRecord);
             initialRewriter.TraverseStmt(const_cast<Stmt *>(bodyStmt));
 
             // Get the ranged-for loops and add them to the coroutine info for struct generation
@@ -2475,7 +2645,7 @@ public:
             }
 
             CoroutineBodyRewriter finalRewriter(coro.localVariables, rewriter, sourceManager,
-                                                coro.isMemberFunction, classRecord);
+                                                coro, *astContext, coro.isMemberFunction, classRecord);
             finalRewriter.TraverseStmt(const_cast<Stmt *>(bodyStmt));
 
             // Apply all the variable rewrites in place (construct/destroy calls, get() access)
@@ -2741,3 +2911,4 @@ int main(int argc, const char **argv) {
     int result = Tool.run(tool.get());
     return result;
 }
+

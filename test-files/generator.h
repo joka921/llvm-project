@@ -352,6 +352,20 @@ bool co_await_impl(auto &&awaiter, auto handle) {
   [[fallthrough]];                                        \
   case index:
 
+namespace blubbi {
+    template <typename T>
+    using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
+}
+
+#define CO_YIELD_BUFFERED(index, value) \
+    { \
+    using BufT ## index = blubbi::remove_cvref_t<decltype(value)>; \
+    auto __yield_buffer_ptr_ ## index = new(state.yieldBuffer) std::remove_reference_t<decltype(value)>{value}; \
+    CO_YIELD(index, static_cast<std::__add_rvalue_reference_t<decltype(value)>>(* __yield_buffer_ptr_ ## index)) \
+    __yield_buffer_ptr_ ##index -> ~ BufT ## index(); \
+} void()
+
+
 template<typename Derived, typename PromiseType>
 struct CoroImpl {
     HandleFrame frm;
@@ -461,8 +475,10 @@ struct _coro_storage {
     }
 };
 
-#define CO_BRACED_INIT(mem, ...) if constexpr (decltype(this->state.mem)::isOwning) {new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ __VA_ARGS__} ; } else { new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ [&](){ return &__VA_ARGS__;}()};} this->state.mem.constructed=true
-#define CO_PAREN_INIT(mem, ...) if constexpr (decltype(this->state.mem)::isOwning) {new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ __VA_ARGS__} ; } else { new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;} this->state.mem.constructed=true
+#define CO_BRACED_INIT(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;  this->state.mem.constructed=true
+#define CO_BRACED_INIT_OWNING(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ __VA_ARGS__} ;  this->state.mem.constructed=true
+#define CO_PAREN_INIT(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;  this->state.mem.constructed=true
+#define CO_PAREN_INIT_OWNING(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage( __VA_ARGS__) ;  this->state.mem.constructed=true
 
 
 template<typename Ref, bool isOwning>

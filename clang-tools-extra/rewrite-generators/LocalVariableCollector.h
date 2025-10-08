@@ -141,11 +141,13 @@ public:
                         variableNameLocations[var.name].push_back(var.location);
                         
                         variables.insert(var);
+                        /*
                         std::cout << "  Found local variable: " << var.type << " " << var.name
                                 << " (is reference: " << (var.isReference ? "yes" : "no")
                                 << ", storage type: " << var.isOwning
                                 << ", reference type: " << var.referenceType
                                 << ", priority: " << var.priority << ")\n";
+                                */
                     }
                 }
             }

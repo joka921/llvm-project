@@ -133,24 +133,3 @@ cppcoro::generator<int> temporaries() {
   co_yield a + 2;
 }
 */
-
-cppcoro::generator<int, cppcoro::NoDetails, Handle> temporaries() {
-  // _coro_storage and CoroImpl assumed to be available in global namespace
-  struct _detail_coro_impl {
-    // Local variables (including ranged-for loop variables)
-    _coro_storage<int&, true> a;
-
-    // Buffer for yielded/awaited temporaries
-    alignas(ql::ranges::max({1, alignof(int), alignof(double), alignof(int), alignof(int), alignof(double), alignof(int)})) char yieldBuffer[ql::ranges::max({1, sizeof(int), sizeof(double), sizeof(int), sizeof(int), sizeof(double), sizeof(int)})];
-  };
-
-  using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) 
-  CO_PAREN_INIT_OWNING(a,  4);
-  CO_YIELD_BUFFERED(1,  4);
-  CO_YIELD_BUFFERED(2,  4.3);
-  CO_YIELD(3,  CO_GET(a));
-  CO_YIELD_BUFFERED(4,  CO_GET(a) + 2);
-    this->state.a.destroy();
-COROUTINE_FOOTER()
-}

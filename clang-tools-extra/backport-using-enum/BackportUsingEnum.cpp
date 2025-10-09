@@ -121,7 +121,7 @@ public:
         std::string replacement;
         
         for (size_t i = 0; i < info.enumerators.size(); ++i) {
-            replacement += "using " + info.enumName + "::" + info.enumerators[i];
+            replacement += "static constexpr auto " + info.enumerators[i] + " = " + info.enumName + "::" + info.enumerators[i];
             if (i < info.enumerators.size() - 1) {
                 replacement += ";\n";
             } else {

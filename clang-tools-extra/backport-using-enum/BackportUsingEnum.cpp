@@ -44,6 +44,7 @@ class UsingEnumRewriter : public MatchFinder::MatchCallback {
         std::string enumName;
         std::vector<std::string> enumerators;
         bool hasError = false;
+        bool isInConstexprFunction = false;
     };
 
     std::vector<UsingEnumInfo> matches;
@@ -103,6 +104,18 @@ public:
 
         info.enumName = enumDecl->getQualifiedNameAsString();
 
+        // Check if the using enum declaration is inside a constexpr function
+        const DeclContext *DC = Decl->getDeclContext();
+        while (DC) {
+            if (const auto *FD = dyn_cast<FunctionDecl>(DC)) {
+                if (FD->isConstexpr()) {
+                    info.isInConstexprFunction = true;
+                    break;
+                }
+            }
+            DC = DC->getParent();
+        }
+
         // Collect all enumerators from the enum
         for (const EnumConstantDecl *enumConstant : enumDecl->enumerators()) {
             info.enumerators.push_back(enumConstant->getNameAsString());
@@ -119,16 +132,20 @@ public:
     // Generate the replacement text for a using enum declaration
     std::string generateReplacement(const UsingEnumInfo &info) {
         std::string replacement;
-        
+
+        // Use 'constexpr auto' inside constexpr functions (static not allowed),
+        // otherwise use 'static constexpr auto'
+        std::string storageSpec = info.isInConstexprFunction ? "constexpr auto " : "static constexpr auto ";
+
         for (size_t i = 0; i < info.enumerators.size(); ++i) {
-            replacement += "static constexpr auto " + info.enumerators[i] + " = " + info.enumName + "::" + info.enumerators[i];
+            replacement += "[[maybe_unused]] " + storageSpec + info.enumerators[i] + " = " + info.enumName + "::" + info.enumerators[i];
             if (i < info.enumerators.size() - 1) {
                 replacement += ";\n";
             } else {
                 replacement += ";";
             }
         }
-        
+
         return replacement;
     }
 

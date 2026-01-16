@@ -110,13 +110,30 @@ struct TryCatchBlock {
     SourceLocation tryBlockEnd;    // Closing brace of try block
     std::vector<std::string> catchClauses;  // Transformed catch clause bodies
     SourceLocation catchEnd;       // End of all catch clauses
+    std::vector<std::string> variablesInTryBlock;  // Variables declared inside this try block, in reverse order
 };
+
+struct CoroutineStatement {
+    enum Type { YIELD, AWAIT };
+
+    Type type;
+    const Stmt *stmt; // CoawaitExpr* or CoyieldExpr*
+    const Expr *operand; // The expression being yielded/awaited
+    unsigned index;
+    SourceLocation keywordLoc;
+    SourceLocation operandStart;
+    SourceLocation operandEnd;
+    bool needsBuffering = false; // True if operand is a temporary
+    std::vector<std::string> aliveVariables; // Variables alive at this suspension point, in reverse order of declaration
+};
+
 
 struct CoroutineInfo {
     const FunctionDecl *function;
     std::set<LocalVariable> localVariables;
     std::vector<RangedForLoop> rangedForLoops; // Add ranged-for loop info
     std::vector<TryCatchBlock> tryCatchBlocks; // Add try-catch block info
+    std::vector<CoroutineStatement> coroutineStatements; // Add coroutine suspension points
     std::vector<FunctionParameter> parameters; // Function parameters
     SourceLocation insertionPoint;
     bool hasError = false;
@@ -156,19 +173,6 @@ struct ScopeEndReplacement {
     }
 };
 
-struct CoroutineStatement {
-    enum Type { YIELD, AWAIT };
-
-    Type type;
-    const Stmt *stmt; // CoawaitExpr* or CoyieldExpr*
-    const Expr *operand; // The expression being yielded/awaited
-    unsigned index;
-    SourceLocation keywordLoc;
-    SourceLocation operandStart;
-    SourceLocation operandEnd;
-    bool needsBuffering = false; // True if operand is a temporary
-};
-
 // The bool means `true` for replace, `false` for insert after the beginning.
 using Replacement = std::tuple<SourceRange, std::string, bool>;
 
@@ -193,6 +197,7 @@ private:
     unsigned nextRangedForIndex;
     std::vector<TryCatchBlock> tryCatchBlocks;
     unsigned nextTryCatchIndex;
+    std::vector<unsigned> currentTryBlockStack;  // Stack of try block indices we're currently inside
 
     // Member function information
     bool isMemberFunction;
@@ -290,6 +295,13 @@ public:
                     if (!scopeStack.empty()) {
                         scopeStack.back().variablesInScope.push_back(varName);
                         REWRITE_LOG() << "    DEBUG: Added variable '" << varName << "' to current scope\n";
+                    }
+
+                    // If inside a try block, add this variable to that try block's list
+                    if (!currentTryBlockStack.empty()) {
+                        unsigned tryBlockIndex = currentTryBlockStack.back();
+                        tryCatchBlocks[tryBlockIndex].variablesInTryBlock.push_back(varName);
+                        REWRITE_LOG() << "    DEBUG: Added variable '" << varName << "' to try block " << tryBlockIndex << "\n";
                     }
 
                     // Determine initialization form and generate appropriate prefix
@@ -447,9 +459,20 @@ public:
             }
         }
 
+        // Capture alive variables at this suspension point
+        // Traverse scopeStack from innermost to outermost, collecting all variables
+        for (auto it = scopeStack.rbegin(); it != scopeStack.rend(); ++it) {
+            const ScopeInfo &scope = *it;
+            // Add variables from this scope in reverse order (already in reverse from rbegin)
+            for (auto varIt = scope.variablesInScope.rbegin(); varIt != scope.variablesInScope.rend(); ++varIt) {
+                coroStmt.aliveVariables.push_back(*varIt);
+                REWRITE_LOG() << "      DEBUG: Variable '" << *varIt << "' is alive at suspension point " << coroStmt.index << "\n";
+            }
+        }
+
         coroutineStatements.push_back(coroStmt);
 
-        REWRITE_LOG() << "    DEBUG: Added co_yield with index " << coroStmt.index << "\n";
+        REWRITE_LOG() << "    DEBUG: Added co_yield with index " << coroStmt.index << " with " << coroStmt.aliveVariables.size() << " alive variables\n";
 
         return true;
     }
@@ -495,15 +518,27 @@ public:
             }
         }
 
+        // Capture alive variables at this suspension point
+        // Traverse scopeStack from innermost to outermost, collecting all variables
+        for (auto it = scopeStack.rbegin(); it != scopeStack.rend(); ++it) {
+            const ScopeInfo &scope = *it;
+            // Add variables from this scope in reverse order (already in reverse from rbegin)
+            for (auto varIt = scope.variablesInScope.rbegin(); varIt != scope.variablesInScope.rend(); ++varIt) {
+                coroStmt.aliveVariables.push_back(*varIt);
+                REWRITE_LOG() << "      DEBUG: Variable '" << *varIt << "' is alive at suspension point " << coroStmt.index << "\n";
+            }
+        }
+
         coroutineStatements.push_back(coroStmt);
 
-        REWRITE_LOG() << "    DEBUG: Added co_await with index " << coroStmt.index << "\n";
+        REWRITE_LOG() << "    DEBUG: Added co_await with index " << coroStmt.index << " with " << coroStmt.aliveVariables.size() << " alive variables\n";
 
         return true;
     }
 
-    // Handle try-catch blocks
-    bool VisitCXXTryStmt(CXXTryStmt *tryStmt) {
+    // Handle try-catch blocks - using Traverse for proper pre/post hooks
+    bool TraverseCXXTryStmt(CXXTryStmt *tryStmt) {
+        // ===== PRE-TRAVERSAL =====
         REWRITE_LOG() << "  Found try-catch block\n";
 
         TryCatchBlock tryCatch;
@@ -537,11 +572,23 @@ public:
             }
         }
 
+        // Push this try block index onto the stack before traversing children
+        unsigned currentIndex = tryCatch.index;
+        currentTryBlockStack.push_back(currentIndex);
+
+        // Store the try-catch block (we'll update variablesInTryBlock later)
         tryCatchBlocks.push_back(tryCatch);
 
         REWRITE_LOG() << "    DEBUG: Added try-catch block with index " << tryCatch.index << "\n";
 
-        return true;
+        // ===== TRAVERSE CHILDREN =====
+        bool result = RecursiveASTVisitor::TraverseCXXTryStmt(tryStmt);
+
+        // ===== POST-TRAVERSAL =====
+        // Pop the try block index from the stack
+        currentTryBlockStack.pop_back();
+
+        return result;
     }
 
     // Process a catch clause and transform variable references
@@ -2036,6 +2083,10 @@ public:
     const std::vector<TryCatchBlock> &getTryCatchBlocks() const {
         return tryCatchBlocks;
     }
+
+    const std::vector<CoroutineStatement> &getCoroutineStatements() const {
+        return coroutineStatements;
+    }
 };
 
 class CoroutineRewriter : public RecursiveASTVisitor<CoroutineRewriter> {
@@ -2465,6 +2516,126 @@ private:
 
                 REWRITE_LOG() << "    Added catchClauseImpl_" << tryCatch.index << " to struct\n";
             }
+
+            // Add destroyBecauseOfException function
+            structCode += "\n    // Destroy variables in case of exception in try block\n";
+            structCode += "    void destroyBecauseOfException(size_t tryCatchBlockIndex) {\n";
+            structCode += "      switch (tryCatchBlockIndex) {\n";
+            for (const auto &tryCatch : coro.tryCatchBlocks) {
+                structCode += "        case " + std::to_string(tryCatch.index) + ":\n";
+                // Destroy all variables in this try block in reverse order
+                for (const auto &varName : tryCatch.variablesInTryBlock) {
+                    structCode += "          if (state." + varName + ".constructed) state." + varName + ".destroy();\n";
+                }
+                structCode += "          break;\n";
+            }
+            structCode += "        default: break;\n";
+            structCode += "      }\n";
+            structCode += "    }\n";
+            REWRITE_LOG() << "    Added destroyBecauseOfException function\n";
+        }
+
+        // Add destroySuspendedCoro function (always needed if there are any coroutine statements)
+        if (!coro.coroutineStatements.empty()) {
+            structCode += "\n    // Destroy variables when coroutine is suspended at a specific state\n";
+            structCode += "    void destroySuspendedCoro(size_t curState) {\n";
+            structCode += "      switch (curState) {\n";
+
+            // Generate cases in descending order (from highest index to lowest)
+            // This allows us to use fallthrough and goto for proper destruction order
+            std::vector<const CoroutineStatement*> sortedStmts;
+            for (const auto &stmt : coro.coroutineStatements) {
+                sortedStmts.push_back(&stmt);
+            }
+            std::sort(sortedStmts.begin(), sortedStmts.end(),
+                     [](const CoroutineStatement* a, const CoroutineStatement* b) {
+                         return a->index > b->index;  // Descending order
+                     });
+
+            for (size_t i = 0; i < sortedStmts.size(); ++i) {
+                const CoroutineStatement &currentStmt = *sortedStmts[i];
+                structCode += "        case " + std::to_string(currentStmt.index) + ":\n";
+
+                // Find the next state we'll process (next in sorted list = next lower index)
+                const CoroutineStatement *nextStmt = (i + 1 < sortedStmts.size()) ? sortedStmts[i + 1] : nullptr;
+
+                // Determine which variables to destroy: those in current but NOT in next
+                // These are the variables that were added since the previous state
+                std::vector<std::string> varsToDestroy;
+                for (const auto &varName : currentStmt.aliveVariables) {
+                    bool inNext = false;
+                    if (nextStmt) {
+                        for (const auto &nextVar : nextStmt->aliveVariables) {
+                            if (varName == nextVar) {
+                                inNext = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!inNext) {
+                        varsToDestroy.push_back(varName);
+                    }
+                }
+
+                // Destroy only the new variables
+                for (const auto &varName : varsToDestroy) {
+                    structCode += "          state." + varName + ".destroy();\n";
+                }
+
+                // Find the target state to continue with:
+                // The first earlier state whose alive variables are ALL contained in current state
+                const CoroutineStatement *targetStmt = nullptr;
+                for (size_t j = i + 1; j < sortedStmts.size(); ++j) {
+                    const CoroutineStatement *candidateStmt = sortedStmts[j];
+
+                    // Check if ALL variables in candidate are also in current
+                    bool allContained = true;
+                    for (const auto &candidateVar : candidateStmt->aliveVariables) {
+                        bool found = false;
+                        for (const auto &currentVar : currentStmt.aliveVariables) {
+                            if (candidateVar == currentVar) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            allContained = false;
+                            break;
+                        }
+                    }
+
+                    if (allContained) {
+                        targetStmt = candidateStmt;
+                        break;  // Found the first matching state
+                    }
+                }
+
+                // Determine if we need goto or fallthrough
+                if (targetStmt) {
+                    // Check if target is the immediately next state
+                    if (nextStmt && targetStmt->index == nextStmt->index) {
+                        // Fall through naturally to the next state
+                    } else {
+                        // Jump to the target state's cleanup label
+                        structCode += "          goto cleanup_" + std::to_string(targetStmt->index) + ";\n";
+                    }
+                } else {
+                    // No more states to process
+                    structCode += "          break;\n";
+                }
+
+                // Add cleanup label if this is a potential goto target
+                if (i + 1 < sortedStmts.size()) {
+                    const CoroutineStatement &nextStmt = *sortedStmts[i + 1];
+                    structCode += "        cleanup_" + std::to_string(nextStmt.index) + ":\n";
+                }
+            }
+
+            structCode += "        case 0:  // initial state\n";
+            structCode += "          break;\n";
+            structCode += "      }\n";
+            structCode += "    }\n";
+            REWRITE_LOG() << "    Added destroySuspendedCoro function\n";
         }
 
         structCode += "  };\n\n";
@@ -2797,6 +2968,11 @@ public:
             const auto &tryCatchBlocks = initialRewriter.getTryCatchBlocks();
             const_cast<CoroutineInfo &>(coro).tryCatchBlocks = tryCatchBlocks;
             REWRITE_LOG() << "  DEBUG: Found " << tryCatchBlocks.size() << " try-catch blocks\n";
+
+            // Get the coroutine statements (suspension points) and add them to the coroutine info
+            const auto &coroutineStatements = initialRewriter.getCoroutineStatements();
+            const_cast<CoroutineInfo &>(coro).coroutineStatements = coroutineStatements;
+            REWRITE_LOG() << "  DEBUG: Found " << coroutineStatements.size() << " suspension points\n";
 
             // Add ranged-for variables to the local variables set so they appear in the struct
             for (const auto &rangedFor: rangedForLoops) {

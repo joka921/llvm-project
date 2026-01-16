@@ -165,10 +165,15 @@ cppcoro::generator<int> testSuspendedDestroy() {
       co_yield z;
       --i;
     }
+  }
+  {
+  int z2;
   co_yield x;
+  }
   co_return;
 }
 */
+
 
 cppcoro::generator<int, cppcoro::NoDetails, Handle> testSuspendedDestroy() {
   // _coro_storage and CoroImpl assumed to be available in global namespace
@@ -178,12 +183,17 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testSuspendedDestroy() {
     _coro_storage<int&, true> y;
     _coro_storage<int&, true> i;
     _coro_storage<int&, true> z;
+    _coro_storage<int&, true> z2;
 
     // Destroy variables when coroutine is suspended at a specific state
     void destroySuspendedCoro(size_t curState) {
       switch (curState) {
+        case 5:
+          goto cleanup_1;
+        cleanup_4:
         case 4:
-          goto cleanup_2;
+          state.z2.destroy();
+          goto cleanup_1;
         cleanup_3:
         case 3:
           state.z.destroy();
@@ -215,10 +225,16 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testSuspendedDestroy() {
       --CO_GET(i);
         this->state.z.destroy();
 }
-    CO_YIELD(4,  CO_GET(x));
-    co_return;
       this->state.i.destroy();
     this->state.y.destroy();
-}    this->state.x.destroy();
+}
+  {
+  CO_PAREN_INIT_OWNING(z2, );
+  CO_YIELD(4,  CO_GET(x));
+      this->state.z2.destroy();
+}
+  CO_RETURN_VOID(5);
+    this->state.x.destroy();
+CO_RETURN_FALLOFF(6);
 COROUTINE_FOOTER()
 }

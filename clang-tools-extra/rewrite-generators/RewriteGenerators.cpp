@@ -114,16 +114,16 @@ struct TryCatchBlock {
 };
 
 struct CoroutineStatement {
-    enum Type { YIELD, AWAIT };
+    enum Type { YIELD, AWAIT, RETURN };
 
     Type type;
-    const Stmt *stmt; // CoawaitExpr* or CoyieldExpr*
-    const Expr *operand; // The expression being yielded/awaited
+    const Stmt *stmt; // CoawaitExpr*, CoyieldExpr*, or CoreturnStmt*
+    const Expr *operand; // The expression being yielded/awaited/returned
     unsigned index;
     SourceLocation keywordLoc;
     SourceLocation operandStart;
     SourceLocation operandEnd;
-    bool needsBuffering = false; // True if operand is a temporary
+    bool needsBuffering = false; // True if operand is a temporary (not used for RETURN)
     std::vector<std::string> aliveVariables; // Variables alive at this suspension point, in reverse order of declaration
 };
 
@@ -532,6 +532,44 @@ public:
         coroutineStatements.push_back(coroStmt);
 
         REWRITE_LOG() << "    DEBUG: Added co_await with index " << coroStmt.index << " with " << coroStmt.aliveVariables.size() << " alive variables\n";
+
+        return true;
+    }
+
+    // Handle co_return statements
+    bool VisitCoreturnStmt(CoreturnStmt *coreturn) {
+        REWRITE_LOG() << "  Found co_return statement\n";
+
+        CoroutineStatement coroStmt;
+        coroStmt.type = CoroutineStatement::RETURN;
+        coroStmt.stmt = coreturn;
+        coroStmt.operand = coreturn->getOperand();  // May be nullptr for co_return;
+        coroStmt.index = nextCoroStatementIndex++;
+
+        // Find the location of the co_return keyword
+        coroStmt.keywordLoc = coreturn->getKeywordLoc();
+
+        // Get the operand range if present
+        if (coroStmt.operand) {
+            coroStmt.operandStart = coroStmt.operand->getBeginLoc();
+            coroStmt.operandEnd = coroStmt.operand->getEndLoc();
+            REWRITE_LOG() << "    DEBUG: co_return has operand\n";
+        } else {
+            REWRITE_LOG() << "    DEBUG: co_return has no operand (void return)\n";
+        }
+
+        // Capture alive variables at this suspension point
+        for (auto it = scopeStack.rbegin(); it != scopeStack.rend(); ++it) {
+            const ScopeInfo &scope = *it;
+            for (auto varIt = scope.variablesInScope.rbegin(); varIt != scope.variablesInScope.rend(); ++varIt) {
+                coroStmt.aliveVariables.push_back(*varIt);
+                REWRITE_LOG() << "      DEBUG: Variable '" << *varIt << "' is alive at co_return point " << coroStmt.index << "\n";
+            }
+        }
+
+        coroutineStatements.push_back(coroStmt);
+
+        REWRITE_LOG() << "    DEBUG: Added co_return with index " << coroStmt.index << " with " << coroStmt.aliveVariables.size() << " alive variables\n";
 
         return true;
     }
@@ -1536,6 +1574,55 @@ private:
                     // No operand case - just insert closing paren right after the macro start
                     SourceRange parenRange(keywordEnd, keywordEnd);
                     globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
+                }
+            } else if (coroStmt.type == CoroutineStatement::RETURN) {
+                REWRITE_LOG() << "    DEBUG: Collecting co_return replacement for index " << coroStmt.index << "\n";
+
+                int priority = static_cast<int>(coroStmt.index);
+                SourceLocation keywordEnd = Lexer::getLocForEndOfToken(
+                    coroStmt.keywordLoc, 0, sourceManager, LangOptions());
+
+                if (!coroStmt.operand) {
+                    // Case 1: co_return; (no operand) -> CO_RETURN_VOID(index);
+                    REWRITE_LOG() << "      DEBUG: co_return has no operand, using CO_RETURN_VOID\n";
+
+                    std::string replacement = "CO_RETURN_VOID(" + std::to_string(coroStmt.index) + ");";
+                    SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
+                    globalReplacements.emplace_back(keywordRange, replacement, priority, true);
+                } else {
+                    // Check if operand type is void
+                    QualType operandType = coroStmt.operand->getType();
+                    bool isVoidType = operandType->isVoidType();
+
+                    if (isVoidType) {
+                        // Case 2: co_return expr; where expr is void -> expr; CO_RETURN_VOID(index);
+                        REWRITE_LOG() << "      DEBUG: co_return operand is void type, using CO_RETURN_VOID\n";
+
+                        // Replace "co_return " with nothing (just remove the keyword and space)
+                        SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
+                        globalReplacements.emplace_back(keywordRange, "", priority, true);
+
+                        // Insert "; CO_RETURN_VOID(index)" after the operand
+                        SourceLocation operandEnd = Lexer::getLocForEndOfToken(
+                            coroStmt.operandEnd, 0, sourceManager, LangOptions());
+                        SourceRange insertRange(operandEnd, operandEnd);
+                        std::string insertion = "; CO_RETURN_VOID(" + std::to_string(coroStmt.index) + ")";
+                        globalReplacements.emplace_back(insertRange, insertion, priority + 1000, false);
+                    } else {
+                        // Case 3: co_return expr; where expr is non-void -> CO_RETURN_VALUE(index, (expr))
+                        REWRITE_LOG() << "      DEBUG: co_return operand is value type, using CO_RETURN_VALUE\n";
+
+                        // Replace "co_return" with "CO_RETURN_VALUE(index, ("
+                        std::string macroStart = "CO_RETURN_VALUE(" + std::to_string(coroStmt.index) + ", (";
+                        SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
+                        globalReplacements.emplace_back(keywordRange, macroStart, priority, true);
+
+                        // Insert "))" after the operand
+                        SourceLocation operandEnd = Lexer::getLocForEndOfToken(
+                            coroStmt.operandEnd, 0, sourceManager, LangOptions());
+                        SourceRange parenRange(operandEnd, operandEnd);
+                        globalReplacements.emplace_back(parenRange, "))", priority + 1000, false);
+                    }
                 }
             }
         }
@@ -3220,6 +3307,22 @@ public:
                     }
                 }
 
+                // Add CO_RETURN_FALLOFF before COROUTINE_FOOTER
+                // Calculate the falloff index - it's the next available coroutine statement index
+                unsigned falloffIndex = coro.coroutineStatements.empty() ? 1 :
+                    std::max_element(coro.coroutineStatements.begin(), coro.coroutineStatements.end(),
+                        [](const CoroutineStatement& a, const CoroutineStatement& b) {
+                            return a.index < b.index;
+                        })->index + 1;
+
+                ScopeEndReplacement falloffReplacement;
+                falloffReplacement.replacement = "CO_RETURN_FALLOFF(" + std::to_string(falloffIndex) + ");\n";
+                falloffReplacement.priority = std::numeric_limits<int>::max() - 1; // Just before COROUTINE_FOOTER
+                body_rewriter.scopeEndReplacements[fileOffset].push_back(falloffReplacement);
+
+                REWRITE_LOG() << "  DEBUG: Added CO_RETURN_FALLOFF(" << falloffIndex << ") with priority "
+                        << falloffReplacement.priority << "\n";
+
                 // Choose the appropriate footer macro based on whether we have try-catch blocks
                 std::string footerMacro = coro.tryCatchBlocks.empty() ? "COROUTINE_FOOTER" : "COROUTINE_FOOTER_WITH_TRY";
 
@@ -3229,7 +3332,7 @@ public:
                     replacement.replacement = footerMacro + "()\n";
                 }
 
-                // Use maximum priority to ensure COROUTINE_FOOTER comes after all destructors
+                // Use maximum priority to ensure COROUTINE_FOOTER comes after all destructors and CO_RETURN_FALLOFF
                 replacement.priority = std::numeric_limits<int>::max();
 
                 body_rewriter.scopeEndReplacements[fileOffset].push_back(replacement);

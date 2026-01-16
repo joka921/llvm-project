@@ -132,4 +132,86 @@ cppcoro::generator<int> temporaries() {
   co_yield a;
   co_yield a + 2;
 }
+
+cppcoro::generator<int> testTryCatch() {
+  int x = 42;
+  try {
+    int y = x + 1;
+    co_yield y;
+    int z = y + 1;
+    co_yield z;
+  } catch (std::exception& e) {
+    std::cout << "Caught exception: " << e.what() << " x=" << x << std::endl;
+  } catch (...) {
+    std::cout << "Caught unknown exception, x=" << x << std::endl;
+  }
+  co_return;
+}
 */
+
+cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
+  // _coro_storage and CoroImpl assumed to be available in global namespace
+  struct _detail_coro_impl {
+    // Local variables (including ranged-for loop variables)
+    _coro_storage<int&, true> x;
+    _coro_storage<int&, true> y;
+    _coro_storage<int&, true> z;
+
+    // Exception handling infrastructure
+    std::vector<size_t> activeTryBlocks;
+
+    void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {
+      nextState = dispatchExceptionHandling(std::move(eptr));
+      resume();
+    }
+
+    size_t dispatchExceptionHandling(std::exception_ptr eptr) {
+      switch (activeTryBlocks.back()) {
+        case 0: return catchClauseImpl_0(std::move(eptr));
+        default: std::terminate();
+      }
+    }
+
+    // Exception handler member functions
+    size_t catchClauseImpl_0(std::exception_ptr eptr) {
+      auto nextState = activeTryBlocks.back();
+      activeTryBlocks.pop_back();
+      auto lambda = [&]() {
+        try {
+          std::rethrow_exception(eptr);
+        } catch (class std::exception &e) {
+          std::cout << "Caught exception: " << e.what() << " CO_GET(x)=" << CO_GET(x) << std::endl;
+        } catch (...) {
+          std::cout << "Caught unknown exception, CO_GET(x)=" << CO_GET(x) << std::endl;
+        }
+        return nextState;
+      };
+      if (activeTryBlocks.empty()) {
+        return lambda();
+      } else {
+        try {
+          return lambda();
+        } catch (...) {
+          return dispatchExceptionHandling(std::current_exception());
+        }
+      }
+    }
+  };
+
+  using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
+  COROUTINE_HEADER_WITH_TRY(_ActualCoroType, _detail_coro_impl) 
+  CO_PAREN_INIT_OWNING(x,  42);
+  TRY_BEGIN(18446744073709551615ULL);
+  {
+    CO_PAREN_INIT_OWNING(y,  CO_GET(x) + 1);
+    CO_YIELD(1,  CO_GET(y));
+    CO_PAREN_INIT_OWNING(z,  CO_GET(y) + 1);
+    CO_YIELD(2,  CO_GET(z));
+      this->state.z.destroy();
+    this->state.y.destroy();
+  }
+  TRY_END(18446744073709551615ULL);
+  this->state.x.destroy();
+COROUTINE_FOOTER_WITH_TRY()
+}
+

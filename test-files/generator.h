@@ -11,6 +11,7 @@
 #include <iterator>
 #include <type_traits>
 #include <utility>
+#include <limits>
 
 namespace cppcoro {
     struct SuspendAlways {
@@ -341,7 +342,6 @@ bool co_await_impl(auto &&awaiter, auto handle) {
 }
 
 #define CO_YIELD(index, value)                                   \
-  // TODO<joka921> Fix the dangling references in case we have an implicit conversion. \
   {                                                       \
     auto&& awaiter = promise().yield_value(value);        \
     this->curState = index;                                  \
@@ -351,6 +351,10 @@ bool co_await_impl(auto &&awaiter, auto handle) {
   }                                                       \
   [[fallthrough]];                                        \
   case index:
+
+#define TRY_BEGIN(index) this->state.activeTryBlocks.push_back(index); void()
+// TODO<joka921> Assert that this works in fact.
+#define TRY_END(index) this->state.activeTryBlocks.pop_back(); case index: void()
 
 namespace blubbi {
     template <typename T>
@@ -423,6 +427,19 @@ struct CoroImpl {
     void doStep() { \
 switch (this->curState) {      \
 case 0:
+
+#define COROUTINE_HEADER_WITH_TRY(returnType, StateType)                              \
+using PromiseType =                                                  \
+returnType::promise_type;       \
+struct GeneratorStateMachine                                         \
+: CoroImpl<GeneratorStateMachine, PromiseType \
+> {                      \
+StateType state; \
+void doStep() { \
+try { \
+switch (this->curState) {      \
+case 0:
+
 #define COROUTINE_FOOTER(...) \
   }                      \
   }                      \
@@ -430,6 +447,15 @@ case 0:
   ;                      \
   auto* frame = new GeneratorStateMachine{{}, {__VA_ARGS__}};  \
   return frame->pt.get_return_object();
+
+#define COROUTINE_FOOTER_WITH_TRY(...) \
+}                      \
+} catch(...) {this->state.handleException(std::current_exception(), this->curState, [this](){doStep();});} \
+}                      \
+}                      \
+;                      \
+auto* frame = new GeneratorStateMachine{{}, {__VA_ARGS__}};  \
+return frame->pt.get_return_object();
 
 #define FOR_LOOP_HEADER(N)
 

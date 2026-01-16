@@ -42,6 +42,7 @@ inline std::ostream& null_stream() {
 
 // Logging macro for fine-grained control
 #define REWRITE_LOG() null_stream()
+#define REWRITE_LOG() std::cout
 
 
 // Helper function to generate state get() call
@@ -101,10 +102,21 @@ struct FunctionParameter {
     QualType qualType;
 };
 
+struct TryCatchBlock {
+    const CXXTryStmt *tryStmt;
+    unsigned index;
+    SourceLocation tryKeywordLoc;
+    SourceLocation tryBlockStart;  // Opening brace of try block
+    SourceLocation tryBlockEnd;    // Closing brace of try block
+    std::vector<std::string> catchClauses;  // Transformed catch clause bodies
+    SourceLocation catchEnd;       // End of all catch clauses
+};
+
 struct CoroutineInfo {
     const FunctionDecl *function;
     std::set<LocalVariable> localVariables;
     std::vector<RangedForLoop> rangedForLoops; // Add ranged-for loop info
+    std::vector<TryCatchBlock> tryCatchBlocks; // Add try-catch block info
     std::vector<FunctionParameter> parameters; // Function parameters
     SourceLocation insertionPoint;
     bool hasError = false;
@@ -113,11 +125,11 @@ struct CoroutineInfo {
     bool isMemberFunction = false;
     bool isConstMemberFunction = false;
     std::string className;
-    
+
     // Lambda information
     bool isLambda = false;
     const LambdaExpr *lambdaExpr = nullptr;
-    
+
     // Temporary type information for yield buffer
     std::vector<QualType> yieldedOrAwaitedTemporaries;
 };
@@ -179,6 +191,8 @@ private:
     unsigned nextCoroStatementIndex;
     std::vector<RangedForLoop> rangedForLoops;
     unsigned nextRangedForIndex;
+    std::vector<TryCatchBlock> tryCatchBlocks;
+    unsigned nextTryCatchIndex;
 
     // Member function information
     bool isMemberFunction;
@@ -195,7 +209,7 @@ public:
 public:
     CoroutineBodyRewriter(const std::set<LocalVariable> &vars, Rewriter &rewr, const SourceManager &SM,
                           CoroutineInfo &coroInfo, ASTContext &astCtx, bool isMember = false, const CXXRecordDecl *classRecord = nullptr)
-        : localVariables(vars), rewriter(rewr), sourceManager(SM), coroutineInfo(coroInfo), astContext(&astCtx), nextCoroStatementIndex(1), nextRangedForIndex(0),
+        : localVariables(vars), rewriter(rewr), sourceManager(SM), coroutineInfo(coroInfo), astContext(&astCtx), nextCoroStatementIndex(1), nextRangedForIndex(0), nextTryCatchIndex(0),
           isMemberFunction(isMember), classDecl(classRecord) {
         // Create a set of variable names for quick lookup
         for (const auto &var: localVariables) {
@@ -486,6 +500,112 @@ public:
         REWRITE_LOG() << "    DEBUG: Added co_await with index " << coroStmt.index << "\n";
 
         return true;
+    }
+
+    // Handle try-catch blocks
+    bool VisitCXXTryStmt(CXXTryStmt *tryStmt) {
+        REWRITE_LOG() << "  Found try-catch block\n";
+
+        TryCatchBlock tryCatch;
+        tryCatch.tryStmt = tryStmt;
+        tryCatch.index = nextTryCatchIndex++;
+
+        // Get the try keyword location
+        tryCatch.tryKeywordLoc = tryStmt->getBeginLoc();
+
+        // Get the try block compound statement
+        const CompoundStmt *tryBlock = tryStmt->getTryBlock();
+        if (tryBlock) {
+            tryCatch.tryBlockStart = tryBlock->getLBracLoc();
+            tryCatch.tryBlockEnd = tryBlock->getRBracLoc();
+        }
+
+        // Process each catch clause
+        unsigned numHandlers = tryStmt->getNumHandlers();
+        REWRITE_LOG() << "    DEBUG: Found " << numHandlers << " catch clause(s)\n";
+
+        for (unsigned i = 0; i < numHandlers; ++i) {
+            const CXXCatchStmt *catchStmt = tryStmt->getHandler(i);
+
+            // Get the catch clause text
+            std::string catchClauseText = processCatchClause(catchStmt);
+            tryCatch.catchClauses.push_back(catchClauseText);
+
+            // Update the end location to include all catch clauses
+            if (i == numHandlers - 1) {
+                tryCatch.catchEnd = catchStmt->getEndLoc();
+            }
+        }
+
+        tryCatchBlocks.push_back(tryCatch);
+
+        REWRITE_LOG() << "    DEBUG: Added try-catch block with index " << tryCatch.index << "\n";
+
+        return true;
+    }
+
+    // Process a catch clause and transform variable references
+    std::string processCatchClause(const CXXCatchStmt *catchStmt) {
+        // Get the exception declaration (e.g., "MyException& e" or "...")
+        const VarDecl *exceptionDecl = catchStmt->getExceptionDecl();
+
+        std::string catchHeader;
+        if (exceptionDecl) {
+            // Named exception parameter
+            QualType exceptionType = exceptionDecl->getType();
+            std::string exceptionTypeName = typeAsString(exceptionType, *astContext);
+            std::string exceptionVarName = exceptionDecl->getNameAsString();
+            catchHeader = "catch (" + exceptionTypeName + " " + exceptionVarName + ")";
+        } else {
+            // Catch-all clause
+            catchHeader = "catch (...)";
+        }
+
+        // Get the catch block body
+        const Stmt *handlerBlock = catchStmt->getHandlerBlock();
+        if (!handlerBlock) {
+            return catchHeader + " {}";
+        }
+
+        // Get the source text of the handler block
+        SourceRange handlerRange = handlerBlock->getSourceRange();
+        CharSourceRange charRange = CharSourceRange::getTokenRange(handlerRange);
+        std::string handlerText = Lexer::getSourceText(charRange, sourceManager, LangOptions()).str();
+
+        // Transform variable references in the handler text
+        // We need to replace references to local variables with CO_GET calls
+        std::string transformedText = transformVariableReferencesInText(handlerText);
+
+        return catchHeader + " " + transformedText;
+    }
+
+    // Transform variable references in arbitrary text
+    std::string transformVariableReferencesInText(const std::string &text) {
+        std::string result = text;
+
+        // Replace each tracked local variable with CO_GET(varName)
+        for (const auto &varName: variableNames) {
+            std::string replacement = makeStateGetCall(varName);
+
+            size_t pos = 0;
+            while ((pos = result.find(varName, pos)) != std::string::npos) {
+                // Check if it's a word boundary
+                bool isWordStart = (pos == 0) || !std::isalnum(result[pos - 1]);
+                bool isWordEnd = (pos + varName.length() >= result.length()) ||
+                                 !std::isalnum(result[pos + varName.length()]);
+
+                if (isWordStart && isWordEnd) {
+                    REWRITE_LOG() << "        DEBUG: Replacing '" << varName << "' with '" << replacement <<
+                            "' in catch clause at position " << pos << "\n";
+                    result.replace(pos, varName.length(), replacement);
+                    pos += replacement.length();
+                } else {
+                    pos += varName.length();
+                }
+            }
+        }
+
+        return result;
     }
 
     // Handle ranged-for loops - using Traverse for proper pre/post hooks
@@ -1683,6 +1803,64 @@ private:
     }
 
 public:
+    void collectTryCatchReplacements() {
+        REWRITE_LOG() << "  DEBUG: Collecting try-catch replacements for " << tryCatchBlocks.size() << " blocks\n";
+
+        for (const auto &tryCatch: tryCatchBlocks) {
+            REWRITE_LOG() << "\n=== COLLECTING TRY-CATCH REPLACEMENTS ===\n";
+            REWRITE_LOG() << "    DEBUG: Processing try-catch block " << tryCatch.index << "\n";
+
+            // Part 1: Replace "try" keyword with "TRY_BEGIN(index)"
+            if (tryCatch.tryKeywordLoc.isValid()) {
+                SourceLocation tryEnd = Lexer::getLocForEndOfToken(
+                    tryCatch.tryKeywordLoc, 0, sourceManager, LangOptions());
+                SourceRange tryKeywordRange(tryCatch.tryKeywordLoc, tryEnd);
+
+                std::string tryBegin = "TRY_BEGIN(" + std::to_string(std::numeric_limits<size_t>::max() - tryCatch.index) + "ULL);";
+                int tryPriority = 20000 + static_cast<int>(tryCatch.index);
+                globalReplacements.emplace_back(tryKeywordRange, tryBegin, tryPriority, true);
+
+                REWRITE_LOG() << "        Added try keyword replacement with TRY_BEGIN(" << tryCatch.index << ") at "
+                        << tryKeywordRange.printToString(sourceManager) << " (priority " << tryPriority << ")\n";
+            }
+
+            // Part 2: Insert "TRY_END(index)" after the closing brace of try block
+            if (tryCatch.tryBlockEnd.isValid()) {
+                SourceLocation afterBrace = Lexer::getLocForEndOfToken(
+                    tryCatch.tryBlockEnd, 0, sourceManager, LangOptions());
+                SourceRange endRange(afterBrace, afterBrace);
+
+                std::string tryEnd = " TRY_END(" + std::to_string(std::numeric_limits<size_t>::max() - tryCatch.index) + "ULL);";
+                int endPriority = 30000 + static_cast<int>(tryCatch.index) + 1;
+                globalReplacements.emplace_back(endRange, tryEnd, endPriority, false);
+
+                REWRITE_LOG() << "        Added TRY_END(" << tryCatch.index << ") insertion at "
+                        << endRange.printToString(sourceManager) << " (priority " << endPriority << ")\n";
+            }
+
+            // Part 3: Delete all catch clauses (from after try block to end of catch clauses)
+            if (tryCatch.tryBlockEnd.isValid() && tryCatch.catchEnd.isValid()) {
+                SourceLocation catchStart = Lexer::getLocForEndOfToken(
+                    tryCatch.tryBlockEnd, 0, sourceManager, LangOptions());
+                SourceLocation catchEndAfter = Lexer::getLocForEndOfToken(
+                    tryCatch.catchEnd, 0, sourceManager, LangOptions());
+
+                SourceRange catchRange(catchStart, catchEndAfter);
+
+                // Replace all catch clauses with empty string
+                int deletePriority = 20000 + static_cast<int>(tryCatch.index) + 2;
+                globalReplacements.emplace_back(catchRange, "", deletePriority, true);
+
+                REWRITE_LOG() << "        Added catch clause deletion from "
+                        << catchRange.printToString(sourceManager) << " (priority " << deletePriority << ")\n";
+            }
+
+            REWRITE_LOG() << "=== END COLLECTING TRY-CATCH REPLACEMENTS ===\n\n";
+        }
+
+        REWRITE_LOG() << "  Collected " << tryCatchBlocks.size() << " try-catch replacements\n";
+    }
+
     void applyReplacements() {
         // Collect all insertion-style replacements into global vector
         collectCoroutineStatementReplacements();
@@ -1694,6 +1872,9 @@ public:
 
         // Apply ranged-for loop bulk replacements (this also collects footer insertions)
         collectRangedForLoopReplacements();
+
+        // Apply try-catch block replacements
+        collectTryCatchReplacements();
 
         // First process scope end replacements (destructors + closing braces)
         collectScopeEndReplacements();
@@ -1850,6 +2031,10 @@ public:
     */
     const std::vector<RangedForLoop> &getRangedForLoops() const {
         return rangedForLoops;
+    }
+
+    const std::vector<TryCatchBlock> &getTryCatchBlocks() const {
+        return tryCatchBlocks;
     }
 };
 
@@ -2228,6 +2413,60 @@ private:
             REWRITE_LOG() << "    Added yieldBuffer to struct with max size/alignment of " << coro.yieldedOrAwaitedTemporaries.size() << " types\n";
         }
 
+        // Add exception handling infrastructure
+        if (!coro.tryCatchBlocks.empty()) {
+            structCode += "\n    // Exception handling infrastructure\n";
+            structCode += "    std::vector<size_t> activeTryBlocks;\n";
+
+            // Add handleException function
+            structCode += "\n    void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {\n";
+            structCode += "      nextState = dispatchExceptionHandling(std::move(eptr));\n";
+            structCode += "      resume();\n";
+            structCode += "    }\n";
+
+            // Add dispatchExceptionHandling function
+            structCode += "\n    size_t dispatchExceptionHandling(std::exception_ptr eptr) {\n";
+            structCode += "      switch (activeTryBlocks.back()) {\n";
+            for (const auto &tryCatch : coro.tryCatchBlocks) {
+                structCode += "        case " + std::to_string(tryCatch.index) + ": return catchClauseImpl_" + std::to_string(tryCatch.index) + "(std::move(eptr));\n";
+            }
+            structCode += "        default: std::terminate();\n";
+            structCode += "      }\n";
+            structCode += "    }\n";
+
+            // Add catch clause implementation member functions
+            structCode += "\n    // Exception handler member functions\n";
+            for (const auto &tryCatch : coro.tryCatchBlocks) {
+                structCode += "    size_t catchClauseImpl_" + std::to_string(tryCatch.index) + "(std::exception_ptr eptr) {\n";
+                structCode += "      auto nextState = activeTryBlocks.back();\n";
+                structCode += "      activeTryBlocks.pop_back();\n";
+                structCode += "      auto lambda = [&]() {\n";
+                structCode += "        try {\n";
+                structCode += "          std::rethrow_exception(eptr);\n";
+                structCode += "        } ";
+
+                // Add all catch clauses
+                for (const auto &catchClause : tryCatch.catchClauses) {
+                    structCode += catchClause + " ";
+                }
+
+                structCode += "\n        return nextState;\n";
+                structCode += "      };\n";
+                structCode += "      if (activeTryBlocks.empty()) {\n";
+                structCode += "        return lambda();\n";
+                structCode += "      } else {\n";
+                structCode += "        try {\n";
+                structCode += "          return lambda();\n";
+                structCode += "        } catch (...) {\n";
+                structCode += "          return dispatchExceptionHandling(std::current_exception());\n";
+                structCode += "        }\n";
+                structCode += "      }\n";
+                structCode += "    }\n";
+
+                REWRITE_LOG() << "    Added catchClauseImpl_" << tryCatch.index << " to struct\n";
+            }
+        }
+
         structCode += "  };\n\n";
 
         // Add typedef to avoid comma issues in macro call
@@ -2235,7 +2474,11 @@ private:
 
         // Generate the COROUTINE_HEADER macro call
         // The coroutine body will follow immediately after this
-        structCode += "  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) ";
+        if (!coro.tryCatchBlocks.empty()) {
+            structCode += "  COROUTINE_HEADER_WITH_TRY(_ActualCoroType, _detail_coro_impl) ";
+        } else {
+            structCode += "  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) ";
+        }
 
         return structCode;
     }
@@ -2260,12 +2503,6 @@ public:
         }
 
         if (containsCoroutineKeywords(funcDecl->getBody())) {
-            // Check if the coroutine contains try-catch blocks - skip if it does
-            if (containsTryCatchBlocks(funcDecl->getBody())) {
-                REWRITE_LOG() << "Skipping coroutine " << funcDecl->getQualifiedNameAsString()
-                        << " because it contains try-catch blocks (not yet supported)\n";
-                return true; // Skip this coroutine
-            }
             CoroutineInfo coro;
             coro.function = funcDecl;
 
@@ -2344,12 +2581,6 @@ public:
                 }
 
                 REWRITE_LOG() << "Skipping lambda coroutine due to captures\n";
-                return true; // Skip this lambda coroutine
-            }
-
-            // Check if the lambda contains try-catch blocks - skip if it does
-            if (containsTryCatchBlocks(callOperator->getBody())) {
-                REWRITE_LOG() << "Skipping lambda coroutine because it contains try-catch blocks (not yet supported)\n";
                 return true; // Skip this lambda coroutine
             }
 
@@ -2561,6 +2792,11 @@ public:
             const auto &rangedForLoops = initialRewriter.getRangedForLoops();
             const_cast<CoroutineInfo &>(coro).rangedForLoops = rangedForLoops;
             REWRITE_LOG() << "  DEBUG: Found " << rangedForLoops.size() << " ranged-for loops\n";
+
+            // Get the try-catch blocks and add them to the coroutine info for struct generation
+            const auto &tryCatchBlocks = initialRewriter.getTryCatchBlocks();
+            const_cast<CoroutineInfo &>(coro).tryCatchBlocks = tryCatchBlocks;
+            REWRITE_LOG() << "  DEBUG: Found " << tryCatchBlocks.size() << " try-catch blocks\n";
 
             // Add ranged-for variables to the local variables set so they appear in the struct
             for (const auto &rangedFor: rangedForLoops) {
@@ -2808,10 +3044,13 @@ public:
                     }
                 }
 
+                // Choose the appropriate footer macro based on whether we have try-catch blocks
+                std::string footerMacro = coro.tryCatchBlocks.empty() ? "COROUTINE_FOOTER" : "COROUTINE_FOOTER_WITH_TRY";
+
                 if (!paramList.empty()) {
-                    replacement.replacement = "COROUTINE_FOOTER(" + paramList + ")\n";
+                    replacement.replacement = footerMacro + "(" + paramList + ")\n";
                 } else {
-                    replacement.replacement = "COROUTINE_FOOTER()\n";
+                    replacement.replacement = footerMacro + "()\n";
                 }
 
                 // Use maximum priority to ensure COROUTINE_FOOTER comes after all destructors
@@ -2819,11 +3058,11 @@ public:
 
                 body_rewriter.scopeEndReplacements[fileOffset].push_back(replacement);
 
-                REWRITE_LOG() << "  DEBUG: Added COROUTINE_FOOTER to scope end replacements with maximum priority ("
+                REWRITE_LOG() << "  DEBUG: Added " << footerMacro << " to scope end replacements with maximum priority ("
                         << replacement.priority << ") at file offset " << fileOffset << "\n";
-                REWRITE_LOG() << "  DEBUG: COROUTINE_FOOTER replacement text: '" << replacement.replacement << "'\n";
+                REWRITE_LOG() << "  DEBUG: " << footerMacro << " replacement text: '" << replacement.replacement << "'\n";
 
-                REWRITE_LOG() << "  DEBUG: Successfully added COROUTINE_FOOTER to scope end system\n";
+                REWRITE_LOG() << "  DEBUG: Successfully added " << footerMacro << " to scope end system\n";
             } else {
                 REWRITE_LOG() << "  ERROR: Invalid closing brace location for compound statement\n";
             }

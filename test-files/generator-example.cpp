@@ -2,8 +2,10 @@
 // Created by kalmbacj on 2025-09-09.
 //
 
+#include <algorithm>
 #include <iostream>
 #include <ostream>
+#include <ranges>
 
 #include "./generator.h"
 #include <vector>
@@ -172,69 +174,251 @@ cppcoro::generator<int> testSuspendedDestroy() {
   }
   co_return;
 }
+
+cppcoro::generator<int> yieldTemporaries() {
+
+co_yield (std::string{"hallo"} + std::string{"bye"}).size();
+}
 */
 
-
-cppcoro::generator<int, cppcoro::NoDetails, Handle> testSuspendedDestroy() {
+cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
   // _coro_storage and CoroImpl assumed to be available in global namespace
   struct _detail_coro_impl {
-    // Local variables (including ranged-for loop variables)
-    _coro_storage<int&, true> x;
-    _coro_storage<int&, true> y;
-    _coro_storage<int&, true> i;
-    _coro_storage<int&, true> z;
-    _coro_storage<int&, true> z2;
+    // No local variables found in this coroutine
+
+    // Subexpression temporaries
+    _coro_storage<class std::basic_string<char, struct std::char_traits<char>,
+                                          class std::allocator<char>> &,
+                  true>
+        temp_1_0;
+    _coro_storage<class std::basic_string<char, struct std::char_traits<char>,
+                                          class std::allocator<char>> &,
+                  true>
+        temp_1_1;
+    _coro_storage<class std::basic_string<char, struct std::char_traits<char>,
+                                          class std::allocator<char>> &,
+                  true>
+        temp_1_2;
+
+    // Buffer for yielded/awaited temporaries
+    alignas(std::ranges::max(std::array{
+        std::size_t{1}, alignof(unsigned long),
+        alignof(unsigned long)})) char yieldBuffer[std::ranges::max(std::array{
+        std::size_t{1}, sizeof(unsigned long), sizeof(unsigned long)})];
 
     // Destroy variables when coroutine is suspended at a specific state
     void destroySuspendedCoro(size_t curState) {
       switch (curState) {
-        case 5:
-          goto cleanup_1;
-        cleanup_4:
-        case 4:
-          state.z2.destroy();
-          goto cleanup_1;
-        cleanup_3:
-        case 3:
-          state.z.destroy();
-          state.i.destroy();
-        cleanup_2:
-        case 2:
-          state.y.destroy();
-        cleanup_1:
-        case 1:
-          state.x.destroy();
-          break;
-        case 0:  // initial state
-          break;
+      case 1:
+        temp_1_0.destroy();
+        temp_1_1.destroy();
+        temp_1_2.destroy();
+        break;
+      case 0: // initial state
+        break;
       }
     }
   };
 
   using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) 
-  CO_PAREN_INIT_OWNING(x,  42);
-  CO_YIELD(1,  CO_GET(x));
+  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+
+  CO_YIELD_BUFFERED(
+      1, CO_PAREN_INIT_OWNING(
+             temp_1_0, (CO_PAREN_INIT_OWNING(temp_1_1, std::string{"hallo"}) +
+                        CO_PAREN_INIT_OWNING(temp_1_2, std::string{"bye"})))
+             .size());
   {
-    CO_PAREN_INIT_OWNING(y,  CO_GET(x) + 1);
-    CO_YIELD(2,  CO_GET(y));
-    CO_PAREN_INIT_OWNING(i,  15);
-    while (CO_GET(i)) {
-      CO_PAREN_INIT_OWNING(z,  CO_GET(y) + 1);
-      CO_YIELD(3,  CO_GET(z));
-      --CO_GET(i);
-        this->state.z.destroy();
+    const auto &a = CO_GET(temp_1_0);
+    const auto &b = CO_GET(temp_1_1);
+    const auto &c = CO_GET(temp_1_2);
+    this->state.temp_1_2.destroy();
+    this->state.temp_1_1.destroy();
+    this->state.temp_1_0.destroy();
+  };
+  CO_RETURN_FALLOFF(2);
+  COROUTINE_FOOTER()
 }
-      this->state.i.destroy();
-    this->state.y.destroy();
+
+auto getSize(auto &&el) {
+  auto res = el.size();
+  std::cout << "size of el is " << res << std::endl;
+  return res;
 }
-  {
-  CO_PAREN_INIT_OWNING(z2, );
-  CO_YIELD(4,  CO_GET(x));
-      this->state.z2.destroy();
+
+cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries2() {
+
+  struct _detail_coro_impl {
+
+    _coro_storage<class std::basic_string<char, struct std::char_traits<char>,
+                                          class std::allocator<char>> &,
+                  true>
+        temp_1_0;
+    _coro_storage<class std::basic_string<char, struct std::char_traits<char>,
+                                          class std::allocator<char>> &,
+                  true>
+        temp_1_1;
+    _coro_storage<class std::basic_string<char, struct std::char_traits<char>,
+                                          class std::allocator<char>> &,
+                  true>
+        temp_1_2;
+
+    alignas(std::ranges::max(std::array{
+        std::size_t{1}, alignof(unsigned long),
+        alignof(unsigned long)})) char yieldBuffer[std::ranges::max(std::array{
+        std::size_t{1}, sizeof(unsigned long), sizeof(unsigned long)})];
+
+    void destroySuspendedCoro(size_t curState) {
+      switch (curState) {
+      case 1:
+        temp_1_0.destroy();
+        temp_1_1.destroy();
+        temp_1_2.destroy();
+        break;
+      case 0:
+        break;
+      }
+    }
+  };
+
+  using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
+  using PromiseType = _ActualCoroType::promise_type;
+  struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
+    _detail_coro_impl state;
+    void doStep() {
+      switch (this->curState) {
+      case 0:
+
+      {
+        using BufT1 = std::remove_reference_t<decltype([&]() -> decltype(auto) {
+          new (this->state.temp_1_0.buffer) decltype(this->state.temp_1_0)::
+              Storage(([&]() -> decltype(auto) {
+                new (this->state.temp_1_1
+                         .buffer) decltype(this->state
+                                               .temp_1_1)::Storage(std::string{
+                    "hallo"});
+                this->state.temp_1_1.constructed = true;
+                return std::move(this->state.temp_1_1.get().ref_);
+              }() + [&]() -> decltype(auto) {
+                new (this->state.temp_1_2
+                         .buffer) decltype(this->state
+                                               .temp_1_2)::Storage(std::string{
+                    "bye"});
+                this->state.temp_1_2.constructed = true;
+                return std::move(this->state.temp_1_2.get().ref_);
+              }()));
+          this->state.temp_1_0.constructed = true;
+          return std::move(this->state.temp_1_0.get().ref_);
+        }()
+                                                                    .size())>;
+        auto __yield_buffer_ptr_1 = new (
+            state.yieldBuffer) BufT1{[&]() -> decltype(auto) {
+          new (this->state.temp_1_0.buffer) decltype(this->state.temp_1_0)::
+              Storage(([&]() -> decltype(auto) {
+                new (this->state.temp_1_1
+                         .buffer) decltype(this->state
+                                               .temp_1_1)::Storage(std::string{
+                    "hallo"});
+                this->state.temp_1_1.constructed = true;
+                return std::move(this->state.temp_1_1.get().ref_);
+              }() + [&]() -> decltype(auto) {
+                new (this->state.temp_1_2
+                         .buffer) decltype(this->state
+                                               .temp_1_2)::Storage(std::string{
+                    "bye"});
+                this->state.temp_1_2.constructed = true;
+                return std::move(this->state.temp_1_2.get().ref_);
+              }()));
+          this->state.temp_1_0.constructed = true;
+          return std::move(this->state.temp_1_0.get().ref_);
+        }()
+                                                  .size()};
+        {
+          auto &&awaiter = promise().yield_value([&]() -> decltype(auto) {
+            new (this->state.temp_1_0.buffer) decltype(this->state.temp_1_0)::
+                Storage(([&]() -> decltype(auto) {
+                  new (
+                      this->state.temp_1_1
+                          .buffer) decltype(this->state
+                                                .temp_1_1)::Storage(std::string{
+                      "hallo"});
+                  this->state.temp_1_1.constructed = true;
+                  return std::move(this->state.temp_1_1.get().ref_);
+                }() + [&]() -> decltype(auto) {
+                  new (
+                      this->state.temp_1_2
+                          .buffer) decltype(this->state
+                                                .temp_1_2)::Storage(std::string{
+                      "bye"});
+                  this->state.temp_1_2.constructed = true;
+                  return std::move(this->state.temp_1_2.get().ref_);
+                }()));
+            this->state.temp_1_0.constructed = true;
+            return std::move(this->state.temp_1_0.get().ref_);
+          }()
+                                                              .size());
+          this->curState = 1;
+          if (!co_await_impl(awaiter, Hdl::from_promise(pt))) {
+            return;
+          }
+        }
+      }
+        [[fallthrough]];
+      case 1: {
+        using BufT1 = std::remove_reference_t<decltype([&]() -> decltype(auto) {
+          new (this->state.temp_1_0.buffer) decltype(this->state.temp_1_0)::
+              Storage(([&]() -> decltype(auto) {
+                new (this->state.temp_1_1
+                         .buffer) decltype(this->state
+                                               .temp_1_1)::Storage(std::string{
+                    "hallo"});
+                this->state.temp_1_1.constructed = true;
+                return std::move(this->state.temp_1_1.get().ref_);
+              }() + [&]() -> decltype(auto) {
+                new (this->state.temp_1_2
+                         .buffer) decltype(this->state
+                                               .temp_1_2)::Storage(std::string{
+                    "bye"});
+                this->state.temp_1_2.constructed = true;
+                return std::move(this->state.temp_1_2.get().ref_);
+              }()));
+          this->state.temp_1_0.constructed = true;
+          return std::move(this->state.temp_1_0.get().ref_);
+        }()
+                                                                    .size())>;
+        auto __yield_buffer_ptr_1 =
+            reinterpret_cast<BufT1 *>(state.yieldBuffer);
+        __yield_buffer_ptr_1->~BufT1();
+      }
+        void();
+
+        {
+          const auto &a = this->state.temp_1_0.get().ref_;
+          const auto &b = this->state.temp_1_1.get().ref_;
+          const auto &c = this->state.temp_1_2.get().ref_;
+          this->state.temp_1_2.destroy();
+          this->state.temp_1_1.destroy();
+          this->state.temp_1_0.destroy();
+        };
+        {
+          this->curState = 2;
+          promise().return_void();
+          this->state.destroySuspendedCoro(this->curState);
+          this->done_ = true;
+          if (!co_await_impl(promise().final_suspend(),
+                             Hdl::from_promise(pt))) {
+            return;
+          }
+        }
+        void();
+      }
+    }
+  };
+  auto *frame = new GeneratorStateMachine{{}, {}};
+  return frame->pt.get_return_object();
 }
-  CO_RETURN_VOID(5);
-    this->state.x.destroy();
-CO_RETURN_FALLOFF(6);
-COROUTINE_FOOTER()
+int main() {
+  for (auto &i : yieldTemporaries()) {
+    std::cout << i << std::endl;
+  }
 }

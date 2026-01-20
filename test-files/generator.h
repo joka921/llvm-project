@@ -352,6 +352,21 @@ bool co_await_impl(auto &&awaiter, auto handle) {
   [[fallthrough]];                                        \
   case index:
 
+// TODO<joka921> Handle the case of `final_suspend` not suspending. (we have some destruction to do).
+#define CO_RETURN_VOID(index) \
+  {                                                \
+   this->curState = index; \
+   promise().return_void(); \
+   this->state.destroySuspendedCoro(this->curState); \
+   this->done_ = true; \
+   if (!co_await_impl(promise().final_suspend(), Hdl::from_promise(pt))) { \
+     return; \
+   } \
+   } void()
+
+// TODO<joka921> handle the case of there being no `promise().return_void()`
+#define CO_RETURN_FALLOFF(index) CO_RETURN_VOID(index)
+
 #define TRY_BEGIN(index) this->state.activeTryBlocks.push_back(index); void()
 // TODO<joka921> Assert that this works in fact.
 #define TRY_END(index) this->state.activeTryBlocks.pop_back(); case index: void()
@@ -363,11 +378,24 @@ namespace blubbi {
 
 #define CO_YIELD_BUFFERED(index, value) \
     { \
-    using BufT ## index = blubbi::remove_cvref_t<decltype(value)>; \
-    auto __yield_buffer_ptr_ ## index = new(state.yieldBuffer) std::remove_reference_t<decltype(value)>{value}; \
-    CO_YIELD(index, static_cast<std::__add_rvalue_reference_t<decltype(value)>>(* __yield_buffer_ptr_ ## index)) \
-    __yield_buffer_ptr_ ##index -> ~ BufT ## index(); \
-} void()
+    using BufT ## index = std::remove_reference_t<decltype(value)>; \
+    auto __yield_buffer_ptr_ ## index = new(state.yieldBuffer) BufT ## index {value}; \
+    {                                                       \
+      auto&& awaiter = promise().yield_value(*__yield_buffer_ptr_ ## index);        \
+      this->curState = index;                                  \
+      if (!co_await_impl(awaiter, Hdl::from_promise(pt))) { \
+        return;                                             \
+      }                                                     \
+    }}                                                       \
+    [[fallthrough]];                                        \
+    case index: \
+    { \
+    using BufT ## index = std::remove_reference_t<decltype(value)>; \
+      auto __yield_buffer_ptr_ ## index = reinterpret_cast<BufT ## index *>(state.yieldBuffer); \
+      __yield_buffer_ptr_ ##index -> ~ BufT ## index(); \
+    } void()
+
+
 
 
 template<typename Derived, typename PromiseType>
@@ -382,6 +410,7 @@ struct CoroImpl {
     }
 
     size_t curState = 0;
+    bool done_ = false;
     using Hdl = Handle<PromiseType>;
 
     PromiseType &promise() { return pt; }
@@ -397,9 +426,8 @@ struct CoroImpl {
     // TODO<joka921> Allocator support.
     static void destroy(void *blubb) { delete (cast(blubb)); }
 
-    static bool done([[maybe_unused]] void *blubb) {
-        // TODO extend to more general things.
-        return false;
+    static bool done( void *blubb) {
+        return cast(blubb)->done_;
     }
 
     CoroImpl() {
@@ -501,10 +529,13 @@ struct _coro_storage {
     }
 };
 
+#define CO_GET(arg) this->state.arg.get().ref_
+
+// TODO<joka921> Update the other OWNING also to the new lambda syntax.
 #define CO_BRACED_INIT(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;  this->state.mem.constructed=true
 #define CO_BRACED_INIT_OWNING(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ __VA_ARGS__} ;  this->state.mem.constructed=true
 #define CO_PAREN_INIT(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;  this->state.mem.constructed=true
-#define CO_PAREN_INIT_OWNING(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage( __VA_ARGS__) ;  this->state.mem.constructed=true
+#define CO_PAREN_INIT_OWNING(mem, ...) [&]() -> decltype(auto) {new(this->state.mem.buffer) decltype(this->state.mem)::Storage( __VA_ARGS__) ;  this->state.mem.constructed=true; return std::move(CO_GET(mem));}()
 
 
 template<typename Ref, bool isOwning>
@@ -517,6 +548,5 @@ struct coro_for_loop_storage {
     _coro_storage<End &, true> end_;
 };
 
-#define CO_GET(arg) this->state.arg.get().ref_
 
 #endif

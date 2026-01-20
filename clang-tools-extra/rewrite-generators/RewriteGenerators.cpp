@@ -113,6 +113,15 @@ struct TryCatchBlock {
     std::vector<std::string> variablesInTryBlock;  // Variables declared inside this try block, in reverse order
 };
 
+struct TemporaryInfo {
+    const MaterializeTemporaryExpr *expr; // The MaterializeTemporaryExpr node
+    std::string tempVarName;             // e.g., temp_1_0
+    QualType type;                       // Type of the temporary
+    SourceLocation constructLoc;         // Where to insert the CO_INIT macro
+    std::string initArgs;                // Arguments for the initialization
+    bool isBracedInit;                   // true for CO_BRACED_INIT_OWNING, false for CO_PAREN_INIT_OWNING
+};
+
 struct CoroutineStatement {
     enum Type { YIELD, AWAIT, RETURN };
 
@@ -125,6 +134,7 @@ struct CoroutineStatement {
     SourceLocation operandEnd;
     bool needsBuffering = false; // True if operand is a temporary (not used for RETURN)
     std::vector<std::string> aliveVariables; // Variables alive at this suspension point, in reverse order of declaration
+    std::vector<TemporaryInfo> temporaries; // Subexpression temporaries that need lifetime extension
 };
 
 
@@ -175,6 +185,21 @@ struct ScopeEndReplacement {
 
 // The bool means `true` for replace, `false` for insert after the beginning.
 using Replacement = std::tuple<SourceRange, std::string, bool>;
+
+// Helper visitor to collect MaterializeTemporaryExpr nodes from an expression
+class TemporaryCollector : public RecursiveASTVisitor<TemporaryCollector> {
+private:
+    std::vector<const MaterializeTemporaryExpr*> &temporaries;
+
+public:
+    explicit TemporaryCollector(std::vector<const MaterializeTemporaryExpr*> &temps)
+        : temporaries(temps) {}
+
+    bool VisitMaterializeTemporaryExpr(MaterializeTemporaryExpr *matTemp) {
+        temporaries.push_back(matTemp);
+        return true;
+    }
+};
 
 class CoroutineBodyRewriter : public RecursiveASTVisitor<CoroutineBodyRewriter> {
 private:
@@ -435,19 +460,19 @@ public:
         if (coroStmt.operand) {
             coroStmt.operandStart = coroStmt.operand->getBeginLoc();
             coroStmt.operandEnd = coroStmt.operand->getEndLoc();
-            
+
             // Check if the operand expression is a temporary (prvalue)
             // The operand is what comes after co_yield (e.g., the "3" in "co_yield 3")
             if (isPrValue(coroStmt.operand)) {
                 std::string operandText = getSourceText(coroStmt.operand, sourceManager);
                 std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
-                REWRITE_LOG() << "    DEBUG: co_yield operand '" << operandText 
+                REWRITE_LOG() << "    DEBUG: co_yield operand '" << operandText
                               << "' (type: " << operandTypeStr << ") is a temporary, will use CO_YIELD_BUFFERED\n";
-                
+
                 // Store the type of the operand expression for buffer sizing
                 QualType operandType = coroStmt.operand->getType();
                 coroutineInfo.yieldedOrAwaitedTemporaries.push_back(operandType);
-                
+
                 // Mark this statement as needing buffered macro
                 coroStmt.needsBuffering = true;
             } else {
@@ -467,6 +492,17 @@ public:
             for (auto varIt = scope.variablesInScope.rbegin(); varIt != scope.variablesInScope.rend(); ++varIt) {
                 coroStmt.aliveVariables.push_back(*varIt);
                 REWRITE_LOG() << "      DEBUG: Variable '" << *varIt << "' is alive at suspension point " << coroStmt.index << "\n";
+            }
+        }
+
+        // Collect subexpression temporaries
+        if (coroStmt.operand) {
+            collectTemporariesFromExpression(coroStmt.operand, coroStmt);
+
+            // Add temporary variable names to alive variables
+            for (const auto &temp : coroStmt.temporaries) {
+                coroStmt.aliveVariables.push_back(temp.tempVarName);
+                REWRITE_LOG() << "      DEBUG: Temporary '" << temp.tempVarName << "' is alive at suspension point " << coroStmt.index << "\n";
             }
         }
 
@@ -494,19 +530,19 @@ public:
         if (coroStmt.operand) {
             coroStmt.operandStart = coroStmt.operand->getBeginLoc();
             coroStmt.operandEnd = coroStmt.operand->getEndLoc();
-            
+
             // Check if the operand expression is a temporary (prvalue)
             // The operand is what comes after co_await (e.g., the "someFunc()" in "co_await someFunc()")
             if (isPrValue(coroStmt.operand)) {
                 std::string operandText = getSourceText(coroStmt.operand, sourceManager);
                 std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
-                REWRITE_LOG() << "    DEBUG: co_await operand '" << operandText 
+                REWRITE_LOG() << "    DEBUG: co_await operand '" << operandText
                               << "' (type: " << operandTypeStr << ") is a temporary, will use CO_AWAIT_BUFFERED\n";
-                
+
                 // Store the type of the operand expression for buffer sizing
                 QualType operandType = coroStmt.operand->getType();
                 coroutineInfo.yieldedOrAwaitedTemporaries.push_back(operandType);
-                
+
                 // Mark this statement as needing buffered macro
                 coroStmt.needsBuffering = true;
             } else {
@@ -526,6 +562,17 @@ public:
             for (auto varIt = scope.variablesInScope.rbegin(); varIt != scope.variablesInScope.rend(); ++varIt) {
                 coroStmt.aliveVariables.push_back(*varIt);
                 REWRITE_LOG() << "      DEBUG: Variable '" << *varIt << "' is alive at suspension point " << coroStmt.index << "\n";
+            }
+        }
+
+        // Collect subexpression temporaries
+        if (coroStmt.operand) {
+            collectTemporariesFromExpression(coroStmt.operand, coroStmt);
+
+            // Add temporary variable names to alive variables
+            for (const auto &temp : coroStmt.temporaries) {
+                coroStmt.aliveVariables.push_back(temp.tempVarName);
+                REWRITE_LOG() << "      DEBUG: Temporary '" << temp.tempVarName << "' is alive at suspension point " << coroStmt.index << "\n";
             }
         }
 
@@ -1321,6 +1368,51 @@ private:
         }
     }
 
+    // Collect all MaterializeTemporaryExpr nodes from an expression and create TemporaryInfo
+    void collectTemporariesFromExpression(const Expr *expr, CoroutineStatement &coroStmt) {
+        if (!expr) return;
+
+        std::vector<const MaterializeTemporaryExpr*> matTemps;
+        TemporaryCollector collector(matTemps);
+        collector.TraverseStmt(const_cast<Expr*>(expr));
+
+        REWRITE_LOG() << "      DEBUG: Found " << matTemps.size() << " temporaries in expression\n";
+
+        unsigned tempIndex = 0;
+        for (const auto *matTemp : matTemps) {
+            TemporaryInfo tempInfo;
+            tempInfo.expr = matTemp;
+            tempInfo.tempVarName = "temp_" + std::to_string(coroStmt.index) + "_" + std::to_string(tempIndex++);
+
+            // Get the subexpression being materialized
+            const Expr *subExpr = matTemp->getSubExpr();
+            tempInfo.type = matTemp->getType();
+            tempInfo.constructLoc = matTemp->getBeginLoc();
+
+            // Determine initialization style and extract arguments
+            // Check if it's a braced-init-list or constructor call
+            if (auto *initListExpr = dyn_cast<InitListExpr>(subExpr)) {
+                tempInfo.isBracedInit = true;
+                tempInfo.initArgs = handleInitListArgs(initListExpr);
+                REWRITE_LOG() << "        DEBUG: Temporary " << tempInfo.tempVarName
+                             << " uses braced init: {" << tempInfo.initArgs << "}\n";
+            } else if (auto *constructExpr = dyn_cast<CXXConstructExpr>(subExpr)) {
+                tempInfo.isBracedInit = false;
+                tempInfo.initArgs = handleConstructorArgs(constructExpr);
+                REWRITE_LOG() << "        DEBUG: Temporary " << tempInfo.tempVarName
+                             << " uses paren init: (" << tempInfo.initArgs << ")\n";
+            } else {
+                // Fallback: use the entire subexpression as init arg
+                tempInfo.isBracedInit = false;
+                tempInfo.initArgs = rewriteExpressionExceptVar(subExpr, "");
+                REWRITE_LOG() << "        DEBUG: Temporary " << tempInfo.tempVarName
+                             << " uses expression init: " << tempInfo.initArgs << "\n";
+            }
+
+            coroStmt.temporaries.push_back(tempInfo);
+        }
+    }
+
     std::string rewriteVariableReferencesInText(const std::string &text, const std::string &excludeVar) {
         REWRITE_LOG() << "        DEBUG: rewriteVariableReferencesInText input: '" << text << "'\n";
         REWRITE_LOG() << "        DEBUG: Excluding variable: '" << excludeVar << "'\n";
@@ -1514,67 +1606,145 @@ private:
         return false;
     }
 
+    // Helper function to collect replacements for co_yield or co_await (they work identically)
+    void collectYieldOrAwaitReplacement(const CoroutineStatement &coroStmt, const std::string &macroBaseName) {
+        std::string macroName = coroStmt.needsBuffering ? macroBaseName + "_BUFFERED" : macroBaseName;
+        REWRITE_LOG() << "    DEBUG: Collecting " << macroBaseName << " replacement for " << macroName << "(" << coroStmt.index <<
+                ", ...)\n";
+
+        // Replace keyword with appropriate macro (without closing paren)
+        std::string macroStart = macroName + "(" + std::to_string(coroStmt.index) + ", ";
+
+        // Priority based on index for consistent ordering
+        int priority = static_cast<int>(coroStmt.index);
+
+        // Replace just the keyword
+        SourceLocation keywordEnd = Lexer::getLocForEndOfToken(
+            coroStmt.keywordLoc, 0, sourceManager, LangOptions());
+        SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
+        globalReplacements.emplace_back(keywordRange, macroStart, priority, true);
+
+        // Process subexpression temporaries - use incremental replacements for recursive processing
+        // Process in reverse order (innermost first) by assigning lower priorities to later temps
+        for (size_t tempIdx = 0; tempIdx < coroStmt.temporaries.size(); ++tempIdx) {
+            const auto &temp = coroStmt.temporaries[tempIdx];
+            REWRITE_LOG() << "      DEBUG: Processing temporary '" << temp.tempVarName << "' (index " << tempIdx << ")\n";
+
+            std::string initMacroName = temp.isBracedInit ? "CO_BRACED_INIT_OWNING" : "CO_PAREN_INIT_OWNING";
+            std::string macroOpening = initMacroName + "(" + temp.tempVarName + ", ";
+
+            // Each temporary gets its own priority range to avoid conflicts
+            // Innermost temps (later in the vector) get lower priorities so they're processed first
+            int tempPriorityBase = priority + 100 + (int)(coroStmt.temporaries.size() - tempIdx - 1) * 10;
+
+            // Get the subexpression from the MaterializeTemporaryExpr
+            const Expr *tempSubExpr = temp.expr->getSubExpr();
+
+            if (temp.isBracedInit) {
+                // For braced initialization, find the InitListExpr and its braces
+                const InitListExpr *initList = nullptr;
+
+                // The subExpr might be a CXXConstructExpr wrapping an InitListExpr
+                if (auto *constructExpr = dyn_cast<CXXConstructExpr>(tempSubExpr)) {
+                    for (unsigned i = 0; i < constructExpr->getNumArgs(); ++i) {
+                        if (auto *ilist = dyn_cast<InitListExpr>(constructExpr->getArg(i)->IgnoreImplicit())) {
+                            initList = ilist;
+                            break;
+                        }
+                    }
+                } else if (auto *ilist = dyn_cast<InitListExpr>(tempSubExpr)) {
+                    initList = ilist;
+                }
+
+                if (initList && initList->getLBraceLoc().isValid() && initList->getRBraceLoc().isValid()) {
+                    // Insert macro opening before the entire temporary expression
+                    SourceLocation tempStart = tempSubExpr->getBeginLoc();
+                    SourceRange macroStartRange(tempStart, tempStart);
+                    globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
+
+                    // Delete the opening brace
+                    SourceLocation lbrace = initList->getLBraceLoc();
+                    SourceLocation afterLBrace = lbrace.getLocWithOffset(1);
+                    SourceRange lbraceRange(lbrace, afterLBrace);
+                    globalReplacements.emplace_back(lbraceRange, "", tempPriorityBase + 1, true);
+
+                    // Delete the closing brace and insert closing paren
+                    SourceLocation rbrace = initList->getRBraceLoc();
+                    SourceLocation afterRBrace = rbrace.getLocWithOffset(1);
+                    SourceRange rbraceRange(rbrace, afterRBrace);
+                    globalReplacements.emplace_back(rbraceRange, ")", tempPriorityBase + 2, true);
+
+                    REWRITE_LOG() << "        DEBUG: Will use incremental replacements for braced init temp (priority " << tempPriorityBase << ")\n";
+                } else {
+                    // Fallback: wrap the entire expression
+                    SourceLocation tempStart = tempSubExpr->getBeginLoc();
+                    SourceLocation tempEnd = Lexer::getLocForEndOfToken(
+                        tempSubExpr->getEndLoc(), 0, sourceManager, LangOptions());
+
+                    SourceRange macroStartRange(tempStart, tempStart);
+                    globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
+
+                    SourceRange macroEndRange(tempEnd, tempEnd);
+                    globalReplacements.emplace_back(macroEndRange, ")", tempPriorityBase + 2, false);
+
+                    REWRITE_LOG() << "        DEBUG: Will wrap braced init temp (fallback, priority " << tempPriorityBase << ")\n";
+                }
+            } else {
+                // For paren initialization or general expressions, just wrap without stripping
+                SourceLocation tempStart = tempSubExpr->getBeginLoc();
+                SourceLocation tempEnd = Lexer::getLocForEndOfToken(
+                    tempSubExpr->getEndLoc(), 0, sourceManager, LangOptions());
+
+                SourceRange macroStartRange(tempStart, tempStart);
+                globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
+
+                SourceRange macroEndRange(tempEnd, tempEnd);
+                globalReplacements.emplace_back(macroEndRange, ")", tempPriorityBase + 2, false);
+
+                REWRITE_LOG() << "        DEBUG: Will wrap paren/general expression temp (priority " << tempPriorityBase << ")\n";
+            }
+        }
+
+        // Insert closing parenthesis after the operand (if there is one)
+        SourceLocation insertionPoint;
+        if (coroStmt.operand) {
+            SourceLocation operandEnd = Lexer::getLocForEndOfToken(
+                coroStmt.operandEnd, 0, sourceManager, LangOptions());
+            SourceRange parenRange(operandEnd, operandEnd);
+            globalReplacements.emplace_back(parenRange, ")", priority + 1000, false); // Later priority
+            insertionPoint = operandEnd;
+        } else {
+            // No operand case - just insert closing paren right after the macro start
+            SourceRange parenRange(keywordEnd, keywordEnd);
+            globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
+            insertionPoint = keywordEnd;
+        }
+
+        // Add destruction calls for temporaries in reverse order after the yield/await
+        if (!coroStmt.temporaries.empty()) {
+            REWRITE_LOG() << "      DEBUG: Adding destruction calls for " << coroStmt.temporaries.size() << " temporaries\n";
+
+            std::string destructorCalls = "\n";
+            // Destroy in reverse order (last created first destroyed)
+            for (auto it = coroStmt.temporaries.rbegin(); it != coroStmt.temporaries.rend(); ++it) {
+                destructorCalls += "        this->state." + it->tempVarName + ".destroy();\n";
+            }
+
+            // Insert after the yield/await statement
+            SourceRange destructorRange(insertionPoint, insertionPoint);
+            globalReplacements.emplace_back(destructorRange, destructorCalls, priority + 2000, false);
+        }
+    }
+
     void collectCoroutineStatementReplacements() {
         REWRITE_LOG() << "  DEBUG: Collecting coroutine statement replacements for " << coroutineStatements.size() <<
                 " statements\n";
 
         for (const auto &coroStmt: coroutineStatements) {
             if (coroStmt.type == CoroutineStatement::YIELD) {
-                std::string macroName = coroStmt.needsBuffering ? "CO_YIELD_BUFFERED" : "CO_YIELD";
-                REWRITE_LOG() << "    DEBUG: Collecting co_yield replacement for " << macroName << "(" << coroStmt.index <<
-                        ", ...)\n";
-
-                // Replace "co_yield" keyword with appropriate macro (without closing paren)
-                std::string macroStart = macroName + "(" + std::to_string(coroStmt.index) + ", ";
-
-                // Priority based on index for consistent ordering
-                int priority = static_cast<int>(coroStmt.index);
-
-                // Replace just the keyword
-                SourceLocation keywordEnd = Lexer::getLocForEndOfToken(
-                    coroStmt.keywordLoc, 0, sourceManager, LangOptions());
-                SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
-                globalReplacements.emplace_back(keywordRange, macroStart, priority, true);
-
-                // Insert closing parenthesis after the operand (if there is one)
-                if (coroStmt.operand) {
-                    SourceLocation operandEnd = Lexer::getLocForEndOfToken(
-                        coroStmt.operandEnd, 0, sourceManager, LangOptions());
-                    SourceRange parenRange(operandEnd, operandEnd);
-                    globalReplacements.emplace_back(parenRange, ")", priority + 1000, false); // Later priority
-                } else {
-                    // No operand case - just insert closing paren right after the macro start
-                    SourceRange parenRange(keywordEnd, keywordEnd);
-                    globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
-                }
+                collectYieldOrAwaitReplacement(coroStmt, "CO_YIELD");
             } else if (coroStmt.type == CoroutineStatement::AWAIT) {
-                std::string macroName = coroStmt.needsBuffering ? "CO_AWAIT_BUFFERED" : "CO_AWAIT";
-                REWRITE_LOG() << "    DEBUG: Collecting co_await replacement for " << macroName << "(" << coroStmt.index <<
-                        ", ...)\n";
-
-                // Replace "co_await" keyword with appropriate macro (without closing paren)
-                std::string macroStart = macroName + "(" + std::to_string(coroStmt.index) + ", ";
-
-                // Priority based on index for consistent ordering
-                int priority = static_cast<int>(coroStmt.index);
-
-                // Replace just the keyword
-                SourceLocation keywordEnd = Lexer::getLocForEndOfToken(
-                    coroStmt.keywordLoc, 0, sourceManager, LangOptions());
-                SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
-                globalReplacements.emplace_back(keywordRange, macroStart, priority, true);
-
-                // Insert closing parenthesis after the operand (if there is one)
-                if (coroStmt.operand) {
-                    SourceLocation operandEnd = Lexer::getLocForEndOfToken(
-                        coroStmt.operandEnd, 0, sourceManager, LangOptions());
-                    SourceRange parenRange(operandEnd, operandEnd);
-                    globalReplacements.emplace_back(parenRange, ")", priority + 1000, false); // Later priority
-                } else {
-                    // No operand case - just insert closing paren right after the macro start
-                    SourceRange parenRange(keywordEnd, keywordEnd);
-                    globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
-                }
+                collectYieldOrAwaitReplacement(coroStmt, "CO_AWAIT");
             } else if (coroStmt.type == CoroutineStatement::RETURN) {
                 REWRITE_LOG() << "    DEBUG: Collecting co_return replacement for index " << coroStmt.index << "\n";
 
@@ -2507,6 +2677,38 @@ private:
             }
         }
 
+        // Add storage for subexpression temporaries
+        // Collect all unique temporaries from all coroutine statements
+        std::set<std::string> addedTemporaries; // Track which temporaries we've already added
+        bool hasTemporaries = false;
+        for (const auto &coroStmt : coro.coroutineStatements) {
+            if (!coroStmt.temporaries.empty()) {
+                hasTemporaries = true;
+                break;
+            }
+        }
+
+        if (hasTemporaries) {
+            structCode += "\n    // Subexpression temporaries\n";
+            for (const auto &coroStmt : coro.coroutineStatements) {
+                for (const auto &temp : coroStmt.temporaries) {
+                    // Only add each temporary once
+                    if (addedTemporaries.find(temp.tempVarName) == addedTemporaries.end()) {
+                        addedTemporaries.insert(temp.tempVarName);
+
+                        // Get the canonical type string for the temporary
+                        std::string typeStr = typeAsString(temp.type, *astContext);
+
+                        // All subexpression temporaries are owning (they store the actual object)
+                        // and we access them by reference
+                        structCode += "    _coro_storage<" + typeStr + "&, true> " + temp.tempVarName + ";\n";
+
+                        REWRITE_LOG() << "    Added temporary to struct: _coro_storage<" << typeStr << "&, true> " << temp.tempVarName << "\n";
+                    }
+                }
+            }
+        }
+
         // Add yield buffer for temporaries if needed
         if (!coro.yieldedOrAwaitedTemporaries.empty()) {
             structCode += "\n    // Buffer for yielded/awaited temporaries\n";
@@ -2528,7 +2730,7 @@ private:
             }
             
             // Generate buffer with max size/alignment using template metaprogramming
-            structCode += "    alignas(ql::ranges::max({1, ";
+            structCode += "    alignas(std::ranges::max(std::array{std::size_t{1}, ";
             bool first = true;
             for (const auto &tempType : coro.yieldedOrAwaitedTemporaries) {
                 if (!first) structCode += ", ";
@@ -2538,7 +2740,7 @@ private:
             }
             structCode += "})) ";
 
-            structCode += "char yieldBuffer[ql::ranges::max({1, ";
+            structCode += "char yieldBuffer[std::ranges::max(std::array{std::size_t{1}, ";
             first = true;
             for (const auto &tempType : coro.yieldedOrAwaitedTemporaries) {
                 if (!first) structCode += ", ";
@@ -2666,7 +2868,7 @@ private:
 
                 // Destroy only the new variables
                 for (const auto &varName : varsToDestroy) {
-                    structCode += "          state." + varName + ".destroy();\n";
+                    structCode += "          " + varName + ".destroy();\n";
                 }
 
                 // Find the target state to continue with:

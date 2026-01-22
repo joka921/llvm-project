@@ -133,6 +133,7 @@ struct CoroutineStatement {
     SourceLocation operandStart;
     SourceLocation operandEnd;
     bool needsBuffering = false; // True if operand is a temporary (not used for RETURN)
+    QualType bufferType; // Type for the buffer when needsBuffering is true
     std::vector<std::string> aliveVariables; // Variables alive at this suspension point, in reverse order of declaration
     std::vector<TemporaryInfo> temporaries; // Subexpression temporaries that need lifetime extension
 };
@@ -159,6 +160,9 @@ struct CoroutineInfo {
 
     // Temporary type information for yield buffer
     std::vector<QualType> yieldedOrAwaitedTemporaries;
+
+    // Mapping from variable declaration location to member name (for handling shadowing)
+    std::map<SourceLocation, std::string> declLocationToMemberName;
 };
 
 
@@ -201,6 +205,30 @@ public:
     }
 };
 
+// Helper visitor to collect variable references with their declaration locations
+class VariableReferenceCollector : public RecursiveASTVisitor<VariableReferenceCollector> {
+private:
+    std::vector<std::pair<SourceRange, SourceLocation>> &references; // (reference location, decl location)
+    const std::set<std::string> &variableNames;
+
+public:
+    VariableReferenceCollector(std::vector<std::pair<SourceRange, SourceLocation>> &refs,
+                               const std::set<std::string> &varNames)
+        : references(refs), variableNames(varNames) {}
+
+    bool VisitDeclRefExpr(DeclRefExpr *declRef) {
+        if (auto *varDecl = dyn_cast<VarDecl>(declRef->getDecl())) {
+            std::string varName = varDecl->getNameAsString();
+            if (variableNames.count(varName)) {
+                SourceRange refRange = declRef->getSourceRange();
+                SourceLocation declLoc = varDecl->getLocation();
+                references.push_back({refRange, declLoc});
+            }
+        }
+        return true;
+    }
+};
+
 class CoroutineBodyRewriter : public RecursiveASTVisitor<CoroutineBodyRewriter> {
 private:
     const std::set<LocalVariable> &localVariables;
@@ -228,6 +256,9 @@ private:
     bool isMemberFunction;
     [[maybe_unused]] const CXXRecordDecl *classDecl;
 
+    // Map from variable declaration location to member name (for handling shadowing)
+    std::map<SourceLocation, std::string> declLocationToMemberName;
+
     // Map from closing brace position to all replacements that should happen at that position
 
     // Global replacement vector for ALL types of replacements (SourceRange, replacement_string, priority)
@@ -244,6 +275,37 @@ public:
         // Create a set of variable names for quick lookup
         for (const auto &var: localVariables) {
             variableNames.insert(var.name);
+        }
+
+        // Build the mapping from declaration location to member name BEFORE AST traversal
+        buildDeclLocationMapping();
+    }
+
+    // Build the mapping from variable declaration locations to member names
+    // This handles shadowing by renaming variables with the same name in different scopes
+    void buildDeclLocationMapping() {
+        std::set<SourceLocation> addedDeclLocations; // Track which declarations we've already processed
+        std::map<std::string, int> variableNameCounts; // Track count of each variable name for shadowing
+
+        for (const auto &var : localVariables) {
+            // Skip if we've already processed this exact variable declaration
+            if (addedDeclLocations.count(var.location) > 0) {
+                continue;
+            }
+            addedDeclLocations.insert(var.location);
+
+            // Determine the member name (with suffix for shadowed variables)
+            std::string memberName = var.name;
+            int count = variableNameCounts[var.name]++;
+            if (count > 0) {
+                memberName = var.name + "_shadow_" + std::to_string(count);
+            }
+
+            // Store mapping in both places:
+            // 1. Local member for use during AST traversal
+            declLocationToMemberName[var.location] = memberName;
+            // 2. CoroutineInfo for sharing with other classes (like CoroutineRewriter)
+            coroutineInfo.declLocationToMemberName[var.location] = memberName;
         }
     }
 
@@ -473,8 +535,9 @@ public:
                 QualType operandType = coroStmt.operand->getType();
                 coroutineInfo.yieldedOrAwaitedTemporaries.push_back(operandType);
 
-                // Mark this statement as needing buffered macro
+                // Mark this statement as needing buffered macro and store the buffer type
                 coroStmt.needsBuffering = true;
+                coroStmt.bufferType = operandType;
             } else {
                 std::string operandText = getSourceText(coroStmt.operand, sourceManager);
                 std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
@@ -543,8 +606,9 @@ public:
                 QualType operandType = coroStmt.operand->getType();
                 coroutineInfo.yieldedOrAwaitedTemporaries.push_back(operandType);
 
-                // Mark this statement as needing buffered macro
+                // Mark this statement as needing buffered macro and store the buffer type
                 coroStmt.needsBuffering = true;
+                coroStmt.bufferType = operandType;
             } else {
                 std::string operandText = getSourceText(coroStmt.operand, sourceManager);
                 std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
@@ -704,9 +768,40 @@ public:
         CharSourceRange charRange = CharSourceRange::getTokenRange(handlerRange);
         std::string handlerText = Lexer::getSourceText(charRange, sourceManager, LangOptions()).str();
 
-        // Transform variable references in the handler text
-        // We need to replace references to local variables with CO_GET calls
-        std::string transformedText = transformVariableReferencesInText(handlerText);
+        // Collect all variable references with their declaration locations using AST
+        std::vector<std::pair<SourceRange, SourceLocation>> references;
+        VariableReferenceCollector collector(references, variableNames);
+        collector.TraverseStmt(const_cast<Stmt*>(handlerBlock));
+
+        // Sort references by position (reverse order so we can replace from end to start)
+        std::sort(references.begin(), references.end(),
+                  [&](const auto &a, const auto &b) {
+                      return sourceManager.getFileOffset(a.first.getBegin()) >
+                             sourceManager.getFileOffset(b.first.getBegin());
+                  });
+
+        // Replace each reference with CO_GET call using the correct member name
+        std::string transformedText = handlerText;
+        SourceLocation blockStart = handlerBlock->getBeginLoc();
+        unsigned blockStartOffset = sourceManager.getFileOffset(blockStart);
+
+        for (const auto &[refRange, declLoc] : references) {
+            // Get the member name from the mapping
+            auto it = declLocationToMemberName.find(declLoc);
+            if (it == declLocationToMemberName.end()) {
+                continue; // Skip if not in mapping
+            }
+            std::string memberName = it->second;
+            std::string replacement = makeStateGetCall(memberName);
+
+            // Calculate positions relative to the block start
+            unsigned refStartOffset = sourceManager.getFileOffset(refRange.getBegin());
+            unsigned refEndOffset = sourceManager.getFileOffset(refRange.getEnd()) + 1;
+            unsigned relativeStart = refStartOffset - blockStartOffset;
+            unsigned relativeEnd = refEndOffset - blockStartOffset;
+
+            transformedText.replace(relativeStart, relativeEnd - relativeStart, replacement);
+        }
 
         return catchHeader + " " + transformedText;
     }
@@ -840,9 +935,24 @@ public:
             if (variableNames.count(varName)) {
                 // Check if this reference is part of a declaration we're already handling
                 if (!isPartOfDeclaration(declRef)) {
-                    REWRITE_LOG() << "  Found variable reference: " << varName << "\n";
+                    // Get the declaration location to find the actual member name
+                    SourceLocation declLoc = varDecl->getLocation();
+                    auto it = declLocationToMemberName.find(declLoc);
 
-                    std::string getCall = makeStateGetCall(varName);
+                    std::string memberName;
+                    if (it != declLocationToMemberName.end()) {
+                        // Use the mapped member name (which may be renamed for shadowing)
+                        memberName = it->second;
+                        REWRITE_LOG() << "  Found variable reference: " << varName
+                                     << " (member: " << memberName << ")\n";
+                    } else {
+                        // Fallback: use original name (shouldn't happen after struct generation)
+                        memberName = varName;
+                        REWRITE_LOG() << "  Found variable reference: " << varName
+                                     << " (no mapping found, using original name)\n";
+                    }
+
+                    std::string getCall = makeStateGetCall(memberName);
                     SourceRange refRange = declRef->getSourceRange();
                     refReplacements.emplace_back(refRange, getCall, true);
                 }
@@ -1376,10 +1486,22 @@ private:
         TemporaryCollector collector(matTemps);
         collector.TraverseStmt(const_cast<Expr*>(expr));
 
+        // Get the operand's begin location to filter out top-level temporaries
+        SourceLocation operandBegin = expr->getBeginLoc();
+
         REWRITE_LOG() << "      DEBUG: Found " << matTemps.size() << " temporaries in expression\n";
+        REWRITE_LOG() << "      DEBUG: Operand begins at " << operandBegin.printToString(sourceManager) << "\n";
 
         unsigned tempIndex = 0;
         for (const auto *matTemp : matTemps) {
+            // Skip temporaries that start at the same location as the operand
+            // These are likely wrapping the entire operand (e.g., implicit object of member calls)
+            // We only want subexpression temporaries, not top-level structural temporaries
+            if (matTemp->getBeginLoc() == operandBegin) {
+                REWRITE_LOG() << "      DEBUG: Skipping temporary at operand begin location (wraps entire operand)\n";
+                continue;
+            }
+
             TemporaryInfo tempInfo;
             tempInfo.expr = matTemp;
             tempInfo.tempVarName = "temp_" + std::to_string(coroStmt.index) + "_" + std::to_string(tempIndex++);
@@ -1493,36 +1615,51 @@ private:
         REWRITE_LOG() << "        DEBUG: rewriteExpression input: '" << exprText << "'\n";
         REWRITE_LOG() << "        DEBUG: Expression type: " << expr->getStmtClassName() << "\n";
 
-        // Replace variable references in the expression
-        std::string originalText = exprText;
-        for (const auto &varName: variableNames) {
-            std::string replacement = makeStateGetCall(varName);
+        // Collect all variable references with their declaration locations
+        std::vector<std::pair<SourceRange, SourceLocation>> references;
+        VariableReferenceCollector collector(references, variableNames);
+        collector.TraverseStmt(const_cast<Expr*>(expr));
 
-            size_t pos = 0;
-            while ((pos = exprText.find(varName, pos)) != std::string::npos) {
-                // Check if it's a word boundary
-                bool isWordStart = (pos == 0) || !std::isalnum(exprText[pos - 1]);
-                bool isWordEnd = (pos + varName.length() >= exprText.length()) ||
-                                 !std::isalnum(exprText[pos + varName.length()]);
+        // Sort references by position (reverse order so we can replace from end to start)
+        std::sort(references.begin(), references.end(),
+                  [&](const auto &a, const auto &b) {
+                      return sourceManager.getFileOffset(a.first.getBegin()) >
+                             sourceManager.getFileOffset(b.first.getBegin());
+                  });
 
-                if (isWordStart && isWordEnd) {
-                    REWRITE_LOG() << "        DEBUG: Replacing '" << varName << "' with '" << replacement <<
-                            "' at position " << pos << "\n";
-                    exprText.replace(pos, varName.length(), replacement);
-                    pos += replacement.length();
-                } else {
-                    pos += varName.length();
-                }
+        // Replace each reference with CO_GET call using the correct member name
+        std::string result = exprText;
+        SourceLocation exprStart = expr->getBeginLoc();
+        unsigned exprStartOffset = sourceManager.getFileOffset(exprStart);
+
+        for (const auto &[refRange, declLoc] : references) {
+            // Get the member name from the mapping
+            auto it = declLocationToMemberName.find(declLoc);
+            if (it == declLocationToMemberName.end()) {
+                continue; // Skip if not in mapping
             }
+            std::string memberName = it->second;
+            std::string replacement = makeStateGetCall(memberName);
+
+            // Calculate positions relative to the expression start
+            unsigned refStartOffset = sourceManager.getFileOffset(refRange.getBegin());
+            unsigned refEndOffset = sourceManager.getFileOffset(refRange.getEnd()) + 1;
+            unsigned relativeStart = refStartOffset - exprStartOffset;
+            unsigned relativeEnd = refEndOffset - exprStartOffset;
+
+            REWRITE_LOG() << "        DEBUG: Replacing variable reference with '" << replacement <<
+                    "' at offset " << relativeStart << "-" << relativeEnd << "\n";
+
+            result.replace(relativeStart, relativeEnd - relativeStart, replacement);
         }
 
-        if (originalText != exprText) {
-            REWRITE_LOG() << "        DEBUG: rewriteExpression output: '" << exprText << "'\n";
+        if (result != exprText) {
+            REWRITE_LOG() << "        DEBUG: rewriteExpression output: '" << result << "'\n";
         } else {
             REWRITE_LOG() << "        DEBUG: No changes made to expression\n";
         }
 
-        return exprText;
+        return result;
     }
 
     std::string rewriteExpressionExceptVar(const Expr *expr, const std::string &excludeVar) {
@@ -1612,11 +1749,23 @@ private:
         REWRITE_LOG() << "    DEBUG: Collecting " << macroBaseName << " replacement for " << macroName << "(" << coroStmt.index <<
                 ", ...)\n";
 
-        // Replace keyword with appropriate macro (without closing paren)
-        std::string macroStart = macroName + "(" + std::to_string(coroStmt.index) + ", ";
-
         // Priority based on index for consistent ordering
         int priority = static_cast<int>(coroStmt.index);
+
+        // For buffered macros, wrap in a scope with a using declaration for the type
+        if (coroStmt.needsBuffering) {
+            std::string bufferTypeStr = typeAsString(coroStmt.bufferType, *astContext);
+            std::string scopeOpening = "{ using YieldBufT = " + bufferTypeStr + ";\n  ";
+
+            REWRITE_LOG() << "      DEBUG: Adding scope with type declaration: " << scopeOpening << "\n";
+
+            // Insert scope opening before the keyword (highest priority)
+            SourceRange scopeOpenRange(coroStmt.keywordLoc, coroStmt.keywordLoc);
+            globalReplacements.emplace_back(scopeOpenRange, scopeOpening, priority - 1, false);
+        }
+
+        // Replace keyword with appropriate macro (without closing paren, without type parameter)
+        std::string macroStart = macroName + "(" + std::to_string(coroStmt.index) + ", ";
 
         // Replace just the keyword
         SourceLocation keywordEnd = Lexer::getLocForEndOfToken(
@@ -1690,49 +1839,160 @@ private:
                     REWRITE_LOG() << "        DEBUG: Will wrap braced init temp (fallback, priority " << tempPriorityBase << ")\n";
                 }
             } else {
-                // For paren initialization or general expressions, just wrap without stripping
-                SourceLocation tempStart = tempSubExpr->getBeginLoc();
-                SourceLocation tempEnd = Lexer::getLocForEndOfToken(
-                    tempSubExpr->getEndLoc(), 0, sourceManager, LangOptions());
+                // For paren expressions or general expressions
+                // Check if it's a ParenExpr and strip the parens
+                if (auto *parenExpr = dyn_cast<ParenExpr>(tempSubExpr)) {
+                    // It's a parenthesized expression - strip the parens
+                    SourceLocation lparenLoc = parenExpr->getLParen();
+                    SourceLocation rparenLoc = parenExpr->getRParen();
 
-                SourceRange macroStartRange(tempStart, tempStart);
-                globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
+                    if (lparenLoc.isValid() && rparenLoc.isValid()) {
+                        // Insert macro opening before the opening paren
+                        SourceRange macroStartRange(lparenLoc, lparenLoc);
+                        globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
 
-                SourceRange macroEndRange(tempEnd, tempEnd);
-                globalReplacements.emplace_back(macroEndRange, ")", tempPriorityBase + 2, false);
+                        // Delete the opening paren
+                        SourceLocation afterLParen = lparenLoc.getLocWithOffset(1);
+                        SourceRange lparenRange(lparenLoc, afterLParen);
+                        globalReplacements.emplace_back(lparenRange, "", tempPriorityBase + 1, true);
 
-                REWRITE_LOG() << "        DEBUG: Will wrap paren/general expression temp (priority " << tempPriorityBase << ")\n";
+                        // Delete the closing paren and insert closing paren for macro
+                        SourceLocation afterRParen = Lexer::getLocForEndOfToken(rparenLoc, 0, sourceManager, LangOptions());
+                        SourceRange rparenRange(rparenLoc, afterRParen);
+                        globalReplacements.emplace_back(rparenRange, ")", tempPriorityBase + 2, true);
+
+                        REWRITE_LOG() << "        DEBUG: Will strip parens and use CO_PAREN_INIT_OWNING for ParenExpr (priority " << tempPriorityBase << ")\n";
+                    } else {
+                        // Fallback: just wrap
+                        SourceLocation tempStart = tempSubExpr->getBeginLoc();
+                        SourceLocation tempEnd = Lexer::getLocForEndOfToken(
+                            tempSubExpr->getEndLoc(), 0, sourceManager, LangOptions());
+
+                        SourceRange macroStartRange(tempStart, tempStart);
+                        globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
+
+                        SourceRange macroEndRange(tempEnd, tempEnd);
+                        globalReplacements.emplace_back(macroEndRange, ")", tempPriorityBase + 2, false);
+
+                        REWRITE_LOG() << "        DEBUG: Will wrap ParenExpr (fallback, priority " << tempPriorityBase << ")\n";
+                    }
+                } else {
+                    // Not a paren expression - just wrap
+                    SourceLocation tempStart = tempSubExpr->getBeginLoc();
+                    SourceLocation tempEnd = Lexer::getLocForEndOfToken(
+                        tempSubExpr->getEndLoc(), 0, sourceManager, LangOptions());
+
+                    SourceRange macroStartRange(tempStart, tempStart);
+                    globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
+
+                    SourceRange macroEndRange(tempEnd, tempEnd);
+                    globalReplacements.emplace_back(macroEndRange, ")", tempPriorityBase + 2, false);
+
+                    REWRITE_LOG() << "        DEBUG: Will wrap general expression temp (priority " << tempPriorityBase << ")\n";
+                }
             }
         }
 
-        // Insert closing parenthesis after the operand (if there is one)
-        SourceLocation insertionPoint;
+        // Insert closing parenthesis after the operand (before the semicolon)
+        SourceLocation insertionPointAfterSemicolon;
         if (coroStmt.operand) {
             SourceLocation operandEnd = Lexer::getLocForEndOfToken(
                 coroStmt.operandEnd, 0, sourceManager, LangOptions());
+
+            // Insert closing paren before the semicolon (right after the operand)
             SourceRange parenRange(operandEnd, operandEnd);
-            globalReplacements.emplace_back(parenRange, ")", priority + 1000, false); // Later priority
-            insertionPoint = operandEnd;
+            globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
+
+            // Find the semicolon: use Lexer::findNextToken to search for it
+            Token nextTok;
+            SourceLocation searchStart = operandEnd;
+            bool foundSemi = false;
+
+            // Search for the semicolon token
+            while (true) {
+                std::optional<Token> tokOpt = Lexer::findNextToken(searchStart, sourceManager, LangOptions());
+                if (!tokOpt.has_value()) {
+                    break;
+                }
+                nextTok = tokOpt.value();
+                if (nextTok.is(tok::semi)) {
+                    foundSemi = true;
+                    break;
+                }
+                // If we hit something other than semicolon, stop searching
+                // (shouldn't happen for valid code)
+                break;
+            }
+
+            if (foundSemi) {
+                // Get location after the semicolon
+                insertionPointAfterSemicolon = Lexer::getLocForEndOfToken(
+                    nextTok.getLocation(), 0, sourceManager, LangOptions());
+                REWRITE_LOG() << "      DEBUG: Found semicolon, inserting after at "
+                             << insertionPointAfterSemicolon.printToString(sourceManager) << "\n";
+            } else {
+                // Fallback: use statement end
+                insertionPointAfterSemicolon = Lexer::getLocForEndOfToken(
+                    coroStmt.stmt->getEndLoc(), 0, sourceManager, LangOptions());
+                REWRITE_LOG() << "      DEBUG: Could not find semicolon, using statement end\n";
+            }
         } else {
             // No operand case - just insert closing paren right after the macro start
             SourceRange parenRange(keywordEnd, keywordEnd);
             globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
-            insertionPoint = keywordEnd;
-        }
 
-        // Add destruction calls for temporaries in reverse order after the yield/await
-        if (!coroStmt.temporaries.empty()) {
-            REWRITE_LOG() << "      DEBUG: Adding destruction calls for " << coroStmt.temporaries.size() << " temporaries\n";
+            // Find semicolon after keyword
+            Token nextTok;
+            SourceLocation searchStart = keywordEnd;
+            bool foundSemi = false;
 
-            std::string destructorCalls = "\n";
-            // Destroy in reverse order (last created first destroyed)
-            for (auto it = coroStmt.temporaries.rbegin(); it != coroStmt.temporaries.rend(); ++it) {
-                destructorCalls += "        this->state." + it->tempVarName + ".destroy();\n";
+            while (true) {
+                std::optional<Token> tokOpt = Lexer::findNextToken(searchStart, sourceManager, LangOptions());
+                if (!tokOpt.has_value()) {
+                    break;
+                }
+                nextTok = tokOpt.value();
+                if (nextTok.is(tok::semi)) {
+                    foundSemi = true;
+                    break;
+                }
+                break;
             }
 
-            // Insert after the yield/await statement
-            SourceRange destructorRange(insertionPoint, insertionPoint);
-            globalReplacements.emplace_back(destructorRange, destructorCalls, priority + 2000, false);
+            if (foundSemi) {
+                insertionPointAfterSemicolon = Lexer::getLocForEndOfToken(
+                    nextTok.getLocation(), 0, sourceManager, LangOptions());
+            } else {
+                insertionPointAfterSemicolon = Lexer::getLocForEndOfToken(
+                    coroStmt.stmt->getEndLoc(), 0, sourceManager, LangOptions());
+            }
+        }
+
+        // For buffered macros or when there are temporaries, add destructor calls and closing brace after the semicolon
+        if (coroStmt.needsBuffering || !coroStmt.temporaries.empty()) {
+            std::string afterSemicolonText;
+
+            // Add destruction calls for temporaries
+            if (!coroStmt.temporaries.empty()) {
+                REWRITE_LOG() << "      DEBUG: Adding destruction calls for " << coroStmt.temporaries.size() << " temporaries\n";
+                afterSemicolonText += "\n";
+                // Destroy in reverse order (last created first destroyed)
+                for (auto it = coroStmt.temporaries.rbegin(); it != coroStmt.temporaries.rend(); ++it) {
+                    afterSemicolonText += "        this->state." + it->tempVarName + ".destroy();\n";
+                }
+            }
+
+            // For buffered macros, add the closing brace
+            if (coroStmt.needsBuffering) {
+                REWRITE_LOG() << "      DEBUG: Adding scope closing brace after semicolon\n";
+                afterSemicolonText += "\n}";
+            }
+
+            // Insert everything after the semicolon in one replacement
+            if (!afterSemicolonText.empty()) {
+                SourceRange afterSemiRange(insertionPointAfterSemicolon, insertionPointAfterSemicolon);
+                globalReplacements.emplace_back(afterSemiRange, afterSemicolonText, priority + 2000, false);
+            }
         }
     }
 
@@ -1885,9 +2145,10 @@ private:
             SourceRange headerRange(forLoc, rParenLoc);
 
             // Generate the construct calls for __range, __begin, __end followed by the for loop
+            // Use rewriteExpression to handle variable references in the range expression
+            std::string rangeExprRewritten = rewriteExpression(rangedFor.rangeExpr);
             std::string constructCalls =
-                    makeStateConstructCall(rangedFor.rangeVarName,
-                                           getSourceText(rangedFor.rangeExpr, sourceManager)) + ";\n" +
+                    makeStateConstructCall(rangedFor.rangeVarName, rangeExprRewritten) + ";\n" +
                     "    " + makeStateConstructCall(rangedFor.beginVarName, makeStateGetCall(
                                                                                 rangedFor.rangeVarName) + ".begin()") +
                     ";\n" +
@@ -2294,18 +2555,49 @@ public:
                 continue;
             }
 
-            // Check if this replacement affects the same source range
-            if (std::get<0>(*buffer) != std::get<0>(replacement)) {
+            // Check if this replacement should be combined with the buffered one
+            bool shouldCombine = false;
+            SourceRange combinedRange = std::get<0>(*buffer);
+
+            if (std::get<0>(*buffer) == std::get<0>(replacement)) {
+                // Exact same range
+                shouldCombine = true;
+            } else {
+                SourceLocation bufferBegin = std::get<0>(*buffer).getBegin();
+                SourceLocation bufferEnd = std::get<0>(*buffer).getEnd();
+                SourceLocation replBegin = std::get<0>(replacement).getBegin();
+                SourceLocation replEnd = std::get<0>(replacement).getEnd();
+
+                if (bufferBegin == replBegin) {
+                    // Same start position - combine and use the wider range
+                    shouldCombine = true;
+                    if (sourceManager.isBeforeInTranslationUnit(bufferEnd, replEnd)) {
+                        combinedRange.setEnd(replEnd);
+                    }
+                } else if (bufferEnd == replBegin) {
+                    // Adjacent - replacement starts where buffer ends
+                    shouldCombine = true;
+                    combinedRange.setEnd(replEnd);
+                }
+            }
+
+            if (!shouldCombine) {
                 // Different source range - apply the buffered replacement
                 doRewrite(*buffer);
                 buffer = std::move(replacement);
                 continue;
             }
 
-            // Same source range - combine the replacements (higher priority first)
+            // Same or overlapping source range - combine the replacements (higher priority first)
+            std::get<0>(*buffer) = combinedRange;
             std::get<1>(*buffer) += std::get<1>(replacement);
+            // If any replacement is a true replacement (not insertion), mark the combined result as replacement
+            if (std::get<3>(replacement)) {
+                std::get<3>(*buffer) = true;
+            }
             REWRITE_LOG() << "    [" << i << "] Combined with priority " << std::get<2>(replacement)
-                    << ": '" << std::get<1>(replacement) << "'\n";
+                    << ": '" << std::get<1>(replacement) << "', isReplace=" << std::get<3>(replacement)
+                    << ", combinedRange=" << combinedRange.printToString(sourceManager) << "\n";
         }
 
         // Apply the final buffered replacement
@@ -2659,21 +2951,36 @@ private:
         }
 
         // Add all local variables (including ranged-for variables)
+        // Use declaration location to deduplicate and handle shadowing
         if (coro.localVariables.empty()) {
             structCode += "    // No local variables found in this coroutine\n";
         } else {
             structCode += "    // Local variables (including ranged-for loop variables)\n";
+            std::set<SourceLocation> addedDeclLocations; // Track which declarations we've already added
+
             for (const auto &var: coro.localVariables) {
+                // Skip if we've already added this exact variable declaration
+                if (addedDeclLocations.count(var.location) > 0) {
+                    REWRITE_LOG() << "    Skipping true duplicate variable: " << var.name
+                                 << " at " << var.location.printToString(sourceManager) << "\n";
+                    continue;
+                }
+                addedDeclLocations.insert(var.location);
+
+                // Get the member name from the pre-built mapping in CoroutineInfo
+                std::string memberName = var.name; // Default to original name
+                auto it = coro.declLocationToMemberName.find(var.location);
+                if (it != coro.declLocationToMemberName.end()) {
+                    memberName = it->second;
+                }
+
                 structCode += "    _coro_storage<" + var.referenceType + ", " + (var.isOwning
                             ? std::string{"true"}
-                            : std::string{"false"}) + "> " + var.name +
+                            : std::string{"false"}) + "> " + memberName +
                         ";\n";
-                /*
-                REWRITE_LOG() << "  DEBUG: Added to struct: _coro_storage<" << var.isOwning << ", " << var.
-                        referenceType << "> " << var.name
-                        << " (original type: " << var.type << ", is reference: " << (var.isReference ? "yes" : "no") <<
-                        ");\n";
-                        */
+
+                REWRITE_LOG() << "    Added variable: " << memberName << " (original name: " << var.name
+                             << ", location: " << var.location.printToString(sourceManager) << ")\n";
             }
         }
 

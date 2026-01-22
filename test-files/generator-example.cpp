@@ -187,14 +187,11 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
     // No local variables found in this coroutine
 
     // Subexpression temporaries
-    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>> &, true>
-    temp_1_0;
-    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>> &, true>
-    temp_1_1;
+    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_0;
+    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_1;
 
     // Buffer for yielded/awaited temporaries
-    alignas(std::ranges::max(std::array{std::size_t{1}, alignof(unsigned long), alignof(unsigned long)})) char
-    yieldBuffer[std::ranges::max(std::array{std::size_t{1}, sizeof(unsigned long), sizeof(unsigned long)})];
+    alignas(std::ranges::max(std::array{std::size_t{1}, alignof(int), alignof(int)})) char yieldBuffer[std::ranges::max(std::array{std::size_t{1}, sizeof(int), sizeof(int)})];
 
     // Destroy variables when coroutine is suspended at a specific state
     void destroySuspendedCoro(size_t curState) {
@@ -203,23 +200,21 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
           temp_1_0.destroy();
           temp_1_1.destroy();
           break;
-        case 0: // initial state
+        case 0:  // initial state
           break;
       }
     }
   };
 
   using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) 
 
-      CO_YIELD_BUFFERED((unsigned long), 1,
-                        (CO_PAREN_INIT_OWNING(temp_1_0, std::string{"hallo"}) + CO_PAREN_INIT_OWNING(temp_1_1, std::
-                          string{"bye"})).size());
+  CO_YIELD_BUFFERED((int), 1,  (CO_PAREN_INIT_OWNING(temp_1_0, std::string{"hallo"}) + CO_PAREN_INIT_OWNING(temp_1_1, std::string{"bye"})).size());
 
-      this->state.temp_1_1.destroy();
-      this->state.temp_1_0.destroy();
-      CO_RETURN_FALLOFF(2);
-  COROUTINE_FOOTER()
+        this->state.temp_1_1.destroy();
+        this->state.temp_1_0.destroy();
+CO_RETURN_FALLOFF(2);
+COROUTINE_FOOTER()
 }
 
 

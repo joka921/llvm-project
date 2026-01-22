@@ -378,9 +378,12 @@ namespace blubbi {
 
 #define REMOVE_PARENS(x) REMOVE_PARENS_IMPL x
 #define REMOVE_PARENS_IMPL(...) __VA_ARGS__
+// TODO<joka921> for the case of (implicit ) conversions, we currently use parenthesized initialization, which might
+// break for arrays etc.
 #define CO_YIELD_BUFFERED(type, index, value) \
     { \
-    auto __yield_buffer_ptr_ ## index = new(state.yieldBuffer) REMOVE_PARENS(type) {value}; \
+    using BufT ## index = REMOVE_PARENS(type); \
+    auto __yield_buffer_ptr_ ## index = new(state.yieldBuffer) BufT ## index (value); \
     {                                                       \
       auto&& awaiter = promise().yield_value(*__yield_buffer_ptr_ ## index);        \
       this->curState = index;                                  \

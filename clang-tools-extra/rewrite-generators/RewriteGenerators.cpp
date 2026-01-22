@@ -531,13 +531,33 @@ public:
                 REWRITE_LOG() << "    DEBUG: co_yield operand '" << operandText
                               << "' (type: " << operandTypeStr << ") is a temporary, will use CO_YIELD_BUFFERED\n";
 
-                // Store the type of the operand expression for buffer sizing
-                QualType operandType = coroStmt.operand->getType();
-                coroutineInfo.yieldedOrAwaitedTemporaries.push_back(operandType);
+                // Get the actual type passed to yield_value (after implicit conversions)
+                // by examining the call to promise.yield_value()
+                QualType bufferType = coroStmt.operand->getType(); // Default fallback
+
+                const Expr* yieldCall = coyield->getOperand(); // The call to yield_value
+                if (yieldCall) {
+                    const Expr* yieldCallStripped = yieldCall->IgnoreImplicit();
+                    if (const CallExpr* call = dyn_cast<CallExpr>(yieldCallStripped)) {
+                        if (call->getNumArgs() > 0) {
+                            const Expr* actualArg = call->getArg(0);
+                            QualType convertedType = actualArg->getType();
+                            // Remove references to get the decayed type
+                            if (convertedType->isReferenceType()) {
+                                convertedType = convertedType.getNonReferenceType();
+                            }
+                            bufferType = convertedType;
+                            REWRITE_LOG() << "    DEBUG: Extracted buffer type from yield_value call: "
+                                         << typeAsString(bufferType, *astContext) << "\n";
+                        }
+                    }
+                }
+
+                coroutineInfo.yieldedOrAwaitedTemporaries.push_back(bufferType);
 
                 // Mark this statement as needing buffered macro and store the buffer type
                 coroStmt.needsBuffering = true;
-                coroStmt.bufferType = operandType;
+                coroStmt.bufferType = bufferType;
             } else {
                 std::string operandText = getSourceText(coroStmt.operand, sourceManager);
                 std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
@@ -602,13 +622,33 @@ public:
                 REWRITE_LOG() << "    DEBUG: co_await operand '" << operandText
                               << "' (type: " << operandTypeStr << ") is a temporary, will use CO_AWAIT_BUFFERED\n";
 
-                // Store the type of the operand expression for buffer sizing
-                QualType operandType = coroStmt.operand->getType();
-                coroutineInfo.yieldedOrAwaitedTemporaries.push_back(operandType);
+                // Get the actual type passed to await_transform (after implicit conversions)
+                // by examining the call to promise.await_transform() or the awaiter constructor
+                QualType bufferType = coroStmt.operand->getType(); // Default fallback
+
+                const Expr* awaitCall = coawait->getOperand(); // The await transformation
+                if (awaitCall) {
+                    const Expr* awaitCallStripped = awaitCall->IgnoreImplicit();
+                    if (const CallExpr* call = dyn_cast<CallExpr>(awaitCallStripped)) {
+                        if (call->getNumArgs() > 0) {
+                            const Expr* actualArg = call->getArg(0);
+                            QualType convertedType = actualArg->getType();
+                            // Remove references to get the decayed type
+                            if (convertedType->isReferenceType()) {
+                                convertedType = convertedType.getNonReferenceType();
+                            }
+                            bufferType = convertedType;
+                            REWRITE_LOG() << "    DEBUG: Extracted buffer type from await call: "
+                                         << typeAsString(bufferType, *astContext) << "\n";
+                        }
+                    }
+                }
+
+                coroutineInfo.yieldedOrAwaitedTemporaries.push_back(bufferType);
 
                 // Mark this statement as needing buffered macro and store the buffer type
                 coroStmt.needsBuffering = true;
-                coroStmt.bufferType = operandType;
+                coroStmt.bufferType = bufferType;
             } else {
                 std::string operandText = getSourceText(coroStmt.operand, sourceManager);
                 std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);

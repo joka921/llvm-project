@@ -1752,20 +1752,16 @@ private:
         // Priority based on index for consistent ordering
         int priority = static_cast<int>(coroStmt.index);
 
-        // For buffered macros, wrap in a scope with a using declaration for the type
+        // Replace keyword with appropriate macro
+        // For buffered macros, include the type in parentheses as the first argument
+        std::string macroStart;
         if (coroStmt.needsBuffering) {
             std::string bufferTypeStr = typeAsString(coroStmt.bufferType, *astContext);
-            std::string scopeOpening = "{ using YieldBufT = " + bufferTypeStr + ";\n  ";
-
-            REWRITE_LOG() << "      DEBUG: Adding scope with type declaration: " << scopeOpening << "\n";
-
-            // Insert scope opening before the keyword (highest priority)
-            SourceRange scopeOpenRange(coroStmt.keywordLoc, coroStmt.keywordLoc);
-            globalReplacements.emplace_back(scopeOpenRange, scopeOpening, priority - 1, false);
+            macroStart = macroName + "((" + bufferTypeStr + "), " + std::to_string(coroStmt.index) + ", ";
+            REWRITE_LOG() << "      DEBUG: Buffered macro with type: " << macroStart << "\n";
+        } else {
+            macroStart = macroName + "(" + std::to_string(coroStmt.index) + ", ";
         }
-
-        // Replace keyword with appropriate macro (without closing paren, without type parameter)
-        std::string macroStart = macroName + "(" + std::to_string(coroStmt.index) + ", ";
 
         // Replace just the keyword
         SourceLocation keywordEnd = Lexer::getLocForEndOfToken(
@@ -1894,7 +1890,6 @@ private:
         }
 
         // Insert closing parenthesis after the operand (before the semicolon)
-        SourceLocation insertionPointAfterSemicolon;
         if (coroStmt.operand) {
             SourceLocation operandEnd = Lexer::getLocForEndOfToken(
                 coroStmt.operandEnd, 0, sourceManager, LangOptions());
@@ -1902,97 +1897,61 @@ private:
             // Insert closing paren before the semicolon (right after the operand)
             SourceRange parenRange(operandEnd, operandEnd);
             globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
-
-            // Find the semicolon: use Lexer::findNextToken to search for it
-            Token nextTok;
-            SourceLocation searchStart = operandEnd;
-            bool foundSemi = false;
-
-            // Search for the semicolon token
-            while (true) {
-                std::optional<Token> tokOpt = Lexer::findNextToken(searchStart, sourceManager, LangOptions());
-                if (!tokOpt.has_value()) {
-                    break;
-                }
-                nextTok = tokOpt.value();
-                if (nextTok.is(tok::semi)) {
-                    foundSemi = true;
-                    break;
-                }
-                // If we hit something other than semicolon, stop searching
-                // (shouldn't happen for valid code)
-                break;
-            }
-
-            if (foundSemi) {
-                // Get location after the semicolon
-                insertionPointAfterSemicolon = Lexer::getLocForEndOfToken(
-                    nextTok.getLocation(), 0, sourceManager, LangOptions());
-                REWRITE_LOG() << "      DEBUG: Found semicolon, inserting after at "
-                             << insertionPointAfterSemicolon.printToString(sourceManager) << "\n";
-            } else {
-                // Fallback: use statement end
-                insertionPointAfterSemicolon = Lexer::getLocForEndOfToken(
-                    coroStmt.stmt->getEndLoc(), 0, sourceManager, LangOptions());
-                REWRITE_LOG() << "      DEBUG: Could not find semicolon, using statement end\n";
-            }
         } else {
             // No operand case - just insert closing paren right after the macro start
             SourceRange parenRange(keywordEnd, keywordEnd);
             globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
+        }
 
-            // Find semicolon after keyword
-            Token nextTok;
-            SourceLocation searchStart = keywordEnd;
-            bool foundSemi = false;
+        // Find the location to insert destructor calls (after the semicolon)
+        // Strategy: start from statement end, skip any semicolons, and insert before the first non-semicolon token
+        SourceLocation stmtEnd = coroStmt.stmt->getEndLoc();
+        SourceLocation searchStart = Lexer::getLocForEndOfToken(
+            stmtEnd, 0, sourceManager, LangOptions());
 
-            while (true) {
-                std::optional<Token> tokOpt = Lexer::findNextToken(searchStart, sourceManager, LangOptions());
-                if (!tokOpt.has_value()) {
-                    break;
-                }
-                nextTok = tokOpt.value();
-                if (nextTok.is(tok::semi)) {
-                    foundSemi = true;
-                    break;
-                }
+        REWRITE_LOG() << "      DEBUG: Statement end location: " << stmtEnd.printToString(sourceManager) << "\n";
+
+        // Find tokens after the statement, skipping semicolons
+        SourceLocation insertionPointAfterSemicolon = searchStart;
+        while (true) {
+            std::optional<Token> nextTokOpt = Lexer::findNextToken(searchStart, sourceManager, LangOptions());
+            if (!nextTokOpt.has_value()) {
+                // No more tokens, use current position
+                REWRITE_LOG() << "      DEBUG: No more tokens found\n";
                 break;
             }
 
-            if (foundSemi) {
-                insertionPointAfterSemicolon = Lexer::getLocForEndOfToken(
-                    nextTok.getLocation(), 0, sourceManager, LangOptions());
+            if (nextTokOpt->is(tok::semi)) {
+                // Found a semicolon, move past it and continue searching
+                searchStart = Lexer::getLocForEndOfToken(
+                    nextTokOpt->getLocation(), 0, sourceManager, LangOptions());
+                insertionPointAfterSemicolon = searchStart;
+                REWRITE_LOG() << "      DEBUG: Found semicolon at " << nextTokOpt->getLocation().printToString(sourceManager)
+                             << ", will insert after it\n";
             } else {
-                insertionPointAfterSemicolon = Lexer::getLocForEndOfToken(
-                    coroStmt.stmt->getEndLoc(), 0, sourceManager, LangOptions());
+                // Found a non-semicolon token, insert before it
+                insertionPointAfterSemicolon = nextTokOpt->getLocation();
+                REWRITE_LOG() << "      DEBUG: Found non-semicolon token at " << nextTokOpt->getLocation().printToString(sourceManager)
+                             << ", will insert before it\n";
+                break;
             }
         }
 
-        // For buffered macros or when there are temporaries, add destructor calls and closing brace after the semicolon
-        if (coroStmt.needsBuffering || !coroStmt.temporaries.empty()) {
-            std::string afterSemicolonText;
+        REWRITE_LOG() << "      DEBUG: Final insertion point: " << insertionPointAfterSemicolon.printToString(sourceManager) << "\n";
 
-            // Add destruction calls for temporaries
-            if (!coroStmt.temporaries.empty()) {
-                REWRITE_LOG() << "      DEBUG: Adding destruction calls for " << coroStmt.temporaries.size() << " temporaries\n";
-                afterSemicolonText += "\n";
-                // Destroy in reverse order (last created first destroyed)
-                for (auto it = coroStmt.temporaries.rbegin(); it != coroStmt.temporaries.rend(); ++it) {
-                    afterSemicolonText += "        this->state." + it->tempVarName + ".destroy();\n";
-                }
+        // Add destruction calls for temporaries after the semicolon
+        if (!coroStmt.temporaries.empty()) {
+            REWRITE_LOG() << "      DEBUG: Adding destruction calls for " << coroStmt.temporaries.size() << " temporaries\n";
+
+            std::string destructorCalls = "\n";
+            // Destroy in reverse order (last created first destroyed)
+            for (auto it = coroStmt.temporaries.rbegin(); it != coroStmt.temporaries.rend(); ++it) {
+                destructorCalls += "        this->state." + it->tempVarName + ".destroy();\n";
             }
 
-            // For buffered macros, add the closing brace
-            if (coroStmt.needsBuffering) {
-                REWRITE_LOG() << "      DEBUG: Adding scope closing brace after semicolon\n";
-                afterSemicolonText += "\n}";
-            }
-
-            // Insert everything after the semicolon in one replacement
-            if (!afterSemicolonText.empty()) {
-                SourceRange afterSemiRange(insertionPointAfterSemicolon, insertionPointAfterSemicolon);
-                globalReplacements.emplace_back(afterSemiRange, afterSemicolonText, priority + 2000, false);
-            }
+            // Insert after the semicolon
+            SourceRange afterSemiRange(insertionPointAfterSemicolon, insertionPointAfterSemicolon);
+            globalReplacements.emplace_back(afterSemiRange, destructorCalls, priority + 2000, false);
         }
     }
 

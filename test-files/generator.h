@@ -376,10 +376,11 @@ namespace blubbi {
     using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
 }
 
-#define CO_YIELD_BUFFERED(index, value) \
+#define REMOVE_PARENS(x) REMOVE_PARENS_IMPL x
+#define REMOVE_PARENS_IMPL(...) __VA_ARGS__
+#define CO_YIELD_BUFFERED(type, index, value) \
     { \
-    using BufT ## index = std::remove_reference_t<decltype(value)>; \
-    auto __yield_buffer_ptr_ ## index = new(state.yieldBuffer) BufT ## index {value}; \
+    auto __yield_buffer_ptr_ ## index = new(state.yieldBuffer) REMOVE_PARENS(type) {value}; \
     {                                                       \
       auto&& awaiter = promise().yield_value(*__yield_buffer_ptr_ ## index);        \
       this->curState = index;                                  \
@@ -390,7 +391,7 @@ namespace blubbi {
     [[fallthrough]];                                        \
     case index: \
     { \
-    using BufT ## index = std::remove_reference_t<decltype(value)>; \
+    using BufT ## index = REMOVE_PARENS(type); \
       auto __yield_buffer_ptr_ ## index = reinterpret_cast<BufT ## index *>(state.yieldBuffer); \
       __yield_buffer_ptr_ ##index -> ~ BufT ## index(); \
     } void()

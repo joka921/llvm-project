@@ -181,24 +181,82 @@ cppcoro::generator<int> yieldTemporaries() {
 }
 */
 
-cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
+cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
   // _coro_storage and CoroImpl assumed to be available in global namespace
   struct _detail_coro_impl {
-    // No local variables found in this coroutine
+    // Local variables (including ranged-for loop variables)
+    _coro_storage<int&, true> x;
+    _coro_storage<int&, true> y;
+    _coro_storage<int&, true> i;
+    _coro_storage<int&, true> z;
 
-    // Subexpression temporaries
-    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_0;
-    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_1;
+    // Exception handling infrastructure
+    std::vector<size_t> activeTryBlocks;
 
-    // Buffer for yielded/awaited temporaries
-    alignas(std::ranges::max(std::array{std::size_t{1}, alignof(int), alignof(int)})) char yieldBuffer[std::ranges::max(std::array{std::size_t{1}, sizeof(int), sizeof(int)})];
+    void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {
+      nextState = dispatchExceptionHandling(std::move(eptr));
+      resume();
+    }
+
+    size_t dispatchExceptionHandling(std::exception_ptr eptr) {
+      switch (activeTryBlocks.back()) {
+        case 0: return catchClauseImpl_0(std::move(eptr));
+        default: std::terminate();
+      }
+    }
+
+    // Exception handler member functions
+    size_t catchClauseImpl_0(std::exception_ptr eptr) {
+      auto nextState = activeTryBlocks.back();
+      activeTryBlocks.pop_back();
+      auto lambda = [&]() {
+        try {
+          std::rethrow_exception(eptr);
+        } catch (class std::exception & e) {
+    std::cout << "Caught exception: " << e.what() << " x=" << CO_GET(x) << std::endl;
+  } catch (...) {
+    std::cout << "Caught unknown exception, x=" << CO_GET(x) << std::endl;
+  } 
+        return nextState;
+      };
+      if (activeTryBlocks.empty()) {
+        return lambda();
+      } else {
+        try {
+          return lambda();
+        } catch (...) {
+          return dispatchExceptionHandling(std::current_exception());
+        }
+      }
+    }
+
+    // Destroy variables in case of exception in try block
+    void destroyBecauseOfException(size_t tryCatchBlockIndex) {
+      switch (tryCatchBlockIndex) {
+        case 0:
+          if (state.y.constructed) state.y.destroy();
+          if (state.i.constructed) state.i.destroy();
+          if (state.z.constructed) state.z.destroy();
+          break;
+        default: break;
+      }
+    }
 
     // Destroy variables when coroutine is suspended at a specific state
     void destroySuspendedCoro(size_t curState) {
       switch (curState) {
+        case 4:
+        cleanup_3:
+        case 3:
+          break;
+        cleanup_2:
+        case 2:
+          z.destroy();
+          i.destroy();
+        cleanup_1:
         case 1:
-          temp_1_0.destroy();
-          temp_1_1.destroy();
+          y.destroy();
+          x.destroy();
           break;
         case 0:  // initial state
           break;
@@ -207,19 +265,32 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
   };
 
   using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) 
-
-  CO_YIELD_BUFFERED((int), 1,  (CO_PAREN_INIT_OWNING(temp_1_0, std::string{"hallo"}) + CO_PAREN_INIT_OWNING(temp_1_1, std::string{"bye"})).size());
-
-        this->state.temp_1_1.destroy();
-        this->state.temp_1_0.destroy();
-CO_RETURN_FALLOFF(2);
-COROUTINE_FOOTER()
+  COROUTINE_HEADER_WITH_TRY(_ActualCoroType, _detail_coro_impl)
+      CO_PAREN_INIT_OWNING(x, 42);
+      TRY_BEGIN(18446744073709551615ULL); {
+        CO_PAREN_INIT_OWNING(y, CO_GET(x) + 1);
+        CO_YIELD(1, CO_GET(y));
+        CO_PAREN_INIT_OWNING(i, 15);
+        while (CO_GET(i)) {
+          CO_PAREN_INIT_OWNING(z, CO_GET(y) + 1);
+          CO_YIELD(2, CO_GET(z));
+          --CO_GET(i);
+          this->state.z.destroy();
+        }
+        this->state.i.destroy();
+        this->state.y.destroy();
+      }
+      TRY_END(18446744073709551615ULL);
+      CO_YIELD(3, CO_GET(x));
+      CO_RETURN_VOID(4);
+      this->state.x.destroy();
+      CO_RETURN_FALLOFF(5);
+  COROUTINE_FOOTER_WITH_TRY()
 }
 
 
 int main() {
-  for (auto &i : yieldTemporaries()) {
+  for (auto &i : testTryCatch()) {
     std::cout << i << std::endl;
   }
 }

@@ -86,11 +86,6 @@ private:
     std::string handleInitListArgs(const InitListExpr *initList);
     std::string rewriteExpression(const Expr *expr);
     std::string rewriteExpressionExceptVar(const Expr *expr, const std::string &excludeVar);
-    void collectYieldOrAwaitReplacement(const CoroutineStatement &coroStmt, const std::string &macroBaseName);
-    void collectRangedForFooterInsertions();
-    void collectRangedForHeaderReplacement(const RangedForLoop &rangedFor);
-    void collectRangedForLoopVarConstruct(const RangedForLoop &rangedFor);
-    void collectRangedForLoopVarDestroy(const RangedForLoop &rangedFor);
     std::string generateExplicitLoopForm(const RangedForLoop &rangedFor);
     std::string transformVariableReferencesInText(const std::string &text);
     std::string getInitializationArguments(const VarDecl *varDecl);

@@ -48,6 +48,24 @@ struct CoroutineStatement {
     QualType bufferType; // Type for the buffer when needsBuffering is true
     std::vector<std::string> aliveVariables; // Variables alive at this suspension point, in reverse order of declaration
     std::vector<TemporaryInfo> temporaries; // Subexpression temporaries that need lifetime extension
+
+    // Generate replacements for this coroutine statement
+    std::vector<std::tuple<SourceRange, std::string, int, bool>> generateReplacements(
+        const SourceManager &sourceManager,
+        ASTContext &astContext
+    ) const;
+
+private:
+    std::vector<std::tuple<SourceRange, std::string, int, bool>> generateYieldOrAwaitReplacements(
+        const SourceManager &sourceManager,
+        ASTContext &astContext,
+        const std::string &macroBaseName
+    ) const;
+
+    std::vector<std::tuple<SourceRange, std::string, int, bool>> generateReturnReplacements(
+        const SourceManager &sourceManager,
+        ASTContext &astContext
+    ) const;
 };
 
 struct LocalVariable {

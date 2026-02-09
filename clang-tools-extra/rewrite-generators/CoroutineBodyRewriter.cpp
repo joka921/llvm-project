@@ -1533,267 +1533,13 @@ bool CoroutineBodyRewriter::isPartOfDeclaration(const DeclRefExpr *declRef) {
         return false;
     }
 
-    // Helper function to collect replacements for co_yield or co_await (they work identically)
-void CoroutineBodyRewriter::collectYieldOrAwaitReplacement(const CoroutineStatement &coroStmt, const std::string &macroBaseName) {
-        std::string macroName = coroStmt.needsBuffering ? macroBaseName + "_BUFFERED" : macroBaseName;
-        REWRITE_LOG() << "    DEBUG: Collecting " << macroBaseName << " replacement for " << macroName << "(" << coroStmt.index <<
-                ", ...)\n";
-
-        // Priority based on index for consistent ordering
-        int priority = static_cast<int>(coroStmt.index);
-
-        // Replace keyword with appropriate macro
-        // For buffered macros, include the type in parentheses as the first argument
-        std::string macroStart;
-        if (coroStmt.needsBuffering) {
-            std::string bufferTypeStr = typeAsString(coroStmt.bufferType, *astContext);
-            macroStart = macroName + "((" + bufferTypeStr + "), " + std::to_string(coroStmt.index) + ", ";
-            REWRITE_LOG() << "      DEBUG: Buffered macro with type: " << macroStart << "\n";
-        } else {
-            macroStart = macroName + "(" + std::to_string(coroStmt.index) + ", ";
-        }
-
-        // Replace just the keyword
-        SourceLocation keywordEnd = getLocForEndOfToken(coroStmt.keywordLoc);
-        SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
-        globalReplacements.emplace_back(keywordRange, macroStart, priority, true);
-
-        // Process subexpression temporaries - use incremental replacements for recursive processing
-        // Process in reverse order (innermost first) by assigning lower priorities to later temps
-        for (size_t tempIdx = 0; tempIdx < coroStmt.temporaries.size(); ++tempIdx) {
-            const auto &temp = coroStmt.temporaries[tempIdx];
-            REWRITE_LOG() << "      DEBUG: Processing temporary '" << temp.tempVarName << "' (index " << tempIdx << ")\n";
-
-            std::string initMacroName = temp.isBracedInit ? "CO_BRACED_INIT_OWNING" : "CO_PAREN_INIT_OWNING";
-            std::string macroOpening = initMacroName + "(" + temp.tempVarName + ", ";
-
-            // Each temporary gets its own priority range to avoid conflicts
-            // Innermost temps (later in the vector) get lower priorities so they're processed first
-            int tempPriorityBase = priority + 100 + (int)(coroStmt.temporaries.size() - tempIdx - 1) * 10;
-
-            // Get the subexpression from the MaterializeTemporaryExpr
-            const Expr *tempSubExpr = temp.expr->getSubExpr();
-
-            if (temp.isBracedInit) {
-                // For braced initialization, find the InitListExpr and its braces
-                const InitListExpr *initList = nullptr;
-
-                // The subExpr might be a CXXConstructExpr wrapping an InitListExpr
-                if (auto *constructExpr = dyn_cast<CXXConstructExpr>(tempSubExpr)) {
-                    for (unsigned i = 0; i < constructExpr->getNumArgs(); ++i) {
-                        if (auto *ilist = dyn_cast<InitListExpr>(constructExpr->getArg(i)->IgnoreImplicit())) {
-                            initList = ilist;
-                            break;
-                        }
-                    }
-                } else if (auto *ilist = dyn_cast<InitListExpr>(tempSubExpr)) {
-                    initList = ilist;
-                }
-
-                if (initList && initList->getLBraceLoc().isValid() && initList->getRBraceLoc().isValid()) {
-                    // Insert macro opening before the entire temporary expression
-                    SourceLocation tempStart = tempSubExpr->getBeginLoc();
-                    SourceRange macroStartRange(tempStart, tempStart);
-                    globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
-
-                    // Delete the opening brace
-                    SourceLocation lbrace = initList->getLBraceLoc();
-                    SourceLocation afterLBrace = lbrace.getLocWithOffset(1);
-                    SourceRange lbraceRange(lbrace, afterLBrace);
-                    globalReplacements.emplace_back(lbraceRange, "", tempPriorityBase + 1, true);
-
-                    // Delete the closing brace and insert closing paren
-                    SourceLocation rbrace = initList->getRBraceLoc();
-                    SourceLocation afterRBrace = rbrace.getLocWithOffset(1);
-                    SourceRange rbraceRange(rbrace, afterRBrace);
-                    globalReplacements.emplace_back(rbraceRange, ")", tempPriorityBase + 2, true);
-
-                    REWRITE_LOG() << "        DEBUG: Will use incremental replacements for braced init temp (priority " << tempPriorityBase << ")\n";
-                } else {
-                    // Fallback: wrap the entire expression
-                    SourceLocation tempStart = tempSubExpr->getBeginLoc();
-                    SourceLocation tempEnd = getLocForEndOfToken(tempSubExpr->getEndLoc());
-
-                    SourceRange macroStartRange(tempStart, tempStart);
-                    globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
-
-                    SourceRange macroEndRange(tempEnd, tempEnd);
-                    globalReplacements.emplace_back(macroEndRange, ")", tempPriorityBase + 2, false);
-
-                    REWRITE_LOG() << "        DEBUG: Will wrap braced init temp (fallback, priority " << tempPriorityBase << ")\n";
-                }
-            } else {
-                // For paren expressions or general expressions
-                // Check if it's a ParenExpr and strip the parens
-                if (auto *parenExpr = dyn_cast<ParenExpr>(tempSubExpr)) {
-                    // It's a parenthesized expression - strip the parens
-                    SourceLocation lparenLoc = parenExpr->getLParen();
-                    SourceLocation rparenLoc = parenExpr->getRParen();
-
-                    if (lparenLoc.isValid() && rparenLoc.isValid()) {
-                        // Insert macro opening before the opening paren
-                        SourceRange macroStartRange(lparenLoc, lparenLoc);
-                        globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
-
-                        // Delete the opening paren
-                        SourceLocation afterLParen = lparenLoc.getLocWithOffset(1);
-                        SourceRange lparenRange(lparenLoc, afterLParen);
-                        globalReplacements.emplace_back(lparenRange, "", tempPriorityBase + 1, true);
-
-                        // Delete the closing paren and insert closing paren for macro
-                        SourceLocation afterRParen = getLocForEndOfToken(rparenLoc);
-                        SourceRange rparenRange(rparenLoc, afterRParen);
-                        globalReplacements.emplace_back(rparenRange, ")", tempPriorityBase + 2, true);
-
-                        REWRITE_LOG() << "        DEBUG: Will strip parens and use CO_PAREN_INIT_OWNING for ParenExpr (priority " << tempPriorityBase << ")\n";
-                    } else {
-                        // Fallback: just wrap
-                        SourceLocation tempStart = tempSubExpr->getBeginLoc();
-                        SourceLocation tempEnd = getLocForEndOfToken(tempSubExpr->getEndLoc());
-
-                        SourceRange macroStartRange(tempStart, tempStart);
-                        globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
-
-                        SourceRange macroEndRange(tempEnd, tempEnd);
-                        globalReplacements.emplace_back(macroEndRange, ")", tempPriorityBase + 2, false);
-
-                        REWRITE_LOG() << "        DEBUG: Will wrap ParenExpr (fallback, priority " << tempPriorityBase << ")\n";
-                    }
-                } else {
-                    // Not a paren expression - just wrap
-                    SourceLocation tempStart = tempSubExpr->getBeginLoc();
-                    SourceLocation tempEnd = getLocForEndOfToken(tempSubExpr->getEndLoc());
-
-                    SourceRange macroStartRange(tempStart, tempStart);
-                    globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
-
-                    SourceRange macroEndRange(tempEnd, tempEnd);
-                    globalReplacements.emplace_back(macroEndRange, ")", tempPriorityBase + 2, false);
-
-                    REWRITE_LOG() << "        DEBUG: Will wrap general expression temp (priority " << tempPriorityBase << ")\n";
-                }
-            }
-        }
-
-        // Insert closing parenthesis after the operand (before the semicolon)
-        if (coroStmt.operand) {
-            SourceLocation operandEnd = getLocForEndOfToken(coroStmt.operandEnd);
-
-            // Insert closing paren before the semicolon (right after the operand)
-            SourceRange parenRange(operandEnd, operandEnd);
-            globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
-        } else {
-            // No operand case - just insert closing paren right after the macro start
-            SourceRange parenRange(keywordEnd, keywordEnd);
-            globalReplacements.emplace_back(parenRange, ")", priority + 1000, false);
-        }
-
-        // Find the location to insert destructor calls (after the semicolon)
-        // Strategy: start from statement end, skip any semicolons, and insert before the first non-semicolon token
-        SourceLocation stmtEnd = coroStmt.stmt->getEndLoc();
-        SourceLocation searchStart = getLocForEndOfToken(stmtEnd);
-
-        REWRITE_LOG() << "      DEBUG: Statement end location: " << stmtEnd.printToString(sourceManager) << "\n";
-
-        // Find tokens after the statement, skipping semicolons
-        SourceLocation insertionPointAfterSemicolon = searchStart;
-        while (true) {
-            std::optional<Token> nextTokOpt = Lexer::findNextToken(searchStart, sourceManager, LangOptions());
-            if (!nextTokOpt.has_value()) {
-                // No more tokens, use current position
-                REWRITE_LOG() << "      DEBUG: No more tokens found\n";
-                break;
-            }
-
-            if (nextTokOpt->is(tok::semi)) {
-                // Found a semicolon, move past it and continue searching
-                searchStart = getLocForEndOfToken(nextTokOpt->getLocation());
-                insertionPointAfterSemicolon = searchStart;
-                REWRITE_LOG() << "      DEBUG: Found semicolon at " << nextTokOpt->getLocation().printToString(sourceManager)
-                             << ", will insert after it\n";
-            } else {
-                // Found a non-semicolon token, insert before it
-                insertionPointAfterSemicolon = nextTokOpt->getLocation();
-                REWRITE_LOG() << "      DEBUG: Found non-semicolon token at " << nextTokOpt->getLocation().printToString(sourceManager)
-                             << ", will insert before it\n";
-                break;
-            }
-        }
-
-        REWRITE_LOG() << "      DEBUG: Final insertion point: " << insertionPointAfterSemicolon.printToString(sourceManager) << "\n";
-
-        // Add destruction calls for temporaries after the semicolon
-        if (!coroStmt.temporaries.empty()) {
-            REWRITE_LOG() << "      DEBUG: Adding destruction calls for " << coroStmt.temporaries.size() << " temporaries\n";
-
-            std::string destructorCalls = "\n";
-            // Destroy in reverse order (last created first destroyed)
-            for (auto it = coroStmt.temporaries.rbegin(); it != coroStmt.temporaries.rend(); ++it) {
-                destructorCalls += "        this->state." + it->tempVarName + ".destroy();\n";
-            }
-
-            // Insert after the semicolon
-            SourceRange afterSemiRange(insertionPointAfterSemicolon, insertionPointAfterSemicolon);
-            globalReplacements.emplace_back(afterSemiRange, destructorCalls, priority + 2000, false);
-        }
-    }
-
 void CoroutineBodyRewriter::collectCoroutineStatementReplacements() {
         REWRITE_LOG() << "  DEBUG: Collecting coroutine statement replacements for " << coroutineStatements.size() <<
                 " statements\n";
 
         for (const auto &coroStmt: coroutineStatements) {
-            if (coroStmt.type == CoroutineStatement::YIELD) {
-                collectYieldOrAwaitReplacement(coroStmt, "CO_YIELD");
-            } else if (coroStmt.type == CoroutineStatement::AWAIT) {
-                collectYieldOrAwaitReplacement(coroStmt, "CO_AWAIT");
-            } else if (coroStmt.type == CoroutineStatement::RETURN) {
-                REWRITE_LOG() << "    DEBUG: Collecting co_return replacement for index " << coroStmt.index << "\n";
-
-                int priority = static_cast<int>(coroStmt.index);
-                SourceLocation keywordEnd = getLocForEndOfToken(coroStmt.keywordLoc);
-
-                if (!coroStmt.operand) {
-                    // Case 1: co_return; (no operand) -> CO_RETURN_VOID(index);
-                    REWRITE_LOG() << "      DEBUG: co_return has no operand, using CO_RETURN_VOID\n";
-
-                    std::string replacement = "CO_RETURN_VOID(" + std::to_string(coroStmt.index) + ");";
-                    SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
-                    globalReplacements.emplace_back(keywordRange, replacement, priority, true);
-                } else {
-                    // Check if operand type is void
-                    QualType operandType = coroStmt.operand->getType();
-                    bool isVoidType = operandType->isVoidType();
-
-                    if (isVoidType) {
-                        // Case 2: co_return expr; where expr is void -> expr; CO_RETURN_VOID(index);
-                        REWRITE_LOG() << "      DEBUG: co_return operand is void type, using CO_RETURN_VOID\n";
-
-                        // Replace "co_return " with nothing (just remove the keyword and space)
-                        SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
-                        globalReplacements.emplace_back(keywordRange, "", priority, true);
-
-                        // Insert "; CO_RETURN_VOID(index)" after the operand
-                        SourceLocation operandEnd = getLocForEndOfToken(coroStmt.operandEnd);
-                        SourceRange insertRange(operandEnd, operandEnd);
-                        std::string insertion = "; CO_RETURN_VOID(" + std::to_string(coroStmt.index) + ")";
-                        globalReplacements.emplace_back(insertRange, insertion, priority + 1000, false);
-                    } else {
-                        // Case 3: co_return expr; where expr is non-void -> CO_RETURN_VALUE(index, (expr))
-                        REWRITE_LOG() << "      DEBUG: co_return operand is value type, using CO_RETURN_VALUE\n";
-
-                        // Replace "co_return" with "CO_RETURN_VALUE(index, ("
-                        std::string macroStart = "CO_RETURN_VALUE(" + std::to_string(coroStmt.index) + ", (";
-                        SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
-                        globalReplacements.emplace_back(keywordRange, macroStart, priority, true);
-
-                        // Insert "))" after the operand
-                        SourceLocation operandEnd = getLocForEndOfToken(coroStmt.operandEnd);
-                        SourceRange parenRange(operandEnd, operandEnd);
-                        globalReplacements.emplace_back(parenRange, "))", priority + 1000, false);
-                    }
-                }
-            }
+            auto replacements = coroStmt.generateReplacements(sourceManager, *astContext);
+            globalReplacements.insert(globalReplacements.end(), replacements.begin(), replacements.end());
         }
 
         REWRITE_LOG() << "  Collected " << coroutineStatements.size() <<
@@ -1801,174 +1547,35 @@ void CoroutineBodyRewriter::collectCoroutineStatementReplacements() {
     }
 
 
-void CoroutineBodyRewriter::collectRangedForFooterInsertions() {
-        REWRITE_LOG() <<
-                "  DEBUG: Collecting ranged-for footer insertions (destroy calls) into scope end replacements\n";
-
-        for (const auto &rangedFor: rangedForLoops) {
-            // Find the location where footer destroy calls should be inserted
-            // This should be AFTER the entire for loop statement (after its closing brace)
-            const Stmt *body = rangedFor.stmt->getBody();
-            if (body) {
-                if (auto *compoundBody = dyn_cast<CompoundStmt>(body)) {
-                    // Calculate where the footer should go in the transformed code
-                    // In the explicit form, the footer goes after "  }" (the for loop close) but before "}" (scope close)
-                    SourceLocation footerLoc = compoundBody->getRBracLoc();
-                    unsigned fileOffset = sourceManager.getFileOffset(footerLoc);
-
-                    // Create destroy calls for __end, __begin, __range (reverse order of construction)
-                    std::vector<std::string> destroyCalls = {
-                        "    " + makeStateDestroyCall(rangedFor.endVarName) + ";\n",
-                        "    " + makeStateDestroyCall(rangedFor.beginVarName) + ";\n",
-                        "    " + makeStateDestroyCall(rangedFor.rangeVarName) + ";\n"
-                    };
-
-                    // Add each destroy call with high priorities to ensure they come after loop variable destruction
-                    int basePriority = 50000 + static_cast<int>(rangedFor.index) * 10;
-
-                    for (size_t i = 0; i < destroyCalls.size(); ++i) {
-                        ScopeEndReplacement replacement;
-                        replacement.replacement = destroyCalls[i];
-                        replacement.priority = basePriority + static_cast<int>(i);
-                        replacement.insertAfterBrace = true;
-
-                        scopeEndReplacements[fileOffset].push_back(replacement);
-
-                        REWRITE_LOG() << "    Added footer destroy call: " << destroyCalls[i].substr(0, 40) << "... "
-                                << "at " << footerLoc.printToString(sourceManager)
-                                << " (priority " << replacement.priority << ", file offset " << fileOffset << ")\n";
-                    }
-                }
-            }
-        }
-
-        REWRITE_LOG() << "  Collected footer destroy calls for " << rangedForLoops.size() << " ranged-for loops\n";
-    }
-
-
 void CoroutineBodyRewriter::collectRangedForLoopReplacements() {
         REWRITE_LOG() << "  DEBUG: Collecting ranged-for loop replacements for " << rangedForLoops.size() << " loops\n";
 
-        // First collect footer insertions for all loops
-        collectRangedForFooterInsertions();
-
         for (const auto &rangedFor: rangedForLoops) {
-            REWRITE_LOG() << "\n=== COLLECTING RANGED-FOR REPLACEMENTS ===\n";
-            REWRITE_LOG() << "    DEBUG: Processing ranged-for loop " << rangedFor.index << "\n";
+            // Delegate all replacement collection to the RangedForLoop struct
+            auto replacements = rangedFor.collectReplacements(
+                sourceManager,
+                [this](const Expr* expr) { return rewriteExpression(expr); },
+                [this](SourceLocation loc) { return getLocForEndOfToken(loc); }
+            );
 
-            // Part 1: Replace the for statement header only
-            collectRangedForHeaderReplacement(rangedFor);
+            // Merge global replacements
+            globalReplacements.insert(
+                globalReplacements.end(),
+                replacements.globalReplacements.begin(),
+                replacements.globalReplacements.end()
+            );
 
-            // Part 2: Insert loop variable construct after opening brace
-            collectRangedForLoopVarConstruct(rangedFor);
-
-            // Part 3: Insert loop variable destroy before closing brace
-            collectRangedForLoopVarDestroy(rangedFor);
-
-            REWRITE_LOG() << "=== END COLLECTING RANGED-FOR REPLACEMENTS ===\n\n";
+            // Merge scope end replacements
+            for (const auto &[fileOffset, replacementList] : replacements.scopeEndReplacements) {
+                scopeEndReplacements[fileOffset].insert(
+                    scopeEndReplacements[fileOffset].end(),
+                    replacementList.begin(),
+                    replacementList.end()
+                );
+            }
         }
 
         REWRITE_LOG() << "  Collected " << rangedForLoops.size() << " ranged-for loop replacements\n";
-    }
-
-
-void CoroutineBodyRewriter::collectRangedForHeaderReplacement(const RangedForLoop &rangedFor) {
-        REWRITE_LOG() << "      DEBUG: Collecting header replacement for ranged-for loop " << rangedFor.index << "\n";
-
-        // Find the range from "for" keyword to the closing parenthesis
-        const CXXForRangeStmt *forStmt = rangedFor.stmt;
-        SourceLocation forLoc = forStmt->getForLoc();
-        SourceLocation rParenLoc = forStmt->getRParenLoc();
-
-        if (forLoc.isValid() && rParenLoc.isValid()) {
-            SourceRange headerRange(forLoc, rParenLoc);
-
-            // Generate the construct calls for __range, __begin, __end followed by the for loop
-            // Use rewriteExpression to handle variable references in the range expression
-            std::string rangeExprRewritten = rewriteExpression(rangedFor.rangeExpr);
-            std::string constructCalls =
-                    makeStateConstructCall(rangedFor.rangeVarName, rangeExprRewritten) + ";\n" +
-                    "    " + makeStateConstructCall(rangedFor.beginVarName, makeStateGetCall(
-                                                                                rangedFor.rangeVarName) + ".begin()") +
-                    ";\n" +
-                    "    " + makeStateConstructCall(rangedFor.endVarName, makeStateGetCall(
-                                                                              rangedFor.rangeVarName) + ".end()") +
-                    ";\n" +
-                    "    for (; " + makeStateGetCall(rangedFor.beginVarName) + " != " + makeStateGetCall(
-                        rangedFor.endVarName) +
-                    "; ++" + makeStateGetCall(rangedFor.beginVarName) + ")";
-
-            int headerPriority = 10000 + static_cast<int>(rangedFor.index);
-            globalReplacements.emplace_back(headerRange, constructCalls, headerPriority, true);
-
-            REWRITE_LOG() << "        Added header replacement with construct calls at "
-                    << headerRange.printToString(sourceManager) << " (priority " << headerPriority << ")\n";
-            REWRITE_LOG() << "        Construct calls: " << constructCalls.substr(0, 100) << "...\n";
-        } else {
-            REWRITE_LOG() << "        ERROR: Invalid for statement locations\n";
-        }
-    }
-
-void CoroutineBodyRewriter::collectRangedForLoopVarConstruct(const RangedForLoop &rangedFor) {
-        REWRITE_LOG() << "      DEBUG: Collecting loop var construct for ranged-for loop " << rangedFor.index << "\n";
-
-        // Find the opening brace of the loop body
-        const Stmt *body = rangedFor.stmt->getBody();
-        if (auto *compoundBody = dyn_cast<CompoundStmt>(body)) {
-            SourceLocation lBraceLoc = compoundBody->getLBracLoc();
-
-            if (lBraceLoc.isValid()) {
-                // Insert after the opening brace
-                SourceLocation insertLoc = getLocForEndOfToken(lBraceLoc);
-                SourceRange insertRange(insertLoc, insertLoc);
-
-                std::string constructCall = "\n    this->state." + rangedFor.loopVarName +
-                                            ".construct(*" + makeStateGetCall(rangedFor.beginVarName) + ");";
-
-                int constructPriority = 20000 + static_cast<int>(rangedFor.index);
-                globalReplacements.emplace_back(insertRange, constructCall, constructPriority, true);
-
-                REWRITE_LOG() << "        Added construct insertion: '" << constructCall << "' after "
-                        << lBraceLoc.printToString(sourceManager) << " (priority " << constructPriority << ")\n";
-            } else {
-                REWRITE_LOG() << "        ERROR: Invalid opening brace location\n";
-            }
-        } else {
-            REWRITE_LOG() << "        ERROR: Loop body is not a compound statement\n";
-        }
-    }
-
-void CoroutineBodyRewriter::collectRangedForLoopVarDestroy(const RangedForLoop &rangedFor) {
-        REWRITE_LOG() << "      DEBUG: Collecting loop var destroy for ranged-for loop " << rangedFor.index << "\n";
-
-        // Find the closing brace of the loop body
-        const Stmt *body = rangedFor.stmt->getBody();
-        if (auto *compoundBody = dyn_cast<CompoundStmt>(body)) {
-            SourceLocation rBraceLoc = compoundBody->getRBracLoc();
-
-            if (rBraceLoc.isValid()) {
-                unsigned fileOffset = sourceManager.getFileOffset(rBraceLoc);
-
-                std::string destroyCall = "    " + makeStateDestroyCall(rangedFor.loopVarName) + ";\n";
-
-                // Use high priority to ensure it comes after regular variable destructors
-                int destroyPriority = 30000 + static_cast<int>(rangedFor.index);
-
-                ScopeEndReplacement replacement;
-                replacement.replacement = destroyCall;
-                replacement.priority = destroyPriority;
-
-                scopeEndReplacements[fileOffset].push_back(replacement);
-
-                REWRITE_LOG() << "        Added destroy insertion: '" << destroyCall << "' before "
-                        << rBraceLoc.printToString(sourceManager) << " (priority " << destroyPriority
-                        << ", file offset " << fileOffset << ")\n";
-            } else {
-                REWRITE_LOG() << "        ERROR: Invalid closing brace location\n";
-            }
-        } else {
-            REWRITE_LOG() << "        ERROR: Loop body is not a compound statement\n";
-        }
     }
 
 std::string CoroutineBodyRewriter::generateExplicitLoopForm(const RangedForLoop &rangedFor) {
@@ -2111,51 +1718,16 @@ void CoroutineBodyRewriter::collectTryCatchReplacements() {
         REWRITE_LOG() << "  DEBUG: Collecting try-catch replacements for " << tryCatchBlocks.size() << " blocks\n";
 
         for (const auto &tryCatch: tryCatchBlocks) {
-            REWRITE_LOG() << "\n=== COLLECTING TRY-CATCH REPLACEMENTS ===\n";
-            REWRITE_LOG() << "    DEBUG: Processing try-catch block " << tryCatch.index << "\n";
+            // Delegate to the TryCatchBlock member function
+            auto replacements = tryCatch.generateReplacements(
+                sourceManager,
+                [this](SourceLocation loc) { return this->getLocForEndOfToken(loc); }
+            );
 
-            // Part 1: Replace "try" keyword with "TRY_BEGIN(index)"
-            if (tryCatch.tryKeywordLoc.isValid()) {
-                SourceLocation tryEnd = getLocForEndOfToken(tryCatch.tryKeywordLoc);
-                SourceRange tryKeywordRange(tryCatch.tryKeywordLoc, tryEnd);
-
-                std::string tryBegin = "TRY_BEGIN(" + std::to_string(std::numeric_limits<size_t>::max() - tryCatch.index) + "ULL);";
-                int tryPriority = 20000 + static_cast<int>(tryCatch.index);
-                globalReplacements.emplace_back(tryKeywordRange, tryBegin, tryPriority, true);
-
-                REWRITE_LOG() << "        Added try keyword replacement with TRY_BEGIN(" << tryCatch.index << ") at "
-                        << tryKeywordRange.printToString(sourceManager) << " (priority " << tryPriority << ")\n";
-            }
-
-            // Part 2: Insert "TRY_END(index)" after the closing brace of try block
-            if (tryCatch.tryBlockEnd.isValid()) {
-                SourceLocation afterBrace = getLocForEndOfToken(tryCatch.tryBlockEnd);
-                SourceRange endRange(afterBrace, afterBrace);
-
-                std::string tryEnd = " TRY_END(" + std::to_string(std::numeric_limits<size_t>::max() - tryCatch.index) + "ULL);";
-                int endPriority = 30000 + static_cast<int>(tryCatch.index) + 1;
-                globalReplacements.emplace_back(endRange, tryEnd, endPriority, false);
-
-                REWRITE_LOG() << "        Added TRY_END(" << tryCatch.index << ") insertion at "
-                        << endRange.printToString(sourceManager) << " (priority " << endPriority << ")\n";
-            }
-
-            // Part 3: Delete all catch clauses (from after try block to end of catch clauses)
-            if (tryCatch.tryBlockEnd.isValid() && tryCatch.catchEnd.isValid()) {
-                SourceLocation catchStart = getLocForEndOfToken(tryCatch.tryBlockEnd);
-                SourceLocation catchEndAfter = getLocForEndOfToken(tryCatch.catchEnd);
-
-                SourceRange catchRange(catchStart, catchEndAfter);
-
-                // Replace all catch clauses with empty string
-                int deletePriority = 20000 + static_cast<int>(tryCatch.index) + 2;
-                globalReplacements.emplace_back(catchRange, "", deletePriority, true);
-
-                REWRITE_LOG() << "        Added catch clause deletion from "
-                        << catchRange.printToString(sourceManager) << " (priority " << deletePriority << ")\n";
-            }
-
-            REWRITE_LOG() << "=== END COLLECTING TRY-CATCH REPLACEMENTS ===\n\n";
+            // Add all replacements to globalReplacements
+            globalReplacements.insert(globalReplacements.end(),
+                                      replacements.begin(),
+                                      replacements.end());
         }
 
         REWRITE_LOG() << "  Collected " << tryCatchBlocks.size() << " try-catch replacements\n";

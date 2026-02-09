@@ -2,7 +2,6 @@
 // Created by kalmbacj on 2025-09-09.
 //
 
-#include <streambuf>
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
@@ -12,222 +11,35 @@
 #include "clang/Rewrite/Core/Rewriter.h"
 #include "clang/AST/Stmt.h"
 #include "clang/Lex/Lexer.h"
-
 #include "llvm/Support/CommandLine.h"
+#include "llvm/IR/InlineAsm.h"
+
 #include <iostream>
 #include <set>
 #include <limits>
 #include <map>
 
-#include "./LocalVariableCollector.h"
-#include "llvm/IR/InlineAsm.h"
+// New modular headers
+#include "Common.h"
+#include "infrastructure/ASTHelpers.h"
+#include "infrastructure/ReplacementApplicator.h"
+#include "structures/CoroutineStructures.h"
+#include "structures/LoopStructures.h"
+#include "structures/TryCatchStructures.h"
+#include "structures/ScopeStructures.h"
+#include "collectors/LocalVariableCollector.h"
+#include "collectors/HelperCollectors.h"
+#include "codegen/MacroCodeGenerator.h"
+
 using namespace clang::tooling;
 using namespace llvm;
 using namespace clang;
 using namespace clang::ast_matchers;
 
-
-class NullBuffer : public std::streambuf {
-protected:
-    // Discard characters by pretending to succeed
-    int overflow(int c) override { return traits_type::not_eof(c); }
-};
-
-// Create a global or local instance
-inline std::ostream& null_stream() {
-    static NullBuffer nullBuffer;
-    static std::ostream nullStream(&nullBuffer);
-    return nullStream;
-}
-
-// Logging macro for fine-grained control
-#define REWRITE_LOG() null_stream()
-#define REWRITE_LOG() std::cout
-
-
-// Helper function to generate state get() call
-static std::string makeStateGetCall(const std::string &varName) {
-    return "CO_GET(" + varName + ")";
-    //return "this->state." + varName + ".get()";
-}
-
-// Helper function to generate state construct() call
-static std::string makeStateConstructCall(const std::string &memberName, const std::string &initializer) {
-    return "this->state." + memberName + ".construct(" + initializer + ")";
-}
-
-// Helper function to generate state destroy() call
-static std::string makeStateDestroyCall(const std::string &memberName) {
-    return "this->state." + memberName + ".destroy()";
-}
-
-// Helper function to generate CO_BRACED_INIT prefix  
-static std::string makeBracedInitPrefix(const std::string &varName, bool isOwning) {
-    if (isOwning) {
-        return "CO_BRACED_INIT_OWNING(" + varName + ", ";
-    } else {
-        return "CO_BRACED_INIT(" + varName + ", ";
-    }
-}
-
-// Helper function to generate CO_PAREN_INIT prefix
-static std::string makeParenInitPrefix(const std::string &varName, bool isOwning) {
-    if (isOwning) {
-        return "CO_PAREN_INIT_OWNING(" + varName + ", ";
-    } else {
-        return "CO_PAREN_INIT(" + varName + ", ";
-    }
-}
-
+// Command-line options
 static llvm::cl::OptionCategory MyToolCategory("coroutine-rewriter");
 static cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 static cl::extrahelp MoreHelp("\nRewrites C++20 coroutines to C++17 compatible state machines.\n");
-
-
-struct RangedForLoop {
-    const CXXForRangeStmt *stmt;
-    std::string loopVarName;
-    std::string loopVarType;
-    Expr *rangeExpr;
-    std::string rangeVarName; // e.g., "__range_0"
-    std::string beginVarName; // e.g., "__begin_0"
-    std::string endVarName; // e.g., "__end_0"
-    unsigned index;
-    SourceRange fullRange;
-};
-
-struct FunctionParameter {
-    std::string name;
-    std::string type;
-    QualType qualType;
-};
-
-struct TryCatchBlock {
-    const CXXTryStmt *tryStmt;
-    unsigned index;
-    SourceLocation tryKeywordLoc;
-    SourceLocation tryBlockStart;  // Opening brace of try block
-    SourceLocation tryBlockEnd;    // Closing brace of try block
-    std::vector<std::string> catchClauses;  // Transformed catch clause bodies
-    SourceLocation catchEnd;       // End of all catch clauses
-    std::vector<std::string> variablesInTryBlock;  // Variables declared inside this try block, in reverse order
-};
-
-struct TemporaryInfo {
-    const MaterializeTemporaryExpr *expr; // The MaterializeTemporaryExpr node
-    std::string tempVarName;             // e.g., temp_1_0
-    QualType type;                       // Type of the temporary
-    SourceLocation constructLoc;         // Where to insert the CO_INIT macro
-    std::string initArgs;                // Arguments for the initialization
-    bool isBracedInit;                   // true for CO_BRACED_INIT_OWNING, false for CO_PAREN_INIT_OWNING
-};
-
-struct CoroutineStatement {
-    enum Type { YIELD, AWAIT, RETURN };
-
-    Type type;
-    const Stmt *stmt; // CoawaitExpr*, CoyieldExpr*, or CoreturnStmt*
-    const Expr *operand; // The expression being yielded/awaited/returned
-    unsigned index;
-    SourceLocation keywordLoc;
-    SourceLocation operandStart;
-    SourceLocation operandEnd;
-    bool needsBuffering = false; // True if operand is a temporary (not used for RETURN)
-    QualType bufferType; // Type for the buffer when needsBuffering is true
-    std::vector<std::string> aliveVariables; // Variables alive at this suspension point, in reverse order of declaration
-    std::vector<TemporaryInfo> temporaries; // Subexpression temporaries that need lifetime extension
-};
-
-
-struct CoroutineInfo {
-    const FunctionDecl *function;
-    std::set<LocalVariable> localVariables;
-    std::vector<RangedForLoop> rangedForLoops; // Add ranged-for loop info
-    std::vector<TryCatchBlock> tryCatchBlocks; // Add try-catch block info
-    std::vector<CoroutineStatement> coroutineStatements; // Add coroutine suspension points
-    std::vector<FunctionParameter> parameters; // Function parameters
-    SourceLocation insertionPoint;
-    bool hasError = false;
-
-    // Member function information
-    bool isMemberFunction = false;
-    bool isConstMemberFunction = false;
-    std::string className;
-
-    // Lambda information
-    bool isLambda = false;
-    const LambdaExpr *lambdaExpr = nullptr;
-
-    // Temporary type information for yield buffer
-    std::vector<QualType> yieldedOrAwaitedTemporaries;
-
-    // Mapping from variable declaration location to member name (for handling shadowing)
-    std::map<SourceLocation, std::string> declLocationToMemberName;
-};
-
-
-struct ScopeInfo {
-    const CompoundStmt *compoundStmt;
-    std::vector<std::string> variablesInScope;
-    SourceLocation scopeEnd;
-
-    // Loop tracking information
-    bool isLoopScope = false;
-    bool isLoopBodyScope = false;  // true if this is the body of a loop (not the header/init)
-    const Stmt *loopStmt = nullptr;  // The loop statement this scope belongs to
-};
-
-struct ScopeEndReplacement {
-    std::string replacement;
-    int priority;
-    bool insertAfterBrace = false;
-
-    bool operator<(const ScopeEndReplacement &other) const {
-        return insertAfterBrace != other.insertAfterBrace ? other.insertAfterBrace : priority < other.priority;
-    }
-};
-
-// The bool means `true` for replace, `false` for insert after the beginning.
-using Replacement = std::tuple<SourceRange, std::string, bool>;
-
-// Helper visitor to collect MaterializeTemporaryExpr nodes from an expression
-class TemporaryCollector : public RecursiveASTVisitor<TemporaryCollector> {
-private:
-    std::vector<const MaterializeTemporaryExpr*> &temporaries;
-
-public:
-    explicit TemporaryCollector(std::vector<const MaterializeTemporaryExpr*> &temps)
-        : temporaries(temps) {}
-
-    bool VisitMaterializeTemporaryExpr(MaterializeTemporaryExpr *matTemp) {
-        temporaries.push_back(matTemp);
-        return true;
-    }
-};
-
-// Helper visitor to collect variable references with their declaration locations
-class VariableReferenceCollector : public RecursiveASTVisitor<VariableReferenceCollector> {
-private:
-    std::vector<std::pair<SourceRange, SourceLocation>> &references; // (reference location, decl location)
-    const std::set<std::string> &variableNames;
-
-public:
-    VariableReferenceCollector(std::vector<std::pair<SourceRange, SourceLocation>> &refs,
-                               const std::set<std::string> &varNames)
-        : references(refs), variableNames(varNames) {}
-
-    bool VisitDeclRefExpr(DeclRefExpr *declRef) {
-        if (auto *varDecl = dyn_cast<VarDecl>(declRef->getDecl())) {
-            std::string varName = varDecl->getNameAsString();
-            if (variableNames.count(varName)) {
-                SourceRange refRange = declRef->getSourceRange();
-                SourceLocation declLoc = varDecl->getLocation();
-                references.push_back({refRange, declLoc});
-            }
-        }
-        return true;
-    }
-};
 
 class CoroutineBodyRewriter : public RecursiveASTVisitor<CoroutineBodyRewriter> {
 private:
@@ -2496,117 +2308,9 @@ public:
     }
 
     void applyAllReplacements() {
-        REWRITE_LOG() << "\n=== APPLYING ALL REPLACEMENTS WITH PRIORITY ===\n";
-        REWRITE_LOG() << "  DEBUG: Sorting and applying " << globalReplacements.size() << " replacements\n";
-
-        // Sort ALL replacements by position first, then by priority
-        std::stable_sort(globalReplacements.begin(), globalReplacements.end(),
-                         [&](auto &a,
-                             const auto &b) {
-                             const auto& [rangeA, replA, priorityA, isReplaceA] = a;
-                             const auto& [rangeB, replB, priorityB, isReplaceB] = b;
-                             unsigned offsetA = sourceManager.getFileOffset(rangeA.getBegin());
-                             unsigned offsetB = sourceManager.getFileOffset(rangeB.getBegin());
-
-                             if (offsetA != offsetB) {
-                                 return offsetA > offsetB; // Reverse order for position safety
-                             }
-
-                             // Same position - sort by priority in ascending order
-                             if (priorityA != priorityB) {
-                                 return priorityA < priorityB;
-                             }
-
-                             if (isReplaceA != isReplaceB) {
-                                 llvm::errs() << "Trying to insert at the same position, this shouldn't happen. " <<  "\n";
-                             }
-                             return std::get<1>(a) < std::get<1>(b); // Sort by replacement text in ascending order
-                         });
-        // Deduplicate, such that the arbitrary redundant visits don't appear.
-        globalReplacements.erase(std::unique(globalReplacements.begin(), globalReplacements.end()),
-                                 globalReplacements.end());
-
-        auto isEmptyRange = [](const SourceManager &SM, SourceRange Range) {
-            SourceLocation Begin = SM.getSpellingLoc(Range.getBegin());
-            SourceLocation End = SM.getSpellingLoc(Range.getEnd());
-            return Begin == End;
-        };
-        auto doRewrite = [&](const auto &buf) {
-            //bool isEmpty = isEmptyRange(sourceManager, std::get<0>(buf));
-            bool isEmpty = !std::get<3>(buf);
-            REWRITE_LOG() << " Applying at " << std::get<0>(buf).printToString(
-                        sourceManager)
-                    << " (priority " << std::get<2>(buf) << "), empty: " << isEmpty << ": '" << std::get<1>(buf) <<
-                    "'\n";
-            if (isEmpty) {
-                rewriter.InsertText(std::get<0>(buf).getBegin(), std::get<1>(buf));
-            } else {
-                rewriter.ReplaceText(std::get<0>(buf), std::get<1>(buf));
-            }
-        };
-        // Apply all replacements in the determined order
-        std::optional<std::tuple<SourceRange, std::string, int, bool> > buffer;
-        for (size_t i = 0; i < globalReplacements.size(); ++i) {
-            auto &replacement = globalReplacements[i];
-
-            if (!buffer.has_value()) {
-                buffer = std::move(replacement);
-                continue;
-            }
-
-            // Check if this replacement should be combined with the buffered one
-            bool shouldCombine = false;
-            SourceRange combinedRange = std::get<0>(*buffer);
-
-            if (std::get<0>(*buffer) == std::get<0>(replacement)) {
-                // Exact same range
-                shouldCombine = true;
-            } else {
-                SourceLocation bufferBegin = std::get<0>(*buffer).getBegin();
-                SourceLocation bufferEnd = std::get<0>(*buffer).getEnd();
-                SourceLocation replBegin = std::get<0>(replacement).getBegin();
-                SourceLocation replEnd = std::get<0>(replacement).getEnd();
-
-                if (bufferBegin == replBegin) {
-                    // Same start position - combine and use the wider range
-                    shouldCombine = true;
-                    if (sourceManager.isBeforeInTranslationUnit(bufferEnd, replEnd)) {
-                        combinedRange.setEnd(replEnd);
-                    }
-                } else if (bufferEnd == replBegin) {
-                    // Adjacent - replacement starts where buffer ends
-                    shouldCombine = true;
-                    combinedRange.setEnd(replEnd);
-                }
-            }
-
-            if (!shouldCombine) {
-                // Different source range - apply the buffered replacement
-                doRewrite(*buffer);
-                buffer = std::move(replacement);
-                continue;
-            }
-
-            // Same or overlapping source range - combine the replacements (higher priority first)
-            std::get<0>(*buffer) = combinedRange;
-            std::get<1>(*buffer) += std::get<1>(replacement);
-            // If any replacement is a true replacement (not insertion), mark the combined result as replacement
-            if (std::get<3>(replacement)) {
-                std::get<3>(*buffer) = true;
-            }
-            REWRITE_LOG() << "    [" << i << "] Combined with priority " << std::get<2>(replacement)
-                    << ": '" << std::get<1>(replacement) << "', isReplace=" << std::get<3>(replacement)
-                    << ", combinedRange=" << combinedRange.printToString(sourceManager) << "\n";
-        }
-
-        // Apply the final buffered replacement
-        if (buffer.has_value()) {
-            doRewrite(*buffer);
-            rewriter.ReplaceText(std::get<0>(*buffer), std::get<1>(*buffer));
-        }
-
-        REWRITE_LOG() << "  Applied " << globalReplacements.size() << " replacements with priority sorting\n";
-        REWRITE_LOG() << "=== END APPLYING ALL REPLACEMENTS ===\n\n";
+        // Use the generic ReplacementApplicator infrastructure
+        ReplacementApplicator applicator(rewriter, sourceManager);
+        applicator.applyReplacements(globalReplacements);
     }
 
     /*

@@ -62,6 +62,7 @@ private:
 
     // Private helper methods
     void buildDeclLocationMapping();
+    SourceLocation getLocForEndOfToken(SourceLocation loc);
     InitializationForm getInitializationForm(const VarDecl *varDecl);
     std::optional<SourceRange> handleParenthesizedInitialization(const VarDecl *varDecl);
     SourceLocation findClosingParen(SourceLocation startLoc);

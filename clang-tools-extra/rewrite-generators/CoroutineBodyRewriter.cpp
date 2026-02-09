@@ -53,6 +53,12 @@ void CoroutineBodyRewriter::buildDeclLocationMapping() {
         }
     }
 
+    // Helper function to get the location after the end of a token
+    // Wraps Lexer::getLocForEndOfToken with consistent parameters
+SourceLocation CoroutineBodyRewriter::getLocForEndOfToken(SourceLocation loc) {
+        return Lexer::getLocForEndOfToken(loc, 0, sourceManager, LangOptions());
+    }
+
     // Track compound statements (scopes) - using Traverse for proper pre/post hooks
 bool CoroutineBodyRewriter::TraverseCompoundStmt(CompoundStmt *compoundStmt) {
         // ===== PRE-TRAVERSAL (before children are visited) =====
@@ -183,7 +189,7 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
 
                                 // Replace everything from last child end to init end with closing paren
                                 SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
-                                SourceLocation afterLastChild = Lexer::getLocForEndOfToken(childrenRange->getEnd(), 0, sourceManager, LangOptions());
+                                SourceLocation afterLastChild = getLocForEndOfToken(childrenRange->getEnd());
                                 assert(afterLastChild.isValid() && "Invalid location for last child end");
                                 SourceRange suffixRange(afterLastChild, initEnd);
                                 declReplacements.emplace_back(suffixRange, ")", true);
@@ -205,8 +211,8 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                                 processParenthesizedArguments(varDecl);
 
                                 // Find the actual closing parenthesis of the initialization
-                                SourceLocation afterLastChild = Lexer::getLocForEndOfToken(childrenRange->getEnd(), 0, sourceManager, LangOptions());
-                                
+                                SourceLocation afterLastChild = getLocForEndOfToken(childrenRange->getEnd());
+
                                 // Search for the closing parenthesis after the last argument
                                 SourceLocation closingParen = findClosingParen(afterLastChild);
                                 if (closingParen.isValid()) {
@@ -232,7 +238,7 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
 
                             // Add closing parenthesis at the end
                             SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
-                            SourceLocation afterInit = Lexer::getLocForEndOfToken(initEnd, 0, sourceManager, LangOptions());
+                            SourceLocation afterInit = getLocForEndOfToken(initEnd);
                              assert(afterInit.isValid() && "Invalid location for last child end");
                             SourceRange closingRange(afterInit, afterInit);
                             declReplacements.emplace_back(closingRange, ")", false);
@@ -1548,8 +1554,7 @@ void CoroutineBodyRewriter::collectYieldOrAwaitReplacement(const CoroutineStatem
         }
 
         // Replace just the keyword
-        SourceLocation keywordEnd = Lexer::getLocForEndOfToken(
-            coroStmt.keywordLoc, 0, sourceManager, LangOptions());
+        SourceLocation keywordEnd = getLocForEndOfToken(coroStmt.keywordLoc);
         SourceRange keywordRange(coroStmt.keywordLoc, keywordEnd);
         globalReplacements.emplace_back(keywordRange, macroStart, priority, true);
 
@@ -1607,8 +1612,7 @@ void CoroutineBodyRewriter::collectYieldOrAwaitReplacement(const CoroutineStatem
                 } else {
                     // Fallback: wrap the entire expression
                     SourceLocation tempStart = tempSubExpr->getBeginLoc();
-                    SourceLocation tempEnd = Lexer::getLocForEndOfToken(
-                        tempSubExpr->getEndLoc(), 0, sourceManager, LangOptions());
+                    SourceLocation tempEnd = getLocForEndOfToken(tempSubExpr->getEndLoc());
 
                     SourceRange macroStartRange(tempStart, tempStart);
                     globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
@@ -1637,7 +1641,7 @@ void CoroutineBodyRewriter::collectYieldOrAwaitReplacement(const CoroutineStatem
                         globalReplacements.emplace_back(lparenRange, "", tempPriorityBase + 1, true);
 
                         // Delete the closing paren and insert closing paren for macro
-                        SourceLocation afterRParen = Lexer::getLocForEndOfToken(rparenLoc, 0, sourceManager, LangOptions());
+                        SourceLocation afterRParen = getLocForEndOfToken(rparenLoc);
                         SourceRange rparenRange(rparenLoc, afterRParen);
                         globalReplacements.emplace_back(rparenRange, ")", tempPriorityBase + 2, true);
 
@@ -1645,8 +1649,7 @@ void CoroutineBodyRewriter::collectYieldOrAwaitReplacement(const CoroutineStatem
                     } else {
                         // Fallback: just wrap
                         SourceLocation tempStart = tempSubExpr->getBeginLoc();
-                        SourceLocation tempEnd = Lexer::getLocForEndOfToken(
-                            tempSubExpr->getEndLoc(), 0, sourceManager, LangOptions());
+                        SourceLocation tempEnd = getLocForEndOfToken(tempSubExpr->getEndLoc());
 
                         SourceRange macroStartRange(tempStart, tempStart);
                         globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
@@ -1659,8 +1662,7 @@ void CoroutineBodyRewriter::collectYieldOrAwaitReplacement(const CoroutineStatem
                 } else {
                     // Not a paren expression - just wrap
                     SourceLocation tempStart = tempSubExpr->getBeginLoc();
-                    SourceLocation tempEnd = Lexer::getLocForEndOfToken(
-                        tempSubExpr->getEndLoc(), 0, sourceManager, LangOptions());
+                    SourceLocation tempEnd = getLocForEndOfToken(tempSubExpr->getEndLoc());
 
                     SourceRange macroStartRange(tempStart, tempStart);
                     globalReplacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
@@ -1675,8 +1677,7 @@ void CoroutineBodyRewriter::collectYieldOrAwaitReplacement(const CoroutineStatem
 
         // Insert closing parenthesis after the operand (before the semicolon)
         if (coroStmt.operand) {
-            SourceLocation operandEnd = Lexer::getLocForEndOfToken(
-                coroStmt.operandEnd, 0, sourceManager, LangOptions());
+            SourceLocation operandEnd = getLocForEndOfToken(coroStmt.operandEnd);
 
             // Insert closing paren before the semicolon (right after the operand)
             SourceRange parenRange(operandEnd, operandEnd);
@@ -1690,8 +1691,7 @@ void CoroutineBodyRewriter::collectYieldOrAwaitReplacement(const CoroutineStatem
         // Find the location to insert destructor calls (after the semicolon)
         // Strategy: start from statement end, skip any semicolons, and insert before the first non-semicolon token
         SourceLocation stmtEnd = coroStmt.stmt->getEndLoc();
-        SourceLocation searchStart = Lexer::getLocForEndOfToken(
-            stmtEnd, 0, sourceManager, LangOptions());
+        SourceLocation searchStart = getLocForEndOfToken(stmtEnd);
 
         REWRITE_LOG() << "      DEBUG: Statement end location: " << stmtEnd.printToString(sourceManager) << "\n";
 
@@ -1707,8 +1707,7 @@ void CoroutineBodyRewriter::collectYieldOrAwaitReplacement(const CoroutineStatem
 
             if (nextTokOpt->is(tok::semi)) {
                 // Found a semicolon, move past it and continue searching
-                searchStart = Lexer::getLocForEndOfToken(
-                    nextTokOpt->getLocation(), 0, sourceManager, LangOptions());
+                searchStart = getLocForEndOfToken(nextTokOpt->getLocation());
                 insertionPointAfterSemicolon = searchStart;
                 REWRITE_LOG() << "      DEBUG: Found semicolon at " << nextTokOpt->getLocation().printToString(sourceManager)
                              << ", will insert after it\n";
@@ -1752,8 +1751,7 @@ void CoroutineBodyRewriter::collectCoroutineStatementReplacements() {
                 REWRITE_LOG() << "    DEBUG: Collecting co_return replacement for index " << coroStmt.index << "\n";
 
                 int priority = static_cast<int>(coroStmt.index);
-                SourceLocation keywordEnd = Lexer::getLocForEndOfToken(
-                    coroStmt.keywordLoc, 0, sourceManager, LangOptions());
+                SourceLocation keywordEnd = getLocForEndOfToken(coroStmt.keywordLoc);
 
                 if (!coroStmt.operand) {
                     // Case 1: co_return; (no operand) -> CO_RETURN_VOID(index);
@@ -1776,8 +1774,7 @@ void CoroutineBodyRewriter::collectCoroutineStatementReplacements() {
                         globalReplacements.emplace_back(keywordRange, "", priority, true);
 
                         // Insert "; CO_RETURN_VOID(index)" after the operand
-                        SourceLocation operandEnd = Lexer::getLocForEndOfToken(
-                            coroStmt.operandEnd, 0, sourceManager, LangOptions());
+                        SourceLocation operandEnd = getLocForEndOfToken(coroStmt.operandEnd);
                         SourceRange insertRange(operandEnd, operandEnd);
                         std::string insertion = "; CO_RETURN_VOID(" + std::to_string(coroStmt.index) + ")";
                         globalReplacements.emplace_back(insertRange, insertion, priority + 1000, false);
@@ -1791,8 +1788,7 @@ void CoroutineBodyRewriter::collectCoroutineStatementReplacements() {
                         globalReplacements.emplace_back(keywordRange, macroStart, priority, true);
 
                         // Insert "))" after the operand
-                        SourceLocation operandEnd = Lexer::getLocForEndOfToken(
-                            coroStmt.operandEnd, 0, sourceManager, LangOptions());
+                        SourceLocation operandEnd = getLocForEndOfToken(coroStmt.operandEnd);
                         SourceRange parenRange(operandEnd, operandEnd);
                         globalReplacements.emplace_back(parenRange, "))", priority + 1000, false);
                     }
@@ -1923,7 +1919,7 @@ void CoroutineBodyRewriter::collectRangedForLoopVarConstruct(const RangedForLoop
 
             if (lBraceLoc.isValid()) {
                 // Insert after the opening brace
-                SourceLocation insertLoc = Lexer::getLocForEndOfToken(lBraceLoc, 0, sourceManager, LangOptions());
+                SourceLocation insertLoc = getLocForEndOfToken(lBraceLoc);
                 SourceRange insertRange(insertLoc, insertLoc);
 
                 std::string constructCall = "\n    this->state." + rangedFor.loopVarName +
@@ -2120,8 +2116,7 @@ void CoroutineBodyRewriter::collectTryCatchReplacements() {
 
             // Part 1: Replace "try" keyword with "TRY_BEGIN(index)"
             if (tryCatch.tryKeywordLoc.isValid()) {
-                SourceLocation tryEnd = Lexer::getLocForEndOfToken(
-                    tryCatch.tryKeywordLoc, 0, sourceManager, LangOptions());
+                SourceLocation tryEnd = getLocForEndOfToken(tryCatch.tryKeywordLoc);
                 SourceRange tryKeywordRange(tryCatch.tryKeywordLoc, tryEnd);
 
                 std::string tryBegin = "TRY_BEGIN(" + std::to_string(std::numeric_limits<size_t>::max() - tryCatch.index) + "ULL);";
@@ -2134,8 +2129,7 @@ void CoroutineBodyRewriter::collectTryCatchReplacements() {
 
             // Part 2: Insert "TRY_END(index)" after the closing brace of try block
             if (tryCatch.tryBlockEnd.isValid()) {
-                SourceLocation afterBrace = Lexer::getLocForEndOfToken(
-                    tryCatch.tryBlockEnd, 0, sourceManager, LangOptions());
+                SourceLocation afterBrace = getLocForEndOfToken(tryCatch.tryBlockEnd);
                 SourceRange endRange(afterBrace, afterBrace);
 
                 std::string tryEnd = " TRY_END(" + std::to_string(std::numeric_limits<size_t>::max() - tryCatch.index) + "ULL);";
@@ -2148,10 +2142,8 @@ void CoroutineBodyRewriter::collectTryCatchReplacements() {
 
             // Part 3: Delete all catch clauses (from after try block to end of catch clauses)
             if (tryCatch.tryBlockEnd.isValid() && tryCatch.catchEnd.isValid()) {
-                SourceLocation catchStart = Lexer::getLocForEndOfToken(
-                    tryCatch.tryBlockEnd, 0, sourceManager, LangOptions());
-                SourceLocation catchEndAfter = Lexer::getLocForEndOfToken(
-                    tryCatch.catchEnd, 0, sourceManager, LangOptions());
+                SourceLocation catchStart = getLocForEndOfToken(tryCatch.tryBlockEnd);
+                SourceLocation catchEndAfter = getLocForEndOfToken(tryCatch.catchEnd);
 
                 SourceRange catchRange(catchStart, catchEndAfter);
 

@@ -8,9 +8,10 @@ set(LLVM_LINK_COMPONENTS support)
 # See REFACTORING.md for details
 
 add_clang_executable(rewrite-generators
+        Main.cpp
         RewriteGenerators.cpp
-        # Note: Header-only modular files are included via #include
-        # Future .cpp files from refactoring will be added here
+        # Note: CoroutineBodyRewriter.cpp and CoroutineRewriter.cpp are included via #include
+        # to maintain current compilation structure. These can be compiled separately in future.
 )
 
 target_link_libraries(rewrite-generators

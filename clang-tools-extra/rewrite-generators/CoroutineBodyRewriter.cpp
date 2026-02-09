@@ -582,7 +582,7 @@ std::string CoroutineBodyRewriter::processCatchClause(const CXXCatchStmt *catchS
                 continue; // Skip if not in mapping
             }
             std::string memberName = it->second;
-            std::string replacement = makeStateGetCall(memberName);
+            std::string replacement = makeGetCallInsideState(memberName);
 
             // Calculate positions relative to the block start
             unsigned refStartOffset = sourceManager.getFileOffset(refRange.getBegin());

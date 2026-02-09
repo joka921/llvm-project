@@ -429,6 +429,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
             // Add handleException function
             structCode += "\n    void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {\n";
+            structCode += "        destroyBecausOfExceptionHandling(activeTryBlocks.back());\n";
             structCode += "      nextState = dispatchExceptionHandling(std::move(eptr));\n";
             structCode += "      resume();\n";
             structCode += "    }\n";
@@ -483,7 +484,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                 structCode += "        case " + std::to_string(tryCatch.index) + ":\n";
                 // Destroy all variables in this try block in reverse order
                 for (const auto &varName : tryCatch.variablesInTryBlock) {
-                    structCode += "          if (state." + varName + ".constructed) state." + varName + ".destroy();\n";
+                    structCode += "          if (" + varName + ".constructed) { " + varName + ".destroy(); }\n";
                 }
                 structCode += "          break;\n";
             }

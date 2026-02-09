@@ -194,6 +194,7 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
     std::vector<size_t> activeTryBlocks;
 
     void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {
+        destroyBecauseOfExceptionHandling(activeTryBlocks.back());
       nextState = dispatchExceptionHandling(std::move(eptr));
       resume();
     }
@@ -213,9 +214,9 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
         try {
           std::rethrow_exception(eptr);
         } catch (class std::exception & e) {
-    std::cout << "Caught exception: " << e.what() << " x=" << CO_GET(x) << std::endl;
+    std::cout << "Caught exception: " << e.what() << " x=" << CO_GET_STATE(x) << std::endl;
   } catch (...) {
-    std::cout << "Caught unknown exception, x=" << CO_GET(x) << std::endl;
+    std::cout << "Caught unknown exception, x=" << CO_GET_STATE(x) << std::endl;
   } 
         return nextState;
       };
@@ -234,9 +235,9 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
     void destroyBecauseOfException(size_t tryCatchBlockIndex) {
       switch (tryCatchBlockIndex) {
         case 0:
-          if (state.y.constructed) state.y.destroy();
-          if (state.i.constructed) state.i.destroy();
-          if (state.z.constructed) state.z.destroy();
+          if (y.constructed) { y.destroy(); }
+          if (i.constructed) { i.destroy(); }
+          if (z.constructed) { z.destroy(); }
           break;
         default: break;
       }
@@ -265,29 +266,27 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
   };
 
   using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER_WITH_TRY(_ActualCoroType, _detail_coro_impl)
-      CO_PAREN_INIT_OWNING(x, 42);
-      TRY_BEGIN(18446744073709551615ULL); {
-        CO_PAREN_INIT_OWNING(y, CO_GET(x) + 1);
-        CO_YIELD(1, CO_GET(y));
-        CO_PAREN_INIT_OWNING(i, 15);
-        while (CO_GET(i)) {
-          CO_PAREN_INIT_OWNING(z, CO_GET(y) + 1);
-          CO_YIELD(2, CO_GET(z));
-          --CO_GET(i);
-          this->state.z.destroy();
-        }
-        this->state.i.destroy();
-        this->state.y.destroy();
-      }
-      TRY_END(18446744073709551615ULL);
-      CO_YIELD(3, CO_GET(x));
-      CO_RETURN_VOID(4);
-      this->state.x.destroy();
-      CO_RETURN_FALLOFF(5);
-  COROUTINE_FOOTER_WITH_TRY()
+  COROUTINE_HEADER_WITH_TRY(_ActualCoroType, _detail_coro_impl) 
+  CO_PAREN_INIT_OWNING(x,  42);
+  TRY_BEGIN(18446744073709551615ULL); {
+    CO_PAREN_INIT_OWNING(y,  CO_GET(x) + 1);
+    CO_YIELD(1,  CO_GET(y));
+    CO_PAREN_INIT_OWNING(i,  15);
+    while (CO_GET(i)) {
+      CO_PAREN_INIT_OWNING(z,  CO_GET(y) + 1);
+      CO_YIELD(2,  CO_GET(z));
+      --CO_GET(i);
+        this->state.z.destroy();
 }
-
+      this->state.i.destroy();
+    this->state.y.destroy();
+} TRY_END(18446744073709551615ULL);
+  CO_YIELD(3,  CO_GET(x));
+  CO_RETURN_VOID(4);
+    this->state.x.destroy();
+CO_RETURN_FALLOFF(5);
+COROUTINE_FOOTER_WITH_TRY()
+}
 
 int main() {
   for (auto &i : testTryCatch()) {

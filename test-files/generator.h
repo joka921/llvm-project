@@ -278,6 +278,40 @@ namespace cppcoro {
     } // namespace detail
 } // namespace cppcoro
 
+namespace coro_detail {
+  template<typename Promise, typename Expr, typename = void>
+  struct has_await_transform : std::false_type {};
+
+  template<typename Promise, typename Expr>
+  struct has_await_transform<Promise, Expr,
+    std::void_t<decltype(std::declval<Promise&>()
+      .await_transform(std::declval<Expr>()))>>
+    : std::true_type {};
+
+  template<typename Promise, typename Expr>
+  decltype(auto) get_awaitable(Promise& promise, Expr&& expr) {
+    if constexpr (has_await_transform<Promise, Expr>::value) {
+      return promise.await_transform(std::forward<Expr>(expr));
+    } else {
+      return std::forward<Expr>(expr);
+    }
+  }
+  template<typename P, typename = void>
+  struct has_promise_new : std::false_type {};
+  template<typename P>
+  struct has_promise_new<P,
+    std::void_t<decltype(P::operator new(size_t{}))>>
+    : std::true_type {};
+
+  template<typename P, typename = void>
+  struct has_promise_delete : std::false_type {};
+  template<typename P>
+  struct has_promise_delete<P,
+    std::void_t<decltype(P::operator delete(
+      std::declval<void*>(), size_t{}))>>
+    : std::true_type {};
+} // namespace coro_detail
+
 struct HandleFrame {
     using F = void(void *);
     using B = bool(void *);
@@ -292,14 +326,12 @@ struct Handle {
     HandleFrame *ptr;
     void resume() { ptr->resumeFunc(ptr->target); }
 
+    static constexpr size_t promise_offset =
+        (sizeof(HandleFrame) + alignof(Promise) - 1) & ~(alignof(Promise) - 1);
+
     static Handle from_promise(Promise &p) {
-        // TODO<joka921> This has to take into account the alignment.
-        auto ptr = reinterpret_cast<HandleFrame *>(reinterpret_cast<char *>(&p) -
-                                                   sizeof(HandleFrame));
-        /*
-        std::cerr << "Address of frame computed " << reinterpret_cast<intptr_t>(ptr)
-                  << std::endl;
-                  */
+        auto *ptr = reinterpret_cast<HandleFrame *>(reinterpret_cast<char *>(&p) -
+                                                    promise_offset);
         return Handle{ptr};
     }
 
@@ -307,15 +339,14 @@ struct Handle {
 
     bool done() const { return ptr->doneFunc(ptr->target); }
 
-    // TODO<joka921> This has to take into account the alignment.
     Promise &promise() {
         return *reinterpret_cast<Promise *>(reinterpret_cast<char *>(ptr) +
-                                            sizeof(HandleFrame));
+                                            promise_offset);
     }
 
     const Promise &promise() const {
-        return *reinterpret_cast<Promise *>(reinterpret_cast<char *>(ptr) +
-                                            sizeof(HandleFrame));
+        return *reinterpret_cast<const Promise *>(reinterpret_cast<const char *>(ptr) +
+                                                  promise_offset);
     }
 
     void destroy() { ptr->destroyFunc(ptr->target); }
@@ -329,7 +360,6 @@ bool co_await_impl(auto &&awaiter, auto handle) {
         return true;
     }
     using type = decltype(awaiter.await_suspend(handle));
-    static_assert(std::is_void_v<decltype(awaiter.await_resume())>);
     if constexpr (std::is_void_v<type>) {
         awaiter.await_suspend(handle);
         return false;
@@ -352,7 +382,6 @@ bool co_await_impl(auto &&awaiter, auto handle) {
   [[fallthrough]];                                        \
   case index:
 
-// TODO<joka921> Handle the case of `final_suspend` not suspending. (we have some destruction to do).
 #define CO_RETURN_VOID(index) \
   {                                                \
    this->curState = index; \
@@ -362,7 +391,23 @@ bool co_await_impl(auto &&awaiter, auto handle) {
    if (!co_await_impl(promise().final_suspend(), Hdl::from_promise(pt))) { \
      return; \
    } \
+   Hdl::from_promise(pt).destroy(); \
+   return; \
    } void()
+
+#define CO_RETURN_VALUE(index, value)                           \
+  {                                                              \
+    this->curState = index;                                      \
+    promise().return_value(value);                               \
+    this->state.destroySuspendedCoro(this->curState);            \
+    this->done_ = true;                                          \
+    if (!co_await_impl(promise().final_suspend(),                \
+                       Hdl::from_promise(pt))) {                 \
+      return;                                                    \
+    }                                                            \
+    Hdl::from_promise(pt).destroy();                             \
+    return;                                                      \
+  } void()
 
 // TODO<joka921> handle the case of there being no `promise().return_void()`
 #define CO_RETURN_FALLOFF(index) CO_RETURN_VOID(index)
@@ -399,8 +444,47 @@ namespace blubbi {
       __yield_buffer_ptr_ ##index -> ~ BufT ## index(); \
     } void()
 
+#define CO_AWAIT_VOID(index, awaiter_expr)                      \
+  {                                                              \
+    auto&& __awaiter = awaiter_expr;                             \
+    this->curState = index;                                      \
+    if (!co_await_impl(__awaiter, Hdl::from_promise(pt))) {      \
+      return;                                                    \
+    }                                                            \
+  }                                                              \
+  [[fallthrough]];                                               \
+  case index:
 
+#define CO_AWAIT_SUSPEND(index, awaiter_storage, awaiter_expr)   \
+  {                                                              \
+    this->state.awaiter_storage.construct(awaiter_expr);         \
+    this->curState = index;                                      \
+    if (!co_await_impl(CO_GET(awaiter_storage),                  \
+                       Hdl::from_promise(pt))) {                 \
+      return;                                                    \
+    }                                                            \
+  }                                                              \
+  [[fallthrough]];                                               \
+  case index:
 
+#define CO_AWAIT_BUFFERED(type, index, value)                    \
+  {                                                              \
+    using BufT##index = REMOVE_PARENS(type);                     \
+    auto* __buf_##index = new(state.awaitBuffer)                 \
+                          BufT##index(value);                    \
+    auto&& __awaiter = *__buf_##index;                           \
+    this->curState = index;                                      \
+    if (!co_await_impl(__awaiter, Hdl::from_promise(pt))) {      \
+      return;                                                    \
+    }                                                            \
+  }                                                              \
+  [[fallthrough]];                                               \
+  case index:                                                    \
+  {                                                              \
+    using BufT##index = REMOVE_PARENS(type);                     \
+    reinterpret_cast<BufT##index*>(state.awaitBuffer)            \
+      ->~BufT##index();                                          \
+  } void()
 
 template<typename Derived, typename PromiseType>
 struct CoroImpl {
@@ -410,7 +494,7 @@ struct CoroImpl {
     static void CHECK() {
         static_assert(offsetof(CoroImpl, pt) -
                       offsetof(CoroImpl, frm) ==
-                      sizeof(HandleFrame));
+                      Handle<PromiseType>::promise_offset);
     }
 
     size_t curState = 0;
@@ -427,8 +511,16 @@ struct CoroImpl {
 
     static void resume(void *blubb) { cast(blubb)->doStep(); }
 
-    // TODO<joka921> Allocator support.
-    static void destroy(void *blubb) { delete (cast(blubb)); }
+    static void destroy(void *blubb) {
+        auto* self = cast(blubb);
+        if constexpr (coro_detail::has_promise_delete<PromiseType>::value) {
+            self->~Derived();
+            PromiseType::operator delete(
+                static_cast<void*>(self), sizeof(Derived));
+        } else {
+            delete self;
+        }
+    }
 
     static bool done( void *blubb) {
         return cast(blubb)->done_;
@@ -477,7 +569,15 @@ case 0:
   }                      \
   }                      \
   ;                      \
-  auto* frame = new GeneratorStateMachine{{}, {__VA_ARGS__}};  \
+  auto* frame = [&]() {                                          \
+    if constexpr (coro_detail::has_promise_new<PromiseType>::value) { \
+      void* mem = PromiseType::operator new(                     \
+        sizeof(GeneratorStateMachine));                           \
+      return new (mem) GeneratorStateMachine{{}, {__VA_ARGS__}}; \
+    } else {                                                     \
+      return new GeneratorStateMachine{{}, {__VA_ARGS__}};       \
+    }                                                            \
+  }();                                                           \
   return frame->pt.get_return_object();
 
 #define COROUTINE_FOOTER_WITH_TRY(...) \
@@ -486,7 +586,15 @@ case 0:
 }                      \
 }                      \
 ;                      \
-auto* frame = new GeneratorStateMachine{{}, {__VA_ARGS__}};  \
+auto* frame = [&]() {                                          \
+  if constexpr (coro_detail::has_promise_new<PromiseType>::value) { \
+    void* mem = PromiseType::operator new(                     \
+      sizeof(GeneratorStateMachine));                           \
+    return new (mem) GeneratorStateMachine{{}, {__VA_ARGS__}}; \
+  } else {                                                     \
+    return new GeneratorStateMachine{{}, {__VA_ARGS__}};       \
+  }                                                            \
+}();                                                           \
 return frame->pt.get_return_object();
 
 #define FOR_LOOP_HEADER(N)
@@ -534,6 +642,7 @@ struct _coro_storage {
 };
 
 #define CO_GET(arg) this->state.arg.get().ref_
+#define CO_GET_STATE(arg) arg.get().ref_
 
 // TODO<joka921> Update the other OWNING also to the new lambda syntax.
 #define CO_BRACED_INIT(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;  this->state.mem.constructed=true

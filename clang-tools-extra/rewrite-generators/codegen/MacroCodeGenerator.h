@@ -12,6 +12,11 @@ inline std::string makeStateGetCall(const std::string &varName) {
     return "CO_GET(" + varName + ")";
 }
 
+// Helper function to generate state get() call
+inline std::string makeGetCallInsideState(const std::string &varName) {
+    return "CO_GET_STATE(" + varName + ")";
+}
+
 // Helper function to generate state construct() call
 inline std::string makeStateConstructCall(const std::string &memberName, const std::string &initializer) {
     return "this->state." + memberName + ".construct(" + initializer + ")";

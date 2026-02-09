@@ -12,6 +12,7 @@ add_clang_executable(rewrite-generators
         RewriteGenerators.cpp
         CoroutineBodyRewriter.cpp
         CoroutineRewriter.cpp
+        LambdaRewriter.cpp
         structures/CoroutineStructures.cpp
         structures/LoopStructures.cpp
         structures/TryCatchStructures.cpp

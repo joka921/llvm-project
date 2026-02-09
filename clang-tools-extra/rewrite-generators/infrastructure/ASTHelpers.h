@@ -26,7 +26,7 @@ using namespace clang;
 /// @param E The expression to unwrap.
 /// @param IgnoreImplicitCasts Whether to remove implicit casts (true by default).
 /// @return The unwrapped subexpression.
-const Expr* unwrapExpr(const Expr* E, bool IgnoreImplicitCasts = true) {
+inline const Expr* unwrapExpr(const Expr* E, bool IgnoreImplicitCasts = true) {
     while (true) {
         if (auto* MTE = dyn_cast<MaterializeTemporaryExpr>(E)) {
             E = MTE->getSubExpr();
@@ -52,14 +52,14 @@ const Expr* unwrapExpr(const Expr* E, bool IgnoreImplicitCasts = true) {
 }
 
 /// Gets the source text for an expression
-std::string getSourceText(const Expr *expr, const SourceManager &sourceManager) {
+inline std::string getSourceText(const Expr *expr, const SourceManager &sourceManager) {
     SourceRange rangeRange = expr->getSourceRange();
     CharSourceRange charRange = CharSourceRange::getTokenRange(rangeRange);
     return Lexer::getSourceText(charRange, sourceManager, LangOptions()).str();
 }
 
 /// Checks if an expression is a prvalue (after unwrapping)
-bool isPrValue(const Expr* initializer) {
+inline bool isPrValue(const Expr* initializer) {
     if (!initializer) {
         return false;
     }
@@ -68,7 +68,7 @@ bool isPrValue(const Expr* initializer) {
 }
 
 /// Converts a type to a fully qualified string
-std::string typeAsString(const QualType& type, const ASTContext &astContext) {
+inline std::string typeAsString(const QualType& type, const ASTContext &astContext) {
     QualType canonicalType = type.getCanonicalType();
 
     PrintingPolicy policy(astContext.getLangOpts());
@@ -82,7 +82,7 @@ std::string typeAsString(const QualType& type, const ASTContext &astContext) {
 }
 
 /// Gets the appropriate type for an auto&& variable based on the initializer
-std::pair<std::string, bool> getTypeForAutoRefRefVariable(const Expr* initializer, const ASTContext &astContext) {
+inline std::pair<std::string, bool> getTypeForAutoRefRefVariable(const Expr* initializer, const ASTContext &astContext) {
     initializer = unwrapExpr(initializer);
     const auto& tp = initializer->getType();
     if (tp->isReferenceType()) {
@@ -93,7 +93,7 @@ std::pair<std::string, bool> getTypeForAutoRefRefVariable(const Expr* initialize
 }
 
 /// Extracts the original argument from a coroutine suspend expression
-const Expr *getOriginalCoroutineExprArgument(const CoroutineSuspendExpr *expr) {
+inline const Expr *getOriginalCoroutineExprArgument(const CoroutineSuspendExpr *expr) {
     if (!expr) return nullptr;
 
     const Expr *operand = expr->getOperand();

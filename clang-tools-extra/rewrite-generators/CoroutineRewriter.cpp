@@ -1,44 +1,19 @@
 //
-// CoroutineRewriter - Main orchestrator for coroutine rewriting
+// CoroutineRewriter - Implementation
 //
 
-#include "clang/AST/RecursiveASTVisitor.h"
-#include "clang/AST/Decl.h"
-#include "clang/AST/DeclCXX.h"
-#include "clang/AST/Stmt.h"
-#include "clang/AST/Type.h"
-#include "clang/Rewrite/Core/Rewriter.h"
-#include "clang/Basic/SourceManager.h"
-#include "clang/Basic/Diagnostic.h"
-#include "clang/Basic/LangOptions.h"
-#include "clang/Lex/Lexer.h"
-
-#include "Common.h"
+#include "CoroutineRewriter.h"
+#include "CoroutineBodyRewriter.h"
 #include "infrastructure/ASTHelpers.h"
 #include "infrastructure/ReplacementApplicator.h"
-#include "structures/CoroutineStructures.h"
-#include "structures/LoopStructures.h"
-#include "structures/TryCatchStructures.h"
 #include "collectors/LocalVariableCollector.h"
 #include "codegen/MacroCodeGenerator.h"
-#include "CoroutineBodyRewriter.cpp"
+#include "clang/Lex/Lexer.h"
 
-#include <vector>
-#include <string>
 #include <sstream>
+#include <string>
 
-using namespace clang;
-
-class CoroutineRewriter : public RecursiveASTVisitor<CoroutineRewriter> {
-private:
-    const SourceManager &sourceManager;
-    Rewriter &rewriter;
-    clang::DiagnosticsEngine &diagnosticsEngine;
-    const LangOptions &langOptions;
-    ASTContext *astContext;
-    std::vector<CoroutineInfo> coroutines;
-
-    bool containsCoroutineKeywords(const Stmt *stmt) {
+bool CoroutineRewriter::containsCoroutineKeywords(const Stmt *stmt) {
         if (!stmt) return false;
 
         if (isa<CoawaitExpr>(stmt) || isa<CoyieldExpr>(stmt) || isa<CoreturnStmt>(stmt)) {
@@ -55,7 +30,7 @@ private:
         return false;
     }
 
-    bool containsTryCatchBlocks(const Stmt *stmt) {
+bool CoroutineRewriter::containsTryCatchBlocks(const Stmt *stmt) {
         if (!stmt) return false;
 
         if (isa<CXXTryStmt>(stmt)) {
@@ -72,7 +47,7 @@ private:
         return false;
     }
 
-    bool collectLocalVariables(const Stmt *body, std::set<LocalVariable> &variables) {
+bool CoroutineRewriter::collectLocalVariables(const Stmt *body, std::set<LocalVariable> &variables) {
         LocalVariableCollector collector(variables, sourceManager, *astContext);
         collector.TraverseStmt(const_cast<Stmt *>(body));
 
@@ -86,7 +61,7 @@ private:
         return true; // No collisions, safe to rewrite
     }
 
-    void collectFunctionParameters(const FunctionDecl *funcDecl, std::vector<FunctionParameter> &parameters) {
+void CoroutineRewriter::collectFunctionParameters(const FunctionDecl *funcDecl, std::vector<FunctionParameter> &parameters) {
         REWRITE_LOG() << "  DEBUG: Collecting function parameters\n";
 
         for (const auto *param: funcDecl->parameters()) {
@@ -106,7 +81,7 @@ private:
         REWRITE_LOG() << "  Found " << parameters.size() << " function parameters\n";
     }
 
-    void collectMemberFunctionInfo(const FunctionDecl *funcDecl, CoroutineInfo &coro) {
+void CoroutineRewriter::collectMemberFunctionInfo(const FunctionDecl *funcDecl, CoroutineInfo &coro) {
         if (const auto *methodDecl = dyn_cast<CXXMethodDecl>(funcDecl)) {
             coro.isMemberFunction = true;
             coro.isConstMemberFunction = methodDecl->isConst();
@@ -124,7 +99,7 @@ private:
         }
     }
 
-    std::string replaceLastTemplateArgWithHandle(const std::string &returnType) {
+std::string CoroutineRewriter::replaceLastTemplateArgWithHandle(const std::string &returnType) {
         REWRITE_LOG() << "    DEBUG: replaceLastTemplateArgWithHandle input: '" << returnType << "'\n";
 
         // Find the template arguments by looking for < and >
@@ -198,7 +173,7 @@ private:
         return result;
     }
 
-    SourceLocation findStructInsertionPoint(const FunctionDecl *funcDecl) {
+SourceLocation CoroutineRewriter::findStructInsertionPoint(const FunctionDecl *funcDecl) {
         REWRITE_LOG() << "DEBUG: findStructInsertionPoint called for function: " << funcDecl->getQualifiedNameAsString()
                 << "\n";
 
@@ -246,7 +221,7 @@ private:
         return SourceLocation();
     }
 
-    std::string generateCoroImplStruct(const CoroutineInfo &coro) {
+std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro) {
         // Extract the return type from the coroutine function
         std::string returnType = "auto"; // Default fallback
         if (coro.function) {
@@ -410,10 +385,6 @@ private:
         // Add yield buffer for temporaries if needed
         if (!coro.yieldedOrAwaitedTemporaries.empty()) {
             structCode += "\n    // Buffer for yielded/awaited temporaries\n";
-            
-            // Calculate max size and alignment
-            size_t maxSize = 0;
-            size_t maxAlignment = 1;
             
             REWRITE_LOG() << "  DEBUG: Calculating buffer size for " << coro.yieldedOrAwaitedTemporaries.size() << " temporary types:\n";
             
@@ -641,16 +612,7 @@ private:
         return structCode;
     }
 
-public:
-    CoroutineRewriter(Rewriter &rewr, const SourceManager &SM, DiagnosticsEngine &diag, const LangOptions &langOpts)
-        : sourceManager(SM), rewriter(rewr), diagnosticsEngine(diag), langOptions(langOpts), astContext(nullptr) {
-    }
-
-    void setASTContext(ASTContext &ctx) {
-        astContext = &ctx;
-    }
-
-    bool VisitFunctionDecl(FunctionDecl *funcDecl) {
+bool CoroutineRewriter::VisitFunctionDecl(FunctionDecl *funcDecl) {
         if (!funcDecl->hasBody()) {
             return true;
         }
@@ -707,7 +669,7 @@ public:
         return true;
     }
 
-    bool VisitLambdaExpr(LambdaExpr *lambdaExpr) {
+bool CoroutineRewriter::VisitLambdaExpr(LambdaExpr *lambdaExpr) {
         // Get the call operator (the lambda body function)
         const CXXMethodDecl *callOperator = lambdaExpr->getCallOperator();
         if (!callOperator->hasBody()) {
@@ -786,7 +748,7 @@ public:
         return true;
     }
 
-    void updateFunctionReturnType(const CoroutineInfo &coro) {
+void CoroutineRewriter::updateFunctionReturnType(const CoroutineInfo &coro) {
         if (coro.isLambda) {
             REWRITE_LOG() << "Updating lambda return type\n";
             updateLambdaReturnType(coro);
@@ -831,7 +793,7 @@ public:
         }
     }
 
-    void updateLambdaReturnType(const CoroutineInfo &coro) {
+void CoroutineRewriter::updateLambdaReturnType(const CoroutineInfo &coro) {
         if (!coro.lambdaExpr) {
             REWRITE_LOG() << "  ERROR: No lambda expression to update\n";
             return;
@@ -899,7 +861,7 @@ public:
                       << " to " << (bracePos - 1) << "\n";
     }
 
-    void performRewrites() {
+void CoroutineRewriter::performRewrites() {
         for (auto &coro: coroutines) {
             if (coro.hasError) {
                 continue;
@@ -921,7 +883,7 @@ public:
         }
     }
 
-    void rewriteCoroutineBody(CoroutineInfo &coro) {
+void CoroutineRewriter::rewriteCoroutineBody(CoroutineInfo &coro) {
         REWRITE_LOG() << "Rewriting coroutine body for: " << coro.function->getQualifiedNameAsString() << "\n";
 
         const Stmt *bodyStmt = coro.function->getBody();
@@ -1060,7 +1022,7 @@ public:
     }
 
     /*
-    std::string getTransformedBodyText(const Stmt *bodyStmt, CoroutineBodyRewriter &bodyRewriter) {
+std::string CoroutineRewriter::getTransformedBodyText(const Stmt *bodyStmt, CoroutineBodyRewriter &bodyRewriter) {
         // Get the compound statement body
         if (auto *compoundStmt = dyn_cast<CompoundStmt>(bodyStmt)) {
             // Get the inner part (without the outer braces)
@@ -1103,7 +1065,7 @@ public:
     }
     */
 
-    void replaceEntireBodyWithStateMachine(const CoroutineInfo &coro) {
+void CoroutineRewriter::replaceEntireBodyWithStateMachine(const CoroutineInfo &coro) {
         REWRITE_LOG() << "  DEBUG: Replacing entire body with state machine instantiation\n";
 
         const Stmt *originalBody = coro.function->getBody();
@@ -1163,7 +1125,7 @@ public:
     }
 
 
-    void wrapBodyWithRunMethod(const CoroutineInfo &coro, CoroutineBodyRewriter &body_rewriter) {
+void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, CoroutineBodyRewriter &body_rewriter) {
         REWRITE_LOG() << "  DEBUG: Adding closing braces after coroutine body for: " << coro.function->
                 getQualifiedNameAsString() << "\n";
 
@@ -1250,22 +1212,3 @@ public:
         }
     }
 
-    const std::vector<CoroutineInfo> &getCoroutines() const {
-        return coroutines;
-    }
-};
-
-class MyASTConsumer : public ASTConsumer {
-private:
-    CoroutineRewriter &rewriter;
-
-public:
-    MyASTConsumer(CoroutineRewriter &rewr) : rewriter(rewr) {
-    }
-
-    void HandleTranslationUnit(ASTContext &Context) override {
-        rewriter.setASTContext(Context);
-        rewriter.TraverseDecl(Context.getTranslationUnitDecl());
-    }
-};
-// End of CoroutineRewriter

@@ -11,7 +11,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "Common.h"
-#include "CoroutineRewriter.cpp"
+#include "CoroutineRewriter.h"
 
 #include <memory>
 
@@ -57,7 +57,6 @@ public:
 
     void EndSourceFileAction() override {
         coroutineRewriter->performRewrites();
-
         const auto &coroutines = coroutineRewriter->getCoroutines();
         REWRITE_LOG() << "\nSummary: Processed " << coroutines.size() << " coroutine(s)\n";
 

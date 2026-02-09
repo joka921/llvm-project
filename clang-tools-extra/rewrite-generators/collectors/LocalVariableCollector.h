@@ -11,7 +11,6 @@
 #include "../infrastructure/ASTHelpers.h"
 #include "../structures/CoroutineStructures.h"
 
-using namespace clang::tooling;
 using namespace llvm;
 using namespace clang;
 using namespace clang::ast_matchers;

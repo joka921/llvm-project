@@ -10,8 +10,8 @@ set(LLVM_LINK_COMPONENTS support)
 add_clang_executable(rewrite-generators
         Main.cpp
         RewriteGenerators.cpp
-        # Note: CoroutineBodyRewriter.cpp and CoroutineRewriter.cpp are included via #include
-        # to maintain current compilation structure. These can be compiled separately in future.
+        CoroutineBodyRewriter.cpp
+        CoroutineRewriter.cpp
 )
 
 target_link_libraries(rewrite-generators

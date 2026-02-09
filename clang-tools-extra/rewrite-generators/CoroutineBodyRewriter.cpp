@@ -1,74 +1,19 @@
 //
-// CoroutineBodyRewriter - Rewrites coroutine function bodies
+// CoroutineBodyRewriter - Implementation
 //
 
-#include "clang/AST/RecursiveASTVisitor.h"
-#include "clang/AST/Stmt.h"
-#include "clang/AST/Expr.h"
-#include "clang/AST/ExprCXX.h"
-#include "clang/AST/Decl.h"
-#include "clang/AST/DeclCXX.h"
-#include "clang/Rewrite/Core/Rewriter.h"
-#include "clang/Basic/SourceManager.h"
-#include "clang/Lex/Lexer.h"
-
-#include "Common.h"
+#include "CoroutineBodyRewriter.h"
 #include "infrastructure/ASTHelpers.h"
-#include "structures/CoroutineStructures.h"
-#include "structures/LoopStructures.h"
-#include "structures/TryCatchStructures.h"
-#include "structures/ScopeStructures.h"
+#include "infrastructure/ReplacementApplicator.h"
 #include "collectors/HelperCollectors.h"
 #include "codegen/MacroCodeGenerator.h"
+#include "clang/Lex/Lexer.h"
 
-#include <map>
-#include <set>
-#include <vector>
-#include <optional>
+#include <sstream>
+#include <algorithm>
 
-using namespace clang;
-
-class CoroutineBodyRewriter : public RecursiveASTVisitor<CoroutineBodyRewriter> {
-private:
-    const std::set<LocalVariable> &localVariables;
-    Rewriter &rewriter;
-    const SourceManager &sourceManager;
-    CoroutineInfo &coroutineInfo;
-    ASTContext *astContext;
-    std::set<std::string> variableNames;
-    std::vector<Replacement> declReplacements;
-    std::vector<Replacement> refReplacements;
-    std::set<SourceLocation> processedDeclarations;
-    std::set<SourceLocation> processedThisExpressions;
-    std::vector<ScopeInfo> scopeStack;
-    std::vector<const Stmt*> currentLoopStack;
-    std::vector<std::pair<SourceLocation, std::string> > destructorInsertions;
-    std::vector<CoroutineStatement> coroutineStatements;
-    unsigned nextCoroStatementIndex;
-    std::vector<RangedForLoop> rangedForLoops;
-    unsigned nextRangedForIndex;
-    std::vector<TryCatchBlock> tryCatchBlocks;
-    unsigned nextTryCatchIndex;
-    std::vector<unsigned> currentTryBlockStack;  // Stack of try block indices we're currently inside
-
-    // Member function information
-    bool isMemberFunction;
-    [[maybe_unused]] const CXXRecordDecl *classDecl;
-
-    // Map from variable declaration location to member name (for handling shadowing)
-    std::map<SourceLocation, std::string> declLocationToMemberName;
-
-    // Map from closing brace position to all replacements that should happen at that position
-
-    // Global replacement vector for ALL types of replacements (SourceRange, replacement_string, priority)
-public:
-    std::map<unsigned, std::vector<ScopeEndReplacement> > scopeEndReplacements;
-    // The int is the priority, the `bool` means `true` for replace.
-    std::vector<std::tuple<SourceRange, std::string, int, bool> > globalReplacements;
-
-public:
-    CoroutineBodyRewriter(const std::set<LocalVariable> &vars, Rewriter &rewr, const SourceManager &SM,
-                          CoroutineInfo &coroInfo, ASTContext &astCtx, bool isMember = false, const CXXRecordDecl *classRecord = nullptr)
+CoroutineBodyRewriter::CoroutineBodyRewriter(const std::set<LocalVariable> &vars, Rewriter &rewr, const SourceManager &SM,
+                          CoroutineInfo &coroInfo, ASTContext &astCtx, bool isMember, const CXXRecordDecl *classRecord)
         : localVariables(vars), rewriter(rewr), sourceManager(SM), coroutineInfo(coroInfo), astContext(&astCtx), nextCoroStatementIndex(1), nextRangedForIndex(0), nextTryCatchIndex(0),
           isMemberFunction(isMember), classDecl(classRecord) {
         // Create a set of variable names for quick lookup
@@ -82,7 +27,7 @@ public:
 
     // Build the mapping from variable declaration locations to member names
     // This handles shadowing by renaming variables with the same name in different scopes
-    void buildDeclLocationMapping() {
+void CoroutineBodyRewriter::buildDeclLocationMapping() {
         std::set<SourceLocation> addedDeclLocations; // Track which declarations we've already processed
         std::map<std::string, int> variableNameCounts; // Track count of each variable name for shadowing
 
@@ -109,7 +54,7 @@ public:
     }
 
     // Track compound statements (scopes) - using Traverse for proper pre/post hooks
-    bool TraverseCompoundStmt(CompoundStmt *compoundStmt) {
+bool CoroutineBodyRewriter::TraverseCompoundStmt(CompoundStmt *compoundStmt) {
         // ===== PRE-TRAVERSAL (before children are visited) =====
         REWRITE_LOG() << "  DEBUG: Entering scope (CompoundStmt)\n";
 
@@ -163,7 +108,7 @@ public:
     }
 
     // Handle variable declarations - collect for later processing
-    bool VisitDeclStmt(DeclStmt *declStmt) {
+bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
         for (auto *decl: declStmt->decls()) {
             if (auto *varDecl = dyn_cast<VarDecl>(decl)) {
                 std::string varName = varDecl->getNameAsString();
@@ -305,7 +250,7 @@ public:
     }
 
     // Handle co_yield expressions
-    bool VisitCoyieldExpr(CoyieldExpr *coyield) {
+bool CoroutineBodyRewriter::VisitCoyieldExpr(CoyieldExpr *coyield) {
         REWRITE_LOG() << "  Found co_yield expression\n";
 
         CoroutineStatement coroStmt;
@@ -396,7 +341,7 @@ public:
     }
 
     // Handle co_await expressions
-    bool VisitCoawaitExpr(CoawaitExpr *coawait) {
+bool CoroutineBodyRewriter::VisitCoawaitExpr(CoawaitExpr *coawait) {
         REWRITE_LOG() << "  Found co_await expression\n";
 
         CoroutineStatement coroStmt;
@@ -487,7 +432,7 @@ public:
     }
 
     // Handle co_return statements
-    bool VisitCoreturnStmt(CoreturnStmt *coreturn) {
+bool CoroutineBodyRewriter::VisitCoreturnStmt(CoreturnStmt *coreturn) {
         REWRITE_LOG() << "  Found co_return statement\n";
 
         CoroutineStatement coroStmt;
@@ -525,7 +470,7 @@ public:
     }
 
     // Handle try-catch blocks - using Traverse for proper pre/post hooks
-    bool TraverseCXXTryStmt(CXXTryStmt *tryStmt) {
+bool CoroutineBodyRewriter::TraverseCXXTryStmt(CXXTryStmt *tryStmt) {
         // ===== PRE-TRAVERSAL =====
         REWRITE_LOG() << "  Found try-catch block\n";
 
@@ -580,7 +525,7 @@ public:
     }
 
     // Process a catch clause and transform variable references
-    std::string processCatchClause(const CXXCatchStmt *catchStmt) {
+std::string CoroutineBodyRewriter::processCatchClause(const CXXCatchStmt *catchStmt) {
         // Get the exception declaration (e.g., "MyException& e" or "...")
         const VarDecl *exceptionDecl = catchStmt->getExceptionDecl();
 
@@ -646,7 +591,7 @@ public:
     }
 
     // Transform variable references in arbitrary text
-    std::string transformVariableReferencesInText(const std::string &text) {
+std::string CoroutineBodyRewriter::transformVariableReferencesInText(const std::string &text) {
         std::string result = text;
 
         // Replace each tracked local variable with CO_GET(varName)
@@ -675,7 +620,7 @@ public:
     }
 
     // Handle ranged-for loops - using Traverse for proper pre/post hooks
-    bool TraverseCXXForRangeStmt(CXXForRangeStmt *forRange) {
+bool CoroutineBodyRewriter::TraverseCXXForRangeStmt(CXXForRangeStmt *forRange) {
         // ===== PRE-TRAVERSAL (ranged-for processing + loop tracking) =====
         REWRITE_LOG() << "\n=== RANGED-FOR LOOP DETECTION ===\n";
         REWRITE_LOG() << "  Found ranged-for loop at: " << forRange->getSourceRange().getBegin().printToString(
@@ -767,7 +712,7 @@ public:
     }
 
     // Handle variable references - but not in declaration contexts
-    bool VisitDeclRefExpr(DeclRefExpr *declRef) {
+bool CoroutineBodyRewriter::VisitDeclRefExpr(DeclRefExpr *declRef) {
         if (auto *varDecl = dyn_cast<VarDecl>(declRef->getDecl())) {
             std::string varName = varDecl->getNameAsString();
 
@@ -801,7 +746,7 @@ public:
     }
 
     // Handle member expressions - replace with __self->
-    bool VisitMemberExpr(MemberExpr *memberExpr) {
+bool CoroutineBodyRewriter::VisitMemberExpr(MemberExpr *memberExpr) {
         if (!isMemberFunction) {
             return true; // Not a member function, nothing to do
         }
@@ -831,7 +776,7 @@ public:
     }
 
     // Handle standalone this expressions (not part of member access)
-    bool VisitCXXThisExpr(CXXThisExpr *thisExpr) {
+bool CoroutineBodyRewriter::VisitCXXThisExpr(CXXThisExpr *thisExpr) {
         if (!isMemberFunction) {
             return true; // Not a member function, nothing to do
         }
@@ -853,7 +798,7 @@ public:
     }
 
     // Track for loops for proper scope handling - using Traverse for pre/post hooks
-    bool TraverseForStmt(ForStmt *forStmt) {
+bool CoroutineBodyRewriter::TraverseForStmt(ForStmt *forStmt) {
         // ===== PRE-TRAVERSAL =====
         REWRITE_LOG() << "  DEBUG: Found for loop\n";
         currentLoopStack.push_back(forStmt);
@@ -868,7 +813,7 @@ public:
     }
 
     // Track while loops for proper scope handling - using Traverse for pre/post hooks
-    bool TraverseWhileStmt(WhileStmt *whileStmt) {
+bool CoroutineBodyRewriter::TraverseWhileStmt(WhileStmt *whileStmt) {
         // ===== PRE-TRAVERSAL =====
         REWRITE_LOG() << "  DEBUG: Found while loop\n";
         currentLoopStack.push_back(whileStmt);
@@ -883,7 +828,7 @@ public:
     }
 
     // Track do-while loops for proper scope handling - using Traverse for pre/post hooks
-    bool TraverseDoStmt(DoStmt *doStmt) {
+bool CoroutineBodyRewriter::TraverseDoStmt(DoStmt *doStmt) {
         // ===== PRE-TRAVERSAL =====
         REWRITE_LOG() << "  DEBUG: Found do-while loop\n";
         currentLoopStack.push_back(doStmt);
@@ -898,7 +843,7 @@ public:
     }
 
     // Handle break statements - need to destroy variables in loop scope
-    bool VisitBreakStmt(BreakStmt *breakStmt) {
+bool CoroutineBodyRewriter::VisitBreakStmt(BreakStmt *breakStmt) {
         REWRITE_LOG() << "  Found break statement\n";
 
         // Find the innermost loop and destroy variables in its scope
@@ -908,7 +853,7 @@ public:
     }
 
     // Handle continue statements - need to destroy variables in loop scope
-    bool VisitContinueStmt(ContinueStmt *continueStmt) {
+bool CoroutineBodyRewriter::VisitContinueStmt(ContinueStmt *continueStmt) {
         REWRITE_LOG() << "  Found continue statement\n";
 
         // Find the innermost loop and destroy variables in its scope
@@ -917,14 +862,14 @@ public:
         return true;
     }
 
-private:
+
     enum InitializationForm {
         CONSTRUCT_CALL, // Regular construct() call for other types
         BRACED_INIT,    // Braced initialization like {1, 2}
         PAREN_INIT      // Parenthesized initialization like (1, 2)
     };
 
-    InitializationForm getInitializationForm(const VarDecl *varDecl) {
+CoroutineBodyRewriter::InitializationForm CoroutineBodyRewriter::getInitializationForm(const VarDecl *varDecl) {
         if (!varDecl->hasInit()) {
             return CONSTRUCT_CALL;
         }
@@ -966,7 +911,7 @@ private:
         return CONSTRUCT_CALL;
     }
 
-    std::optional<SourceRange> handleParenthesizedInitialization(const VarDecl *varDecl) {
+std::optional<SourceRange> CoroutineBodyRewriter::handleParenthesizedInitialization(const VarDecl *varDecl) {
         if (!varDecl->hasInit()) {
             return std::nullopt;
         }
@@ -1030,7 +975,7 @@ private:
     }
 
     // Helper function to find the closing parenthesis starting from a given location
-    SourceLocation findClosingParen(SourceLocation startLoc) {
+SourceLocation CoroutineBodyRewriter::findClosingParen(SourceLocation startLoc) {
         if (!startLoc.isValid()) {
             return SourceLocation();
         }
@@ -1063,7 +1008,7 @@ private:
         return SourceLocation();
     }
 
-    void processParenthesizedArguments(const VarDecl *varDecl) {
+void CoroutineBodyRewriter::processParenthesizedArguments(const VarDecl *varDecl) {
         if (!varDecl->hasInit()) {
             return;
         }
@@ -1086,7 +1031,7 @@ private:
         REWRITE_LOG() << "    DEBUG: Processed parenthesized initialization arguments\n";
     }
 
-    void insertLoopVariableDestructors(const Stmt *stmt, bool isBreak) {
+void CoroutineBodyRewriter::insertLoopVariableDestructors(const Stmt *stmt, bool isBreak) {
         if (currentLoopStack.empty()) {
             REWRITE_LOG() << "    DEBUG: No loop context found for " << (isBreak ? "break" : "continue") << "\n";
             return;
@@ -1142,7 +1087,7 @@ private:
         }
     }
 
-    std::optional<SourceRange> handleBracedInitialization(const VarDecl *varDecl) {
+std::optional<SourceRange> CoroutineBodyRewriter::handleBracedInitialization(const VarDecl *varDecl) {
         if (!varDecl->hasInit()) {
             return std::nullopt;
         }
@@ -1255,7 +1200,7 @@ private:
         return std::nullopt;
     }
 
-    std::string getInitializationArguments(const VarDecl *varDecl) {
+std::string CoroutineBodyRewriter::getInitializationArguments(const VarDecl *varDecl) {
         std::string varName = varDecl->getNameAsString();
         REWRITE_LOG() << "    DEBUG: Processing initialization for variable: " << varName << "\n";
 
@@ -1303,7 +1248,7 @@ private:
         return result;
     }
 
-    std::string processInitExpression(const Expr *init, const std::string &currentVarName) {
+std::string CoroutineBodyRewriter::processInitExpression(const Expr *init, const std::string &currentVarName) {
         // Handle different initialization styles
         if (auto *constructExpr = dyn_cast<CXXConstructExpr>(init)) {
             REWRITE_LOG() << "    DEBUG: Found CXXConstructExpr\n";
@@ -1318,7 +1263,7 @@ private:
     }
 
     // Collect all MaterializeTemporaryExpr nodes from an expression and create TemporaryInfo
-    void collectTemporariesFromExpression(const Expr *expr, CoroutineStatement &coroStmt) {
+void CoroutineBodyRewriter::collectTemporariesFromExpression(const Expr *expr, CoroutineStatement &coroStmt) {
         if (!expr) return;
 
         std::vector<const MaterializeTemporaryExpr*> matTemps;
@@ -1374,7 +1319,7 @@ private:
         }
     }
 
-    std::string rewriteVariableReferencesInText(const std::string &text, const std::string &excludeVar) {
+std::string CoroutineBodyRewriter::rewriteVariableReferencesInText(const std::string &text, const std::string &excludeVar) {
         REWRITE_LOG() << "        DEBUG: rewriteVariableReferencesInText input: '" << text << "'\n";
         REWRITE_LOG() << "        DEBUG: Excluding variable: '" << excludeVar << "'\n";
 
@@ -1411,7 +1356,7 @@ private:
         return result;
     }
 
-    std::string handleConstructorArgs(const CXXConstructExpr *constructExpr) {
+std::string CoroutineBodyRewriter::handleConstructorArgs(const CXXConstructExpr *constructExpr) {
         REWRITE_LOG() << "      DEBUG: handleConstructorArgs - found " << constructExpr->getNumArgs() << " arguments\n";
         std::string args;
 
@@ -1427,7 +1372,7 @@ private:
         return args;
     }
 
-    std::string handleInitListArgs(const InitListExpr *initList) {
+std::string CoroutineBodyRewriter::handleInitListArgs(const InitListExpr *initList) {
         REWRITE_LOG() << "      DEBUG: handleInitListArgs - found " << initList->getNumInits() << " elements\n";
         std::string args = "{";
 
@@ -1444,7 +1389,7 @@ private:
         return args;
     }
 
-    std::string rewriteExpression(const Expr *expr) {
+std::string CoroutineBodyRewriter::rewriteExpression(const Expr *expr) {
         if (!expr) return "";
 
         SourceRange range = expr->getSourceRange();
@@ -1501,7 +1446,7 @@ private:
         return result;
     }
 
-    std::string rewriteExpressionExceptVar(const Expr *expr, const std::string &excludeVar) {
+std::string CoroutineBodyRewriter::rewriteExpressionExceptVar(const Expr *expr, const std::string &excludeVar) {
         if (!expr) return "";
 
         SourceRange range = expr->getSourceRange();
@@ -1515,7 +1460,7 @@ private:
         return rewriteVariableReferencesInText(exprText, excludeVar);
     }
 
-    void insertDestructorsForScope(const ScopeInfo &scope) {
+void CoroutineBodyRewriter::insertDestructorsForScope(const ScopeInfo &scope) {
         REWRITE_LOG() << "    DEBUG: Inserting destructors for scope with " << scope.variablesInScope.size() <<
                 " variables\n";
 
@@ -1563,7 +1508,7 @@ private:
         }
     }
 
-    bool isPartOfDeclaration(const DeclRefExpr *declRef) {
+bool CoroutineBodyRewriter::isPartOfDeclaration(const DeclRefExpr *declRef) {
         // Check if this reference is part of a declaration statement we're processing
         const Stmt *parent = declRef;
         while (parent) {
@@ -1583,7 +1528,7 @@ private:
     }
 
     // Helper function to collect replacements for co_yield or co_await (they work identically)
-    void collectYieldOrAwaitReplacement(const CoroutineStatement &coroStmt, const std::string &macroBaseName) {
+void CoroutineBodyRewriter::collectYieldOrAwaitReplacement(const CoroutineStatement &coroStmt, const std::string &macroBaseName) {
         std::string macroName = coroStmt.needsBuffering ? macroBaseName + "_BUFFERED" : macroBaseName;
         REWRITE_LOG() << "    DEBUG: Collecting " << macroBaseName << " replacement for " << macroName << "(" << coroStmt.index <<
                 ", ...)\n";
@@ -1794,7 +1739,7 @@ private:
         }
     }
 
-    void collectCoroutineStatementReplacements() {
+void CoroutineBodyRewriter::collectCoroutineStatementReplacements() {
         REWRITE_LOG() << "  DEBUG: Collecting coroutine statement replacements for " << coroutineStatements.size() <<
                 " statements\n";
 
@@ -1859,8 +1804,8 @@ private:
                 " coroutine statement replacements into global vector\n";
     }
 
-private:
-    void collectRangedForFooterInsertions() {
+
+void CoroutineBodyRewriter::collectRangedForFooterInsertions() {
         REWRITE_LOG() <<
                 "  DEBUG: Collecting ranged-for footer insertions (destroy calls) into scope end replacements\n";
 
@@ -1904,8 +1849,8 @@ private:
         REWRITE_LOG() << "  Collected footer destroy calls for " << rangedForLoops.size() << " ranged-for loops\n";
     }
 
-public:
-    void collectRangedForLoopReplacements() {
+
+void CoroutineBodyRewriter::collectRangedForLoopReplacements() {
         REWRITE_LOG() << "  DEBUG: Collecting ranged-for loop replacements for " << rangedForLoops.size() << " loops\n";
 
         // First collect footer insertions for all loops
@@ -1930,8 +1875,8 @@ public:
         REWRITE_LOG() << "  Collected " << rangedForLoops.size() << " ranged-for loop replacements\n";
     }
 
-private:
-    void collectRangedForHeaderReplacement(const RangedForLoop &rangedFor) {
+
+void CoroutineBodyRewriter::collectRangedForHeaderReplacement(const RangedForLoop &rangedFor) {
         REWRITE_LOG() << "      DEBUG: Collecting header replacement for ranged-for loop " << rangedFor.index << "\n";
 
         // Find the range from "for" keyword to the closing parenthesis
@@ -1968,7 +1913,7 @@ private:
         }
     }
 
-    void collectRangedForLoopVarConstruct(const RangedForLoop &rangedFor) {
+void CoroutineBodyRewriter::collectRangedForLoopVarConstruct(const RangedForLoop &rangedFor) {
         REWRITE_LOG() << "      DEBUG: Collecting loop var construct for ranged-for loop " << rangedFor.index << "\n";
 
         // Find the opening brace of the loop body
@@ -1997,7 +1942,7 @@ private:
         }
     }
 
-    void collectRangedForLoopVarDestroy(const RangedForLoop &rangedFor) {
+void CoroutineBodyRewriter::collectRangedForLoopVarDestroy(const RangedForLoop &rangedFor) {
         REWRITE_LOG() << "      DEBUG: Collecting loop var destroy for ranged-for loop " << rangedFor.index << "\n";
 
         // Find the closing brace of the loop body
@@ -2030,7 +1975,7 @@ private:
         }
     }
 
-    std::string generateExplicitLoopForm(const RangedForLoop &rangedFor) {
+std::string CoroutineBodyRewriter::generateExplicitLoopForm(const RangedForLoop &rangedFor) {
         REWRITE_LOG() << "\n=== GENERATING EXPLICIT LOOP FORM ===\n";
         REWRITE_LOG() << "      DEBUG: Generating explicit loop form for loop " << rangedFor.index << "\n";
         REWRITE_LOG() << "      Original ranged-for range: " << rangedFor.fullRange.getBegin().printToString(
@@ -2109,8 +2054,8 @@ private:
         return result;
     }
 
-private:
-    void collectScopeEndReplacements() {
+
+void CoroutineBodyRewriter::collectScopeEndReplacements() {
         REWRITE_LOG() << "  DEBUG: Processing scope end replacements for " << scopeEndReplacements.size() <<
                 " positions\n";
 
@@ -2165,8 +2110,8 @@ private:
         REWRITE_LOG() << "  Processed " << scopeEndReplacements.size() << " scope end positions\n";
     }
 
-public:
-    void collectTryCatchReplacements() {
+
+void CoroutineBodyRewriter::collectTryCatchReplacements() {
         REWRITE_LOG() << "  DEBUG: Collecting try-catch replacements for " << tryCatchBlocks.size() << " blocks\n";
 
         for (const auto &tryCatch: tryCatchBlocks) {
@@ -2224,7 +2169,7 @@ public:
         REWRITE_LOG() << "  Collected " << tryCatchBlocks.size() << " try-catch replacements\n";
     }
 
-    void applyReplacements() {
+void CoroutineBodyRewriter::applyReplacements() {
         // Collect all insertion-style replacements into global vector
         collectCoroutineStatementReplacements();
         // Note: collectDestructorInsertions() is no longer needed since we use scopeEndReplacements
@@ -2246,15 +2191,7 @@ public:
         applyAllReplacements();
     }
 
-    // DEPRECATED: This method is no longer used since we now use scopeEndReplacements
-    /*
-    void collectDestructorInsertions() {
-        // This method has been replaced by collectScopeEndReplacements()
-        // which properly handles concatenating destructor calls and appending closing braces
-    }
-    */
-
-    void collectRangeReplacements() {
+void CoroutineBodyRewriter::collectRangeReplacements() {
         REWRITE_LOG() <<
                 "  DEBUG: Collecting range-style replacements (declarations and references) into global vector\n";
 
@@ -2275,56 +2212,11 @@ public:
             int declPriority = sourceManager.getFileOffset(range.getBegin());
             globalReplacements.emplace_back(range, repl, declPriority, isReplace);
         }
-
-        /*
-        // Convert SourceRange replacements to multiple SourceLocation insertions if needed
-        // For now, we'll apply range replacements immediately since they can't be easily converted to insertions
-        // Sort by source location in reverse order to avoid invalidating positions
-        std::sort(allRangeReplacements.begin(), allRangeReplacements.end(),
-                 [&](const std::pair<SourceRange, std::string>& a, const std::pair<SourceRange, std::string>& b) {
-                     return sourceManager.getFileOffset(a.first.getBegin()) > sourceManager.getFileOffset(b.first.getBegin());
-                 });
-
-        for (const auto& replacement : allRangeReplacements) {
-            REWRITE_LOG() << "  Applying range replacement: " << replacement.second << "\n";
-            rewriter.ReplaceText(replacement.first, replacement.second);
-        }
-
-        REWRITE_LOG() << "  Applied " << allRangeReplacements.size() << " range-style replacements\n";
-        */
     }
 
-    void applyAllReplacements() {
+void CoroutineBodyRewriter::applyAllReplacements() {
         // Use the generic ReplacementApplicator infrastructure
         ReplacementApplicator applicator(rewriter, sourceManager);
         applicator.applyReplacements(globalReplacements);
     }
 
-    /*
-    // Getter methods for accessing replacements without applying them
-    const std::vector<std::pair<SourceRange, std::string> > &getDeclReplacements() const {
-        return declReplacements;
-    }
-
-    const std::vector<std::pair<SourceRange, std::string> > &getRefReplacements() const {
-        return refReplacements;
-    }
-
-    const std::vector<std::pair<SourceLocation, std::string> > &getDestructorInsertions() const {
-        return destructorInsertions;
-    }
-
-    */
-    const std::vector<RangedForLoop> &getRangedForLoops() const {
-        return rangedForLoops;
-    }
-
-    const std::vector<TryCatchBlock> &getTryCatchBlocks() const {
-        return tryCatchBlocks;
-    }
-
-    const std::vector<CoroutineStatement> &getCoroutineStatements() const {
-        return coroutineStatements;
-    }
-};
-// End of CoroutineBodyRewriter

@@ -283,47 +283,36 @@ bool CoroutineBodyRewriter::VisitCoyieldExpr(CoyieldExpr *coyield) {
             coroStmt.operandStart = coroStmt.operand->getBeginLoc();
             coroStmt.operandEnd = coroStmt.operand->getEndLoc();
 
-            // Check if the operand expression is a temporary (prvalue)
-            // The operand is what comes after co_yield (e.g., the "3" in "co_yield 3")
+            // Collect subexpression temporaries (existing behavior)
+            // TODO<joka921> here we try the simplification for nested temporaries.
+            //collectTemporariesFromExpression(coroStmt.operand, coroStmt);
+            collectTemporariesFromExpression(coyield->getOperand(), coroStmt);
+
+            // Check if the operand itself is a temporary (prvalue)
+            /*
             if (isPrValue(coroStmt.operand)) {
-                std::string operandText = getSourceText(coroStmt.operand, sourceManager);
-                std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
-                REWRITE_LOG() << "    DEBUG: co_yield operand '" << operandText
-                              << "' (type: " << operandTypeStr << ") is a temporary, will use CO_YIELD_BUFFERED\n";
+                // Create a TemporaryInfo for the top-level temporary
+                TemporaryInfo topLevelTemp;
+                topLevelTemp.expr = nullptr;  // No explicit MaterializeTemporaryExpr
+                topLevelTemp.tempVarName = "temp_" + std::to_string(coroStmt.index) + "_toplevel";
+                topLevelTemp.type = coroStmt.operand->getType();
+                topLevelTemp.constructLoc = coroStmt.operand->getBeginLoc();
+                topLevelTemp.isBracedInit = false;  // Always use paren init
+                topLevelTemp.initArgs = "";  // Handled via range replacement
 
-                // Get the actual type passed to yield_value (after implicit conversions)
-                // by examining the call to promise.yield_value()
-                QualType bufferType = coroStmt.operand->getType(); // Default fallback
+                REWRITE_LOG() << "    DEBUG: co_yield operand is a prvalue, creating top-level temporary "
+                             << topLevelTemp.tempVarName << " of type "
+                             << typeAsString(topLevelTemp.type, *astContext) << "\n";
 
-                const Expr* yieldCall = coyield->getOperand(); // The call to yield_value
-                if (yieldCall) {
-                    const Expr* yieldCallStripped = yieldCall->IgnoreImplicit();
-                    if (const CallExpr* call = dyn_cast<CallExpr>(yieldCallStripped)) {
-                        if (call->getNumArgs() > 0) {
-                            const Expr* actualArg = call->getArg(0);
-                            QualType convertedType = actualArg->getType();
-                            // Remove references to get the decayed type
-                            if (convertedType->isReferenceType()) {
-                                convertedType = convertedType.getNonReferenceType();
-                            }
-                            bufferType = convertedType;
-                            REWRITE_LOG() << "    DEBUG: Extracted buffer type from yield_value call: "
-                                         << typeAsString(bufferType, *astContext) << "\n";
-                        }
-                    }
-                }
+                coroStmt.temporaries.push_back(topLevelTemp);
+            }
+            */
 
-                coroutineInfo.yieldedOrAwaitedTemporaries.push_back(bufferType);
-
-                // Mark this statement as needing buffered macro and store the buffer type
-                coroStmt.needsBuffering = true;
-                coroStmt.bufferType = bufferType;
-            } else {
-                std::string operandText = getSourceText(coroStmt.operand, sourceManager);
-                std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
-                REWRITE_LOG() << "    DEBUG: co_yield operand '" << operandText
-                              << "' (type: " << operandTypeStr << ") is not a temporary, will use CO_YIELD\n";
-                coroStmt.needsBuffering = false;
+            // Add temporary variable names to alive variables
+            for (const auto &temp : coroStmt.temporaries) {
+                coroStmt.aliveVariables.push_back(temp.tempVarName);
+                REWRITE_LOG() << "      DEBUG: Temporary '" << temp.tempVarName
+                             << "' is alive at suspension point " << coroStmt.index << "\n";
             }
         }
 
@@ -335,17 +324,6 @@ bool CoroutineBodyRewriter::VisitCoyieldExpr(CoyieldExpr *coyield) {
             for (auto varIt = scope.variablesInScope.rbegin(); varIt != scope.variablesInScope.rend(); ++varIt) {
                 coroStmt.aliveVariables.push_back(*varIt);
                 REWRITE_LOG() << "      DEBUG: Variable '" << *varIt << "' is alive at suspension point " << coroStmt.index << "\n";
-            }
-        }
-
-        // Collect subexpression temporaries
-        if (coroStmt.operand) {
-            collectTemporariesFromExpression(coroStmt.operand, coroStmt);
-
-            // Add temporary variable names to alive variables
-            for (const auto &temp : coroStmt.temporaries) {
-                coroStmt.aliveVariables.push_back(temp.tempVarName);
-                REWRITE_LOG() << "      DEBUG: Temporary '" << temp.tempVarName << "' is alive at suspension point " << coroStmt.index << "\n";
             }
         }
 
@@ -374,47 +352,32 @@ bool CoroutineBodyRewriter::VisitCoawaitExpr(CoawaitExpr *coawait) {
             coroStmt.operandStart = coroStmt.operand->getBeginLoc();
             coroStmt.operandEnd = coroStmt.operand->getEndLoc();
 
-            // Check if the operand expression is a temporary (prvalue)
-            // The operand is what comes after co_await (e.g., the "someFunc()" in "co_await someFunc()")
+            // Collect subexpression temporaries (existing behavior)
+            collectTemporariesFromExpression(coroStmt.operand, coroStmt);
+
+            // Check if the operand itself is a temporary (prvalue)
             if (isPrValue(coroStmt.operand)) {
-                std::string operandText = getSourceText(coroStmt.operand, sourceManager);
-                std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
-                REWRITE_LOG() << "    DEBUG: co_await operand '" << operandText
-                              << "' (type: " << operandTypeStr << ") is a temporary, will use CO_AWAIT_BUFFERED\n";
+                // Create a TemporaryInfo for the top-level temporary
+                TemporaryInfo topLevelTemp;
+                topLevelTemp.expr = nullptr;  // No explicit MaterializeTemporaryExpr
+                topLevelTemp.tempVarName = "temp_" + std::to_string(coroStmt.index) + "_toplevel";
+                topLevelTemp.type = coroStmt.operand->getType();
+                topLevelTemp.constructLoc = coroStmt.operand->getBeginLoc();
+                topLevelTemp.isBracedInit = false;  // Always use paren init
+                topLevelTemp.initArgs = "";  // Handled via range replacement
 
-                // Get the actual type passed to await_transform (after implicit conversions)
-                // by examining the call to promise.await_transform() or the awaiter constructor
-                QualType bufferType = coroStmt.operand->getType(); // Default fallback
+                REWRITE_LOG() << "    DEBUG: co_await operand is a prvalue, creating top-level temporary "
+                             << topLevelTemp.tempVarName << " of type "
+                             << typeAsString(topLevelTemp.type, *astContext) << "\n";
 
-                const Expr* awaitCall = coawait->getOperand(); // The await transformation
-                if (awaitCall) {
-                    const Expr* awaitCallStripped = awaitCall->IgnoreImplicit();
-                    if (const CallExpr* call = dyn_cast<CallExpr>(awaitCallStripped)) {
-                        if (call->getNumArgs() > 0) {
-                            const Expr* actualArg = call->getArg(0);
-                            QualType convertedType = actualArg->getType();
-                            // Remove references to get the decayed type
-                            if (convertedType->isReferenceType()) {
-                                convertedType = convertedType.getNonReferenceType();
-                            }
-                            bufferType = convertedType;
-                            REWRITE_LOG() << "    DEBUG: Extracted buffer type from await call: "
-                                         << typeAsString(bufferType, *astContext) << "\n";
-                        }
-                    }
-                }
+                coroStmt.temporaries.push_back(topLevelTemp);
+            }
 
-                coroutineInfo.yieldedOrAwaitedTemporaries.push_back(bufferType);
-
-                // Mark this statement as needing buffered macro and store the buffer type
-                coroStmt.needsBuffering = true;
-                coroStmt.bufferType = bufferType;
-            } else {
-                std::string operandText = getSourceText(coroStmt.operand, sourceManager);
-                std::string operandTypeStr = typeAsString(coroStmt.operand->getType(), *astContext);
-                REWRITE_LOG() << "    DEBUG: co_await operand '" << operandText
-                              << "' (type: " << operandTypeStr << ") is not a temporary, will use CO_AWAIT\n";
-                coroStmt.needsBuffering = false;
+            // Add temporary variable names to alive variables
+            for (const auto &temp : coroStmt.temporaries) {
+                coroStmt.aliveVariables.push_back(temp.tempVarName);
+                REWRITE_LOG() << "      DEBUG: Temporary '" << temp.tempVarName
+                             << "' is alive at suspension point " << coroStmt.index << "\n";
             }
         }
 
@@ -426,17 +389,6 @@ bool CoroutineBodyRewriter::VisitCoawaitExpr(CoawaitExpr *coawait) {
             for (auto varIt = scope.variablesInScope.rbegin(); varIt != scope.variablesInScope.rend(); ++varIt) {
                 coroStmt.aliveVariables.push_back(*varIt);
                 REWRITE_LOG() << "      DEBUG: Variable '" << *varIt << "' is alive at suspension point " << coroStmt.index << "\n";
-            }
-        }
-
-        // Collect subexpression temporaries
-        if (coroStmt.operand) {
-            collectTemporariesFromExpression(coroStmt.operand, coroStmt);
-
-            // Add temporary variable names to alive variables
-            for (const auto &temp : coroStmt.temporaries) {
-                coroStmt.aliveVariables.push_back(temp.tempVarName);
-                REWRITE_LOG() << "      DEBUG: Temporary '" << temp.tempVarName << "' is alive at suspension point " << coroStmt.index << "\n";
             }
         }
 

@@ -177,7 +177,12 @@ cppcoro::generator<int> testSuspendedDestroy() {
 
 cppcoro::generator<int> yieldTemporaries() {
 
-  co_yield (std::string{"hallo"} + std::string{"bye"}).size();
+    co_yield (std::string{"hallo"} + std::string{"bye"}).size();
+}
+
+cppcoro::generator<int> yieldTemporaries() {
+
+    co_yield (std::string{"hallo"}).size();
 }
 
 cppcoro::generator<int> lambda () {
@@ -195,11 +200,10 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
     // No local variables found in this coroutine
 
     // Subexpression temporaries
-    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_0;
+    _coro_storage<int&, true> temp_1_0;
     _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_1;
-
-    // Buffer for yielded/awaited temporaries
-    alignas(std::ranges::max(std::array{std::size_t{1}, alignof(int), alignof(int)})) char yieldBuffer[std::ranges::max(std::array{std::size_t{1}, sizeof(int), sizeof(int)})];
+    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_2;
+    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_3;
 
     // Destroy variables when coroutine is suspended at a specific state
     void destroySuspendedCoro(size_t curState) {
@@ -207,6 +211,8 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
         case 1:
           temp_1_0.destroy();
           temp_1_1.destroy();
+          temp_1_2.destroy();
+          temp_1_3.destroy();
           break;
         case 0:  // initial state
           break;
@@ -215,13 +221,19 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
   };
 
   using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
-  switch(this->curState) { case 0: break; case 1: goto label_1; default: return; }
+  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) 
+switch(this->curState) {
+  case 0: break;
+  case 1: goto label_1;
+  default: return;
+}
 
-    CO_YIELD_BUFFERED((int), 1,  (CO_PAREN_INIT_OWNING(temp_1_0, std::string{"hallo"}) + CO_PAREN_INIT_OWNING(temp_1_1, std::string{"bye"})).size());
 
-        this->state.temp_1_1.destroy();
-        this->state.temp_1_0.destroy();
+CO_YIELD(1, CO_PAREN_INIT_OWNING(temp_1_0, CO_PAREN_INIT_OWNING(temp_1_1, CO_PAREN_INIT_OWNING(temp_1_2, std::string{"hallo"}) + CO_PAREN_INIT_OWNING(temp_1_3, std::string{"bye"})).size()));
+this->state.temp_1_3.destroy();
+this->state.temp_1_2.destroy();
+this->state.temp_1_1.destroy();
+this->state.temp_1_0.destroy();
 CO_RETURN_FALLOFF(2);
 COROUTINE_FOOTER()
 }

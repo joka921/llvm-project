@@ -51,8 +51,6 @@ struct CoroutineStatement {
     SourceLocation keywordLoc;
     SourceLocation operandStart;
     SourceLocation operandEnd;
-    bool needsBuffering = false; // True if operand is a temporary (not used for RETURN)
-    QualType bufferType; // Type for the buffer when needsBuffering is true
     std::vector<std::string> aliveVariables; // Variables alive at this suspension point, in reverse order of declaration
     std::vector<TemporaryInfo> temporaries; // Subexpression temporaries that need lifetime extension
 
@@ -111,9 +109,6 @@ struct CoroutineInfo {
     // Lambda information
     bool isLambda = false;
     const LambdaExpr *lambdaExpr = nullptr;
-
-    // Temporary type information for yield buffer
-    std::vector<QualType> yieldedOrAwaitedTemporaries;
 
     // Mapping from variable declaration location to member name (for handling shadowing)
     std::map<SourceLocation, std::string> declLocationToMemberName;

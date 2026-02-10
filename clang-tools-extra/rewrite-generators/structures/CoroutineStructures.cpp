@@ -44,22 +44,35 @@ CoroutineStatement::generateYieldOrAwaitReplacements(
 ) const {
     std::vector<std::tuple<SourceRange, std::string, int, bool>> replacements;
 
-    std::string macroName = needsBuffering ? macroBaseName + "_BUFFERED" : macroBaseName;
-    REWRITE_LOG() << "    DEBUG: Collecting " << macroBaseName << " replacement for " << macroName << "(" << index <<
-            ", ...)\n";
-
     // Priority based on index for consistent ordering
     int priority = static_cast<int>(index);
 
-    // Replace keyword with appropriate macro
-    // For buffered macros, include the type in parentheses as the first argument
+    // Identify top-level temporary (if any)
+    const TemporaryInfo *topLevelTemp = nullptr;
+    std::vector<const TemporaryInfo*> subExprTemps;
+
+    for (const auto &temp : temporaries) {
+        if (temp.tempVarName.find("_toplevel") != std::string::npos) {
+            topLevelTemp = &temp;
+        } else {
+            subExprTemps.push_back(&temp);
+        }
+    }
+
+    // Determine which macro to use
+    std::string macroName;
     std::string macroStart;
-    if (needsBuffering) {
-        std::string bufferTypeStr = typeAsString(bufferType, astContext);
-        macroStart = macroName + "((" + bufferTypeStr + "), " + std::to_string(index) + ", ";
-        REWRITE_LOG() << "      DEBUG: Buffered macro with type: " << macroStart << "\n";
+
+    if (topLevelTemp) {
+        // Use CO_YIELD_TOPLEVEL(tempname, index, init_expr)
+        macroName = macroBaseName + "_TOPLEVEL";
+        macroStart = macroName + "(" + topLevelTemp->tempVarName + ", " + std::to_string(index) + ", ";
+        REWRITE_LOG() << "    DEBUG: Using " << macroName << " for top-level temporary " << topLevelTemp->tempVarName << "\n";
     } else {
+        // Use regular CO_YIELD(index, operand)
+        macroName = macroBaseName;
         macroStart = macroName + "(" + std::to_string(index) + ", ";
+        REWRITE_LOG() << "    DEBUG: Using " << macroName << " (no top-level temporary)\n";
     }
 
     // Replace just the keyword
@@ -69,21 +82,23 @@ CoroutineStatement::generateYieldOrAwaitReplacements(
 
     // Process subexpression temporaries - use incremental replacements for recursive processing
     // Process in reverse order (innermost first) by assigning lower priorities to later temps
-    for (size_t tempIdx = 0; tempIdx < temporaries.size(); ++tempIdx) {
-        const auto &temp = temporaries[tempIdx];
-        REWRITE_LOG() << "      DEBUG: Processing temporary '" << temp.tempVarName << "' (index " << tempIdx << ")\n";
+    for (size_t tempIdxB = 0; tempIdxB < subExprTemps.size(); ++tempIdxB) {
+        size_t tempIdx = subExprTemps.size() - tempIdxB - 1;
+        const auto *temp = subExprTemps[tempIdx];
+        REWRITE_LOG() << "      DEBUG: Processing temporary '" << temp->tempVarName << "' (index " << tempIdx << ")\n";
 
-        std::string initMacroName = temp.isBracedInit ? "CO_BRACED_INIT_OWNING" : "CO_PAREN_INIT_OWNING";
-        std::string macroOpening = initMacroName + "(" + temp.tempVarName + ", ";
+        std::string initMacroName = temp->isBracedInit ? "CO_BRACED_INIT_OWNING" : "CO_PAREN_INIT_OWNING";
+        std::string macroOpening = initMacroName + "(" + temp->tempVarName + ", ";
 
         // Each temporary gets its own priority range to avoid conflicts
         // Innermost temps (later in the vector) get lower priorities so they're processed first
-        int tempPriorityBase = priority + 100 + (int)(temporaries.size() - tempIdx - 1) * 10;
+        //int tempPriorityBase = priority + 100 + (int)(subExprTemps.size() - tempIdx - 1) * 10;
+        int tempPriorityBase = priority + 100 + (int)(tempIdx) * 10;
 
         // Get the subexpression from the MaterializeTemporaryExpr
-        const Expr *tempSubExpr = temp.expr->getSubExpr();
+        const Expr *tempSubExpr = temp->expr->getSubExpr();
 
-        if (temp.isBracedInit) {
+        if (temp->isBracedInit) {
             // For braced initialization, find the InitListExpr and its braces
             const InitListExpr *initList = nullptr;
 
@@ -142,17 +157,21 @@ CoroutineStatement::generateYieldOrAwaitReplacements(
                 if (lparenLoc.isValid() && rparenLoc.isValid()) {
                     // Insert macro opening before the opening paren
                     SourceRange macroStartRange(lparenLoc, lparenLoc);
-                    replacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, false);
+                    replacements.emplace_back(macroStartRange, macroOpening, tempPriorityBase, true);
 
+                    /*
                     // Delete the opening paren
                     SourceLocation afterLParen = lparenLoc.getLocWithOffset(1);
                     SourceRange lparenRange(lparenLoc, afterLParen);
                     replacements.emplace_back(lparenRange, "", tempPriorityBase + 1, true);
+                    */
 
                     // Delete the closing paren and insert closing paren for macro
+                    /*
                     SourceLocation afterRParen = Lexer::getLocForEndOfToken(rparenLoc, 0, sourceManager, LangOptions());
                     SourceRange rparenRange(rparenLoc, afterRParen);
                     replacements.emplace_back(rparenRange, ")", tempPriorityBase + 2, true);
+                    */
 
                     REWRITE_LOG() << "        DEBUG: Will strip parens and use CO_PAREN_INIT_OWNING for ParenExpr (priority " << tempPriorityBase << ")\n";
                 } else {
@@ -246,7 +265,11 @@ CoroutineStatement::generateYieldOrAwaitReplacements(
         replacements.emplace_back(afterSemiRange, destructorCalls, priority + 2000, false);
     }
 
+    for (const auto& [range, repl, priority, empty] : replacements) {
+        REWRITE_LOG() << "Found coroStmtReplacement " <<  range.printToString(sourceManager) << " " << repl << " " << priority << " " << empty << "\n";
+    }
     return replacements;
+
 }
 
 std::vector<std::tuple<SourceRange, std::string, int, bool>>

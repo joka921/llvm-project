@@ -392,45 +392,6 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         }
 
         // Add yield buffer for temporaries if needed
-        if (!coro.yieldedOrAwaitedTemporaries.empty()) {
-            structCode += "\n    // Buffer for yielded/awaited temporaries\n";
-            
-            REWRITE_LOG() << "  DEBUG: Calculating buffer size for " << coro.yieldedOrAwaitedTemporaries.size() << " temporary types:\n";
-            
-            for (const auto &tempType : coro.yieldedOrAwaitedTemporaries) {
-                // Get type string for logging
-                std::string typeStr = typeAsString(tempType, *astContext);
-                REWRITE_LOG() << "    Temporary type: " << typeStr << "\n";
-                
-                // Calculate size and alignment (we'll use sizeof and alignof expressions)
-                // Note: We can't calculate actual sizes at compile time of the rewriter,
-                // so we'll generate code that calculates it at compile time of the target
-            }
-            
-            // Generate buffer with max size/alignment using template metaprogramming
-            structCode += "    alignas(std::ranges::max(std::array{std::size_t{1}, ";
-            bool first = true;
-            for (const auto &tempType : coro.yieldedOrAwaitedTemporaries) {
-                if (!first) structCode += ", ";
-                first = false;
-                std::string typeStr = typeAsString(tempType, *astContext);
-                structCode += "alignof(" + typeStr + ")";
-            }
-            structCode += "})) ";
-
-            structCode += "char yieldBuffer[std::ranges::max(std::array{std::size_t{1}, ";
-            first = true;
-            for (const auto &tempType : coro.yieldedOrAwaitedTemporaries) {
-                if (!first) structCode += ", ";
-                first = false;
-                std::string typeStr = typeAsString(tempType, *astContext);
-                structCode += "sizeof(" + typeStr + ")";
-            }
-            structCode += "})];\n";
-            
-            REWRITE_LOG() << "    Added yieldBuffer to struct with max size/alignment of " << coro.yieldedOrAwaitedTemporaries.size() << " types\n";
-        }
-
         // Add exception handling infrastructure
         if (!coro.tryCatchBlocks.empty()) {
             structCode += "\n    // Exception handling infrastructure\n";

@@ -395,6 +395,14 @@ bool co_await_impl(auto &&awaiter, auto handle) {
   }                                                       \
   label_##index:
 
+#define CO_YIELD_TOPLEVEL(tempname, index, init_expr) \
+  CO_PAREN_INIT_OWNING(tempname, init_expr); \
+  CO_YIELD(index, CO_GET(tempname))
+
+#define CO_AWAIT_TOPLEVEL(tempname, index, init_expr) \
+  CO_PAREN_INIT_OWNING(tempname, init_expr); \
+  CO_AWAIT_VOID(index, CO_GET(tempname))
+
 #define CO_RETURN_VOID(index) \
   {                                                \
    this->curState = index; \
@@ -434,28 +442,6 @@ namespace blubbi {
     using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
 }
 
-#define REMOVE_PARENS(x) REMOVE_PARENS_IMPL x
-#define REMOVE_PARENS_IMPL(...) __VA_ARGS__
-// TODO<joka921> for the case of (implicit ) conversions, we currently use parenthesized initialization, which might
-// break for arrays etc.
-#define CO_YIELD_BUFFERED(type, index, value) \
-    { \
-    using BufT ## index = REMOVE_PARENS(type); \
-    auto __yield_buffer_ptr_ ## index = new(state.yieldBuffer) BufT ## index (value); \
-    {                                                       \
-      auto&& awaiter = promise().yield_value(*__yield_buffer_ptr_ ## index);        \
-      this->curState = index;                                  \
-      if (!co_await_impl(awaiter, Hdl::from_promise(pt))) { \
-        return;                                             \
-      }                                                     \
-    }}                                                       \
-    label_##index: \
-    { \
-    using BufT ## index = REMOVE_PARENS(type); \
-      auto __yield_buffer_ptr_ ## index = reinterpret_cast<BufT ## index *>(state.yieldBuffer); \
-      __yield_buffer_ptr_ ##index -> ~ BufT ## index(); \
-    } void()
-
 #define CO_AWAIT_VOID(index, awaiter_expr)                      \
   {                                                              \
     auto&& __awaiter = awaiter_expr;                             \
@@ -476,24 +462,6 @@ namespace blubbi {
     }                                                            \
   }                                                              \
   label_##index:
-
-#define CO_AWAIT_BUFFERED(type, index, value)                    \
-  {                                                              \
-    using BufT##index = REMOVE_PARENS(type);                     \
-    auto* __buf_##index = new(state.awaitBuffer)                 \
-                          BufT##index(value);                    \
-    auto&& __awaiter = *__buf_##index;                           \
-    this->curState = index;                                      \
-    if (!co_await_impl(__awaiter, Hdl::from_promise(pt))) {      \
-      return;                                                    \
-    }                                                            \
-  }                                                              \
-  label_##index:                                                 \
-  {                                                              \
-    using BufT##index = REMOVE_PARENS(type);                     \
-    reinterpret_cast<BufT##index*>(state.awaitBuffer)            \
-      ->~BufT##index();                                          \
-  } void()
 
 template<typename Derived, typename PromiseType>
 struct CoroImpl {

@@ -44,6 +44,7 @@ private:
     std::string getTransformedBodyText(const Stmt *bodyStmt, CoroutineBodyRewriter &bodyRewriter);
     std::string generateCoroImplStruct(const CoroutineInfo &coro);
     SourceLocation findStructInsertionPoint(const FunctionDecl *funcDecl);
+    SourceLocation findPreFunctionInsertionPoint(const FunctionDecl *funcDecl);
     void replaceEntireBodyWithStateMachine(const CoroutineInfo &coro);
     void wrapBodyWithRunMethod(const CoroutineInfo &coro, CoroutineBodyRewriter &bodyRewriter);
 

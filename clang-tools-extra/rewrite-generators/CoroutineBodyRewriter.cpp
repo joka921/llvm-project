@@ -3,6 +3,7 @@
 //
 
 #include "CoroutineBodyRewriter.h"
+#include "LambdaRewriter.h"
 #include "infrastructure/ASTHelpers.h"
 #include "infrastructure/ReplacementApplicator.h"
 #include "collectors/HelperCollectors.h"
@@ -11,6 +12,15 @@
 
 #include <sstream>
 #include <algorithm>
+
+static bool hasCoroutineKeywords(const Stmt *stmt) {
+    if (!stmt) return false;
+    if (isa<CoawaitExpr>(stmt) || isa<CoyieldExpr>(stmt) || isa<CoreturnStmt>(stmt))
+        return true;
+    for (auto it = stmt->child_begin(); it != stmt->child_end(); ++it)
+        if (*it && hasCoroutineKeywords(*it)) return true;
+    return false;
+}
 
 CoroutineBodyRewriter::CoroutineBodyRewriter(const std::set<LocalVariable> &vars, Rewriter &rewr, const SourceManager &SM,
                           CoroutineInfo &coroInfo, ASTContext &astCtx, bool isMember, const CXXRecordDecl *classRecord)
@@ -868,6 +878,68 @@ bool CoroutineBodyRewriter::VisitContinueStmt(ContinueStmt *continueStmt) {
         return true;
     }
 
+
+bool CoroutineBodyRewriter::TraverseLambdaExpr(LambdaExpr *lambdaExpr) {
+        // Skip lambda coroutines - they are handled by CoroutineRewriter::VisitLambdaExpr
+        const CXXMethodDecl *callOperator = lambdaExpr->getCallOperator();
+        if (callOperator && callOperator->hasBody() &&
+            hasCoroutineKeywords(callOperator->getBody())) {
+            REWRITE_LOG() << "  DEBUG: Skipping coroutine lambda (handled by CoroutineRewriter)\n";
+            return true;
+        }
+
+        REWRITE_LOG() << "  DEBUG: Processing regular lambda in coroutine body\n";
+
+        // Use LambdaRewriter to get the struct definition and class name
+        LambdaRewriter lambdaRewriter(sourceManager, *astContext);
+        LambdaRewriteResult rewriteResult = lambdaRewriter.rewriteLambda(lambdaExpr);
+
+        // Now build a constructor call with CO_GET-transformed capture init expressions
+        std::vector<CaptureInfo> captures = lambdaRewriter.analyzeCaptures(lambdaExpr);
+
+        std::string constructorCall = rewriteResult.className + "{";
+        auto initIt = lambdaExpr->capture_init_begin();
+        bool firstArg = true;
+        for (size_t i = 0; i < captures.size(); ++i) {
+            const CaptureInfo &cap = captures[i];
+            const Expr *initExpr = *initIt;
+            ++initIt;
+
+            if (!firstArg) constructorCall += ", ";
+            firstArg = false;
+
+            if (cap.isThisCapture) {
+                constructorCall += isMemberFunction ? "__self" : "this";
+            } else if (cap.isStarThisCapture) {
+                constructorCall += isMemberFunction ? "*__self" : "*this";
+            } else if (initExpr) {
+                // Apply CO_GET transformation to the init expression
+                constructorCall += rewriteExpression(initExpr);
+            } else {
+                constructorCall += cap.initExpression;
+            }
+        }
+        constructorCall += "}";
+
+        REWRITE_LOG() << "  DEBUG: Lambda class name: " << rewriteResult.className << "\n";
+        REWRITE_LOG() << "  DEBUG: Lambda constructor call: " << constructorCall << "\n";
+
+        // Add a global replacement for the lambda expression source range
+        SourceRange lambdaRange = lambdaExpr->getSourceRange();
+        int fileOffset = sourceManager.getFileOffset(lambdaRange.getBegin());
+        globalReplacements.emplace_back(lambdaRange, constructorCall, fileOffset, true);
+
+        // Store the lambda info for later insertion before the function
+        LambdaInCoroutine lambdaInfo;
+        lambdaInfo.classDefinition = rewriteResult.classDefinition;
+        lambdaInfo.constructorCall = constructorCall;
+        lambdaInfo.className = rewriteResult.className;
+        lambdaInfo.lambdaSourceRange = lambdaRange;
+        collectedLambdas.push_back(lambdaInfo);
+
+        // Return true WITHOUT calling base TraverseLambdaExpr - skip recursion into lambda body
+        return true;
+    }
 
     enum InitializationForm {
         CONSTRUCT_CALL, // Regular construct() call for other types

@@ -38,13 +38,13 @@ class LambdaRewriter {
 public:
     LambdaRewriter(const SourceManager &SM, ASTContext &ctx);
     LambdaRewriteResult rewriteLambda(const LambdaExpr *lambda);
+    std::vector<CaptureInfo> analyzeCaptures(const LambdaExpr *lambda);
 
 private:
     const SourceManager &sourceManager;
     ASTContext &astContext;
 
     std::string generateClassName(const LambdaExpr *lambda);
-    std::vector<CaptureInfo> analyzeCaptures(const LambdaExpr *lambda);
     std::string getOperatorSignature(const LambdaExpr *lambda);
     std::string getBodyText(const LambdaExpr *lambda);
     std::string generateClassDefinition(const LambdaExpr *lambda,

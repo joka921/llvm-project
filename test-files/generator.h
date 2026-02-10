@@ -310,6 +310,15 @@ namespace coro_detail {
     std::void_t<decltype(P::operator delete(
       std::declval<void*>(), size_t{}))>>
     : std::true_type {};
+
+  template<typename P>
+  void* promise_allocate(size_t size) {
+    if constexpr (has_promise_new<P>::value) {
+      return P::operator new(size);
+    } else {
+      return ::operator new(size);
+    }
+  }
 } // namespace coro_detail
 
 struct HandleFrame {
@@ -409,8 +418,8 @@ bool co_await_impl(auto &&awaiter, auto handle) {
     return;                                                      \
   } void()
 
-// TODO<joka921> handle the case of there being no `promise().return_void()`
 #define CO_RETURN_FALLOFF(index) CO_RETURN_VOID(index)
+#define CO_RETURN_VALUE_FALLOFF(index, value) CO_RETURN_VALUE(index, value)
 
 #define TRY_BEGIN(index) this->state.activeTryBlocks.push_back(index); void()
 // TODO<joka921> Assert that this works in fact.
@@ -569,15 +578,10 @@ case 0:
   }                      \
   }                      \
   ;                      \
-  auto* frame = [&]() {                                          \
-    if constexpr (coro_detail::has_promise_new<PromiseType>::value) { \
-      void* mem = PromiseType::operator new(                     \
-        sizeof(GeneratorStateMachine));                           \
-      return new (mem) GeneratorStateMachine{{}, {__VA_ARGS__}}; \
-    } else {                                                     \
-      return new GeneratorStateMachine{{}, {__VA_ARGS__}};       \
-    }                                                            \
-  }();                                                           \
+  void* __coro_mem = coro_detail::promise_allocate<PromiseType>( \
+    sizeof(GeneratorStateMachine));                               \
+  auto* frame = new (__coro_mem)                                 \
+    GeneratorStateMachine{{}, {__VA_ARGS__}};                    \
   return frame->pt.get_return_object();
 
 #define COROUTINE_FOOTER_WITH_TRY(...) \
@@ -586,15 +590,10 @@ case 0:
 }                      \
 }                      \
 ;                      \
-auto* frame = [&]() {                                          \
-  if constexpr (coro_detail::has_promise_new<PromiseType>::value) { \
-    void* mem = PromiseType::operator new(                     \
-      sizeof(GeneratorStateMachine));                           \
-    return new (mem) GeneratorStateMachine{{}, {__VA_ARGS__}}; \
-  } else {                                                     \
-    return new GeneratorStateMachine{{}, {__VA_ARGS__}};       \
-  }                                                            \
-}();                                                           \
+void* __coro_mem = coro_detail::promise_allocate<PromiseType>( \
+  sizeof(GeneratorStateMachine));                               \
+auto* frame = new (__coro_mem)                                 \
+  GeneratorStateMachine{{}, {__VA_ARGS__}};                    \
 return frame->pt.get_return_object();
 
 #define FOR_LOOP_HEADER(N)
@@ -645,10 +644,10 @@ struct _coro_storage {
 #define CO_GET_STATE(arg) arg.get().ref_
 
 // TODO<joka921> Update the other OWNING also to the new lambda syntax.
-#define CO_BRACED_INIT(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;  this->state.mem.constructed=true
-#define CO_BRACED_INIT_OWNING(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ __VA_ARGS__} ;  this->state.mem.constructed=true
-#define CO_PAREN_INIT(mem, ...) new(this->state.mem.buffer) decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;  this->state.mem.constructed=true
-#define CO_PAREN_INIT_OWNING(mem, ...) [&]() -> decltype(auto) {new(this->state.mem.buffer) decltype(this->state.mem)::Storage( __VA_ARGS__) ;  this->state.mem.constructed=true; return std::move(CO_GET(mem));}()
+#define CO_BRACED_INIT(mem, ...) new(this->state.mem.buffer) typename decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;  this->state.mem.constructed=true
+#define CO_BRACED_INIT_OWNING(mem, ...) new(this->state.mem.buffer) typename decltype(this->state.mem)::Storage{ __VA_ARGS__} ;  this->state.mem.constructed=true
+#define CO_PAREN_INIT(mem, ...) new(this->state.mem.buffer) typename decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;  this->state.mem.constructed=true
+#define CO_PAREN_INIT_OWNING(mem, ...) [&]() -> decltype(auto) {new(this->state.mem.buffer) typename decltype(this->state.mem)::Storage( __VA_ARGS__) ;  this->state.mem.constructed=true; return std::move(CO_GET(mem));}()
 
 
 template<typename Ref, bool isOwning>

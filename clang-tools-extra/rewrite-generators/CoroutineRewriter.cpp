@@ -221,6 +221,15 @@ SourceLocation CoroutineRewriter::findStructInsertionPoint(const FunctionDecl *f
         return SourceLocation();
     }
 
+SourceLocation CoroutineRewriter::findPreFunctionInsertionPoint(const FunctionDecl *funcDecl) {
+        SourceLocation loc = funcDecl->getSourceRange().getBegin();
+        // For template functions, go to the template declaration start
+        if (const FunctionTemplateDecl *tmplDecl = funcDecl->getDescribedFunctionTemplate()) {
+            loc = tmplDecl->getSourceRange().getBegin();
+        }
+        return loc;
+    }
+
 std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro) {
         // Extract the return type from the coroutine function
         std::string returnType = "auto"; // Default fallback
@@ -429,7 +438,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
             // Add handleException function
             structCode += "\n    void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {\n";
-            structCode += "        destroyBecausOfExceptionHandling(activeTryBlocks.back());\n";
+            structCode += "        destroyBecauseOfExceptionHandling(activeTryBlocks.back());\n";
             structCode += "      nextState = dispatchExceptionHandling(std::move(eptr));\n";
             structCode += "      resume();\n";
             structCode += "    }\n";
@@ -880,6 +889,20 @@ void CoroutineRewriter::performRewrites() {
                 rewriter.InsertTextBefore(coro.insertionPoint, structCode);
                 REWRITE_LOG() << "Inserted _detail_coro_impl struct into "
                         << coro.function->getQualifiedNameAsString() << "\n";
+
+                // Insert lambda functor structs BEFORE the coroutine function
+                if (!coro.lambdasInBody.empty()) {
+                    SourceLocation preFuncLoc = findPreFunctionInsertionPoint(coro.function);
+                    if (preFuncLoc.isValid()) {
+                        std::string allLambdaStructs;
+                        for (const auto &lambda : coro.lambdasInBody) {
+                            allLambdaStructs += lambda.classDefinition + ";\n\n";
+                        }
+                        rewriter.InsertTextBefore(preFuncLoc, allLambdaStructs);
+                        REWRITE_LOG() << "Inserted " << coro.lambdasInBody.size()
+                                      << " lambda struct(s) before " << coro.function->getQualifiedNameAsString() << "\n";
+                    }
+                }
             }
         }
     }
@@ -1009,6 +1032,11 @@ void CoroutineRewriter::rewriteCoroutineBody(CoroutineInfo &coro) {
             CoroutineBodyRewriter finalRewriter(coro.localVariables, rewriter, sourceManager,
                                                 coro, *astContext, coro.isMemberFunction, classRecord);
             finalRewriter.TraverseStmt(const_cast<Stmt *>(bodyStmt));
+
+            // Collect lambda rewrites from the final rewriter
+            const auto &lambdas = finalRewriter.getCollectedLambdas();
+            coro.lambdasInBody = lambdas;
+            REWRITE_LOG() << "  DEBUG: Found " << lambdas.size() << " regular lambdas in coroutine body\n";
 
             // Apply all the variable rewrites in place (construct/destroy calls, get() access)
             REWRITE_LOG() << "  DEBUG: Applying all variable transformations in place\n";

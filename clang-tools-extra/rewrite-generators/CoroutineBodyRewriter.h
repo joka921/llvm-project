@@ -15,6 +15,7 @@
 #include "clang/Basic/SourceManager.h"
 
 #include "Common.h"
+#include "LambdaRewriter.h"
 #include "structures/CoroutineStructures.h"
 #include "structures/LoopStructures.h"
 #include "structures/TryCatchStructures.h"
@@ -53,6 +54,7 @@ private:
     bool isMemberFunction;
     [[maybe_unused]] const CXXRecordDecl *classDecl;
     std::map<SourceLocation, std::string> declLocationToMemberName;
+    std::vector<LambdaInCoroutine> collectedLambdas;
 
     enum InitializationForm {
         CONSTRUCT_CALL,
@@ -115,6 +117,7 @@ public:
     bool TraverseDoStmt(DoStmt *doStmt);
     bool VisitBreakStmt(BreakStmt *breakStmt);
     bool VisitContinueStmt(ContinueStmt *continueStmt);
+    bool TraverseLambdaExpr(LambdaExpr *lambdaExpr);
 
     // Replacement application
     void applyReplacements();
@@ -130,6 +133,10 @@ public:
 
     const std::vector<CoroutineStatement> &getCoroutineStatements() const {
         return coroutineStatements;
+    }
+
+    const std::vector<LambdaInCoroutine> &getCollectedLambdas() const {
+        return collectedLambdas;
     }
 };
 

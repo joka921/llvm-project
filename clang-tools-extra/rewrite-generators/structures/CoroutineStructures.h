@@ -34,6 +34,13 @@ struct TemporaryInfo {
     bool isBracedInit;                   // true for CO_BRACED_INIT_OWNING, false for CO_PAREN_INIT_OWNING
 };
 
+struct LambdaInCoroutine {
+    std::string classDefinition;          // Functor struct text
+    std::string constructorCall;          // Constructor call with CO_GET captures
+    std::string className;                // e.g. __lambda_L3_C16
+    SourceRange lambdaSourceRange;        // Source range of the lambda expression
+};
+
 struct CoroutineStatement {
     enum Type { YIELD, AWAIT, RETURN };
 
@@ -110,6 +117,9 @@ struct CoroutineInfo {
 
     // Mapping from variable declaration location to member name (for handling shadowing)
     std::map<SourceLocation, std::string> declLocationToMemberName;
+
+    // Regular lambdas found inside the coroutine body
+    std::vector<LambdaInCoroutine> lambdasInBody;
 };
 
 #endif // LLVM_REWRITE_GENERATORS_COROUTINESTRUCTURES_H

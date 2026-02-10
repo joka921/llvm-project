@@ -493,6 +493,7 @@ bool CoroutineBodyRewriter::TraverseCXXTryStmt(CXXTryStmt *tryStmt) {
         TryCatchBlock tryCatch;
         tryCatch.tryStmt = tryStmt;
         tryCatch.index = nextTryCatchIndex++;
+        tryCatch.resumeIndex = nextCoroStatementIndex++;
 
         // Get the try keyword location
         tryCatch.tryKeywordLoc = tryStmt->getBeginLoc();

@@ -4,7 +4,6 @@
 
 #include "TryCatchStructures.h"
 #include "../Common.h"
-#include <limits>
 
 using namespace clang;
 
@@ -16,34 +15,31 @@ TryCatchBlock::generateReplacements(
     std::vector<std::tuple<SourceRange, std::string, int, bool>> replacements;
 
     REWRITE_LOG() << "\n=== COLLECTING TRY-CATCH REPLACEMENTS ===\n";
-    REWRITE_LOG() << "    DEBUG: Processing try-catch block " << index << "\n";
+    REWRITE_LOG() << "    DEBUG: Processing try-catch block " << index << " (resumeIndex=" << resumeIndex << ")\n";
 
-    // Calculate inverted index once
-    size_t inverted_index = std::numeric_limits<size_t>::max() - index;
-
-    // Part 1: Replace "try" keyword with "TRY_BEGIN(index)"
+    // Part 1: Replace "try" keyword with "TRY_BEGIN(resumeIndex)"
     if (tryKeywordLoc.isValid()) {
         SourceLocation tryEnd = getLocForEndOfToken(tryKeywordLoc);
         SourceRange tryKeywordRange(tryKeywordLoc, tryEnd);
 
-        std::string tryBegin = "TRY_BEGIN(" + std::to_string(inverted_index) + "ULL);";
+        std::string tryBegin = "TRY_BEGIN(" + std::to_string(resumeIndex) + ");";
         int tryPriority = 20000 + static_cast<int>(index);
         replacements.emplace_back(tryKeywordRange, tryBegin, tryPriority, true);
 
-        REWRITE_LOG() << "        Added try keyword replacement with TRY_BEGIN(" << index << ") at "
+        REWRITE_LOG() << "        Added try keyword replacement with TRY_BEGIN(" << resumeIndex << ") at "
                 << tryKeywordRange.printToString(sourceManager) << " (priority " << tryPriority << ")\n";
     }
 
-    // Part 2: Insert "TRY_END(index)" after the closing brace of try block
+    // Part 2: Insert "TRY_END(resumeIndex)" after the closing brace of try block
     if (tryBlockEnd.isValid()) {
         SourceLocation afterBrace = getLocForEndOfToken(tryBlockEnd);
         SourceRange endRange(afterBrace, afterBrace);
 
-        std::string tryEnd = " TRY_END(" + std::to_string(inverted_index) + "ULL);";
+        std::string tryEnd = " TRY_END(" + std::to_string(resumeIndex) + ");";
         int endPriority = 30000 + static_cast<int>(index) + 1;
         replacements.emplace_back(endRange, tryEnd, endPriority, false);
 
-        REWRITE_LOG() << "        Added TRY_END(" << index << ") insertion at "
+        REWRITE_LOG() << "        Added TRY_END(" << resumeIndex << ") insertion at "
                 << endRange.printToString(sourceManager) << " (priority " << endPriority << ")\n";
     }
 

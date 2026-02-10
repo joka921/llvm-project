@@ -215,7 +215,8 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
   };
 
   using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) 
+  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+  switch(this->curState) { case 0: break; case 1: goto label_1; default: return; }
 
     CO_YIELD_BUFFERED((int), 1,  (CO_PAREN_INIT_OWNING(temp_1_0, std::string{"hallo"}) + CO_PAREN_INIT_OWNING(temp_1_1, std::string{"bye"})).size());
 
@@ -280,6 +281,7 @@ SimpleTask testCoAwaitVoid() {
 
     using _ActualCoroType = SimpleTask;
     COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+    switch(this->curState) { case 0: break; case 1: goto label_1; default: return; }
     CO_PAREN_INIT_OWNING(x, 42);
     // co_await SuspendAlways{};
     CO_AWAIT_VOID(1, cppcoro::SuspendAlways{});
@@ -323,6 +325,7 @@ SimpleTask testCoAwaitSuspend() {
 
     using _ActualCoroType = SimpleTask;
     COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+    switch(this->curState) { case 0: break; case 1: goto label_1; default: return; }
     CO_PAREN_INIT_OWNING(x, 10);
     // auto result = co_await IntAwaiter{100};
     CO_AWAIT_SUSPEND(1, __awaiter_1, IntAwaiter{100});
@@ -390,6 +393,7 @@ AllocTask testCustomAllocator() {
 
     using _ActualCoroType = AllocTask;
     COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+    switch(this->curState) { case 0: break; default: return; }
     CO_RETURN_VALUE(1, 99);
     CO_RETURN_VALUE_FALLOFF(2, 0);
     COROUTINE_FOOTER()
@@ -419,6 +423,7 @@ SimpleTask testCoReturnValue() {
 
     using _ActualCoroType = SimpleTask;
     COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+    switch(this->curState) { case 0: break; default: return; }
     CO_PAREN_INIT_OWNING(a, 7);
     CO_PAREN_INIT_OWNING(b, 6);
     CO_RETURN_VALUE(1, CO_GET(a) * CO_GET(b));

@@ -19,6 +19,7 @@ using namespace clang;
 struct TryCatchBlock {
     const CXXTryStmt *tryStmt;
     unsigned index;
+    unsigned resumeIndex;  // goto label index, from same counter as suspension points
     SourceLocation tryKeywordLoc;
     SourceLocation tryBlockStart;  // Opening brace of try block
     SourceLocation tryBlockEnd;    // Closing brace of try block

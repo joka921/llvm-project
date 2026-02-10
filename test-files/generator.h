@@ -279,13 +279,18 @@ namespace cppcoro {
 } // namespace cppcoro
 
 namespace coro_detail {
+
+    struct ConvertibleToAnything {
+        template <typename T>
+        operator T();
+    };
   template<typename Promise, typename Expr, typename = void>
   struct has_await_transform : std::false_type {};
 
   template<typename Promise, typename Expr>
   struct has_await_transform<Promise, Expr,
     std::void_t<decltype(std::declval<Promise&>()
-      .await_transform(std::declval<Expr>()))>>
+      .await_transform(std::declval<ConvertibleToAnything>()))>>
     : std::true_type {};
 
   template<typename Promise, typename Expr>
@@ -388,8 +393,7 @@ bool co_await_impl(auto &&awaiter, auto handle) {
       return;                                             \
     }                                                     \
   }                                                       \
-  [[fallthrough]];                                        \
-  case index:
+  label_##index:
 
 #define CO_RETURN_VOID(index) \
   {                                                \
@@ -423,7 +427,7 @@ bool co_await_impl(auto &&awaiter, auto handle) {
 
 #define TRY_BEGIN(index) this->state.activeTryBlocks.push_back(index); void()
 // TODO<joka921> Assert that this works in fact.
-#define TRY_END(index) this->state.activeTryBlocks.pop_back(); case index: void()
+#define TRY_END(index) this->state.activeTryBlocks.pop_back(); label_##index: void()
 
 namespace blubbi {
     template <typename T>
@@ -445,8 +449,7 @@ namespace blubbi {
         return;                                             \
       }                                                     \
     }}                                                       \
-    [[fallthrough]];                                        \
-    case index: \
+    label_##index: \
     { \
     using BufT ## index = REMOVE_PARENS(type); \
       auto __yield_buffer_ptr_ ## index = reinterpret_cast<BufT ## index *>(state.yieldBuffer); \
@@ -461,8 +464,7 @@ namespace blubbi {
       return;                                                    \
     }                                                            \
   }                                                              \
-  [[fallthrough]];                                               \
-  case index:
+  label_##index:
 
 #define CO_AWAIT_SUSPEND(index, awaiter_storage, awaiter_expr)   \
   {                                                              \
@@ -473,8 +475,7 @@ namespace blubbi {
       return;                                                    \
     }                                                            \
   }                                                              \
-  [[fallthrough]];                                               \
-  case index:
+  label_##index:
 
 #define CO_AWAIT_BUFFERED(type, index, value)                    \
   {                                                              \
@@ -487,8 +488,7 @@ namespace blubbi {
       return;                                                    \
     }                                                            \
   }                                                              \
-  [[fallthrough]];                                               \
-  case index:                                                    \
+  label_##index:                                                 \
   {                                                              \
     using BufT##index = REMOVE_PARENS(type);                     \
     reinterpret_cast<BufT##index*>(state.awaitBuffer)            \
@@ -557,9 +557,7 @@ struct CoroImpl {
       : CoroImpl<GeneratorStateMachine, PromiseType \
                                    > {                      \
     StateType state; \
-    void doStep() { \
-switch (this->curState) {      \
-case 0:
+    void doStep() {
 
 #define COROUTINE_HEADER_WITH_TRY(returnType, StateType)                              \
 using PromiseType =                                                  \
@@ -569,12 +567,9 @@ struct GeneratorStateMachine                                         \
 > {                      \
 StateType state; \
 void doStep() { \
-try { \
-switch (this->curState) {      \
-case 0:
+try {
 
 #define COROUTINE_FOOTER(...) \
-  }                      \
   }                      \
   }                      \
   ;                      \
@@ -585,7 +580,6 @@ case 0:
   return frame->pt.get_return_object();
 
 #define COROUTINE_FOOTER_WITH_TRY(...) \
-}                      \
 } catch(...) {this->state.handleException(std::current_exception(), this->curState, [this](){doStep();});} \
 }                      \
 }                      \

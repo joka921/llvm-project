@@ -447,7 +447,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             structCode += "\n    size_t dispatchExceptionHandling(std::exception_ptr eptr) {\n";
             structCode += "      switch (activeTryBlocks.back()) {\n";
             for (const auto &tryCatch : coro.tryCatchBlocks) {
-                structCode += "        case " + std::to_string(tryCatch.index) + ": return catchClauseImpl_" + std::to_string(tryCatch.index) + "(std::move(eptr));\n";
+                structCode += "        case " + std::to_string(tryCatch.resumeIndex) + ": return catchClauseImpl_" + std::to_string(tryCatch.resumeIndex) + "(std::move(eptr));\n";
             }
             structCode += "        default: std::terminate();\n";
             structCode += "      }\n";
@@ -456,7 +456,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             // Add catch clause implementation member functions
             structCode += "\n    // Exception handler member functions\n";
             for (const auto &tryCatch : coro.tryCatchBlocks) {
-                structCode += "    size_t catchClauseImpl_" + std::to_string(tryCatch.index) + "(std::exception_ptr eptr) {\n";
+                structCode += "    size_t catchClauseImpl_" + std::to_string(tryCatch.resumeIndex) + "(std::exception_ptr eptr) {\n";
                 structCode += "      auto nextState = activeTryBlocks.back();\n";
                 structCode += "      activeTryBlocks.pop_back();\n";
                 structCode += "      auto lambda = [&]() {\n";
@@ -482,7 +482,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                 structCode += "      }\n";
                 structCode += "    }\n";
 
-                REWRITE_LOG() << "    Added catchClauseImpl_" << tryCatch.index << " to struct\n";
+                REWRITE_LOG() << "    Added catchClauseImpl_" << tryCatch.resumeIndex << " to struct\n";
             }
 
             // Add destroyBecauseOfException function
@@ -490,7 +490,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             structCode += "    void destroyBecauseOfException(size_t tryCatchBlockIndex) {\n";
             structCode += "      switch (tryCatchBlockIndex) {\n";
             for (const auto &tryCatch : coro.tryCatchBlocks) {
-                structCode += "        case " + std::to_string(tryCatch.index) + ":\n";
+                structCode += "        case " + std::to_string(tryCatch.resumeIndex) + ":\n";
                 // Destroy all variables in this try block in reverse order
                 for (const auto &varName : tryCatch.variablesInTryBlock) {
                     structCode += "          if (" + varName + ".constructed) { " + varName + ".destroy(); }\n";
@@ -618,6 +618,22 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         } else {
             structCode += "  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) ";
         }
+
+        // Generate goto-based dispatch switch
+        // Collect all resume point indices (suspension points + TRY_END resume points)
+        // CO_RETURN indices are NOT included — they don't create resume points
+        structCode += "\nswitch(this->curState) {\n  case 0: break;\n";
+        for (const auto &coroStmt : coro.coroutineStatements) {
+            if (coroStmt.type != CoroutineStatement::RETURN) {
+                structCode += "  case " + std::to_string(coroStmt.index) +
+                              ": goto label_" + std::to_string(coroStmt.index) + ";\n";
+            }
+        }
+        for (const auto &tryCatch : coro.tryCatchBlocks) {
+            structCode += "  case " + std::to_string(tryCatch.resumeIndex) +
+                          ": goto label_" + std::to_string(tryCatch.resumeIndex) + ";\n";
+        }
+        structCode += "  default: return;\n}\n";
 
         return structCode;
     }

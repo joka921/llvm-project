@@ -194,25 +194,83 @@ cppcoro::generator<int> lambda () {
 }
 */
 
-cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
+cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
   // _coro_storage and CoroImpl assumed to be available in global namespace
   struct _detail_coro_impl {
-    // No local variables found in this coroutine
+    // Local variables (including ranged-for loop variables)
+    _coro_storage<int&, true> x;
+    _coro_storage<int&, true> y;
+    _coro_storage<int&, true> i;
+    _coro_storage<int&, true> z;
 
-    // Subexpression temporaries
-    _coro_storage<int&, true> temp_1_0;
-    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_1;
-    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_2;
-    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_3;
+    // Exception handling infrastructure
+    std::vector<size_t> activeTryBlocks;
+
+    void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {
+        destroyBecauseOfExceptionHandling(activeTryBlocks.back());
+      nextState = dispatchExceptionHandling(std::move(eptr));
+      resume();
+    }
+
+    size_t dispatchExceptionHandling(std::exception_ptr eptr) {
+      switch (activeTryBlocks.back()) {
+        case 1: return catchClauseImpl_1(std::move(eptr));
+        default: std::terminate();
+      }
+    }
+
+    // Exception handler member functions
+    size_t catchClauseImpl_1(std::exception_ptr eptr) {
+        auto nextState = activeTryBlocks.back();
+        activeTryBlocks.pop_back();
+        auto lambda = [&]() {
+            try {
+                std::rethrow_exception(eptr);
+            } catch (class std::exception &e) {
+                std::cout << "Caught exception: " << e.what() << " x=" << CO_GET_STATE(x) << std::endl;
+            } catch (...) {
+                std::cout << "Caught unknown exception, x=" << CO_GET_STATE(x) << std::endl;
+            }
+            return nextState;
+        };
+        if (activeTryBlocks.empty()) {
+            return lambda();
+        } else {
+            try {
+                return lambda();
+            } catch (...) {
+                return dispatchExceptionHandling(std::current_exception());
+            }
+        }
+    }
+
+    // Destroy variables in case of exception in try block
+    void destroyBecauseOfException(size_t tryCatchBlockIndex) {
+      switch (tryCatchBlockIndex) {
+        case 1:
+          if (y.constructed) { y.destroy(); }
+          if (i.constructed) { i.destroy(); }
+          if (z.constructed) { z.destroy(); }
+          break;
+        default: break;
+      }
+    }
 
     // Destroy variables when coroutine is suspended at a specific state
     void destroySuspendedCoro(size_t curState) {
       switch (curState) {
-        case 1:
-          temp_1_0.destroy();
-          temp_1_1.destroy();
-          temp_1_2.destroy();
-          temp_1_3.destroy();
+        case 5:
+        cleanup_4:
+        case 4:
+          break;
+        cleanup_3:
+        case 3:
+          z.destroy();
+          i.destroy();
+        cleanup_2:
+        case 2:
+          y.destroy();
+          x.destroy();
           break;
         case 0:  // initial state
           break;
@@ -221,21 +279,35 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
   };
 
   using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) 
+  COROUTINE_HEADER_WITH_TRY(_ActualCoroType, _detail_coro_impl) 
 switch(this->curState) {
   case 0: break;
+  case 2: goto label_2;
+  case 3: goto label_3;
+  case 4: goto label_4;
   case 1: goto label_1;
   default: return;
 }
 
-
-CO_YIELD(1, CO_PAREN_INIT_OWNING(temp_1_0, CO_PAREN_INIT_OWNING(temp_1_1, CO_PAREN_INIT_OWNING(temp_1_2, std::string{"hallo"}) + CO_PAREN_INIT_OWNING(temp_1_3, std::string{"bye"})).size()));
-this->state.temp_1_3.destroy();
-this->state.temp_1_2.destroy();
-this->state.temp_1_1.destroy();
-this->state.temp_1_0.destroy();
-CO_RETURN_FALLOFF(2);
-COROUTINE_FOOTER()
+  CO_PAREN_INIT_OWNING(x,  42);
+  TRY_BEGIN(1); {
+    CO_PAREN_INIT_OWNING(y,  CO_GET(x) + 1);
+    CO_YIELD(2,  CO_GET(y));
+    CO_PAREN_INIT_OWNING(i,  15);
+    while (CO_GET(i)) {
+      CO_PAREN_INIT_OWNING(z,  CO_GET(y) + 1);
+      CO_YIELD(3,  CO_GET(z));
+      --CO_GET(i);
+        this->state.z.destroy();
+}
+      this->state.i.destroy();
+    this->state.y.destroy();
+} TRY_END(1);
+  CO_YIELD(4,  CO_GET(x));
+  CO_RETURN_VOID(5);
+    this->state.x.destroy();
+CO_RETURN_FALLOFF(6);
+COROUTINE_FOOTER_WITH_TRY()
 }
 
 // ============================================================

@@ -106,6 +106,9 @@ public:
     bool VisitDeclStmt(DeclStmt *declStmt);
     bool VisitCoyieldExpr(CoyieldExpr *coyield);
     bool VisitCoawaitExpr(CoawaitExpr *coawait);
+    template <typename YieldOrAwaitExpr>
+    bool VisitYieldOrAwaitExpr(YieldOrAwaitExpr* yieldOrAwait, CoroutineStatement::Type type);
+
     bool VisitCoreturnStmt(CoreturnStmt *coreturn);
     bool TraverseCXXTryStmt(CXXTryStmt *tryStmt);
     bool TraverseCXXForRangeStmt(CXXForRangeStmt *forRange);

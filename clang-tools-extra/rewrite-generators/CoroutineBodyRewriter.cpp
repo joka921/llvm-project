@@ -13,6 +13,8 @@
 #include <sstream>
 #include <algorithm>
 
+#include "../../llvm/lib/Transforms/Coroutines/CoroCloner.h"
+
 static bool hasCoroutineKeywords(const Stmt *stmt) {
     if (!stmt) return false;
     if (isa<CoawaitExpr>(stmt) || isa<CoyieldExpr>(stmt) || isa<CoreturnStmt>(stmt))
@@ -265,12 +267,10 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
         return true; // Continue traversing
     }
 
-    // Handle co_yield expressions
-bool CoroutineBodyRewriter::VisitCoyieldExpr(CoyieldExpr *coyield) {
-        REWRITE_LOG() << "  Found co_yield expression\n";
-
+template <typename YieldOrAwaitExpr>
+bool CoroutineBodyRewriter::VisitYieldOrAwaitExpr(YieldOrAwaitExpr *coyield, CoroutineStatement::Type type) {
         CoroutineStatement coroStmt;
-        coroStmt.type = CoroutineStatement::YIELD;
+        coroStmt.type = type;
         coroStmt.stmt = coyield;
         coroStmt.operand = getOriginalCoroutineExprArgument(coyield);
         coroStmt.index = nextCoroStatementIndex++;
@@ -284,29 +284,7 @@ bool CoroutineBodyRewriter::VisitCoyieldExpr(CoyieldExpr *coyield) {
             coroStmt.operandEnd = coroStmt.operand->getEndLoc();
 
             // Collect subexpression temporaries (existing behavior)
-            // TODO<joka921> here we try the simplification for nested temporaries.
-            //collectTemporariesFromExpression(coroStmt.operand, coroStmt);
             collectTemporariesFromExpression(coyield->getOperand(), coroStmt);
-
-            // Check if the operand itself is a temporary (prvalue)
-            /*
-            if (isPrValue(coroStmt.operand)) {
-                // Create a TemporaryInfo for the top-level temporary
-                TemporaryInfo topLevelTemp;
-                topLevelTemp.expr = nullptr;  // No explicit MaterializeTemporaryExpr
-                topLevelTemp.tempVarName = "temp_" + std::to_string(coroStmt.index) + "_toplevel";
-                topLevelTemp.type = coroStmt.operand->getType();
-                topLevelTemp.constructLoc = coroStmt.operand->getBeginLoc();
-                topLevelTemp.isBracedInit = false;  // Always use paren init
-                topLevelTemp.initArgs = "";  // Handled via range replacement
-
-                REWRITE_LOG() << "    DEBUG: co_yield operand is a prvalue, creating top-level temporary "
-                             << topLevelTemp.tempVarName << " of type "
-                             << typeAsString(topLevelTemp.type, *astContext) << "\n";
-
-                coroStmt.temporaries.push_back(topLevelTemp);
-            }
-            */
 
             // Add temporary variable names to alive variables
             for (const auto &temp : coroStmt.temporaries) {
@@ -328,75 +306,20 @@ bool CoroutineBodyRewriter::VisitCoyieldExpr(CoyieldExpr *coyield) {
         }
 
         coroutineStatements.push_back(coroStmt);
-
-        REWRITE_LOG() << "    DEBUG: Added co_yield with index " << coroStmt.index << " with " << coroStmt.aliveVariables.size() << " alive variables\n";
-
+        REWRITE_LOG() << "Added yield/await statement with index " << coroStmt.index << "\n";
         return true;
+    }
+
+    // Handle co_yield expressions
+bool CoroutineBodyRewriter::VisitCoyieldExpr(CoyieldExpr *coyield) {
+        REWRITE_LOG() << "  Found co_yield expression\n";
+    return VisitYieldOrAwaitExpr(coyield, CoroutineStatement::YIELD);
     }
 
     // Handle co_await expressions
 bool CoroutineBodyRewriter::VisitCoawaitExpr(CoawaitExpr *coawait) {
         REWRITE_LOG() << "  Found co_await expression\n";
-
-        CoroutineStatement coroStmt;
-        coroStmt.type = CoroutineStatement::AWAIT;
-        coroStmt.stmt = coawait;
-        coroStmt.operand = getOriginalCoroutineExprArgument(coawait);
-        coroStmt.index = nextCoroStatementIndex++;
-
-        // Find the location of the co_await keyword
-        coroStmt.keywordLoc = coawait->getKeywordLoc();
-
-        // Get the operand range
-        if (coroStmt.operand) {
-            coroStmt.operandStart = coroStmt.operand->getBeginLoc();
-            coroStmt.operandEnd = coroStmt.operand->getEndLoc();
-
-            // Collect subexpression temporaries (existing behavior)
-            collectTemporariesFromExpression(coroStmt.operand, coroStmt);
-
-            // Check if the operand itself is a temporary (prvalue)
-            if (isPrValue(coroStmt.operand)) {
-                // Create a TemporaryInfo for the top-level temporary
-                TemporaryInfo topLevelTemp;
-                topLevelTemp.expr = nullptr;  // No explicit MaterializeTemporaryExpr
-                topLevelTemp.tempVarName = "temp_" + std::to_string(coroStmt.index) + "_toplevel";
-                topLevelTemp.type = coroStmt.operand->getType();
-                topLevelTemp.constructLoc = coroStmt.operand->getBeginLoc();
-                topLevelTemp.isBracedInit = false;  // Always use paren init
-                topLevelTemp.initArgs = "";  // Handled via range replacement
-
-                REWRITE_LOG() << "    DEBUG: co_await operand is a prvalue, creating top-level temporary "
-                             << topLevelTemp.tempVarName << " of type "
-                             << typeAsString(topLevelTemp.type, *astContext) << "\n";
-
-                coroStmt.temporaries.push_back(topLevelTemp);
-            }
-
-            // Add temporary variable names to alive variables
-            for (const auto &temp : coroStmt.temporaries) {
-                coroStmt.aliveVariables.push_back(temp.tempVarName);
-                REWRITE_LOG() << "      DEBUG: Temporary '" << temp.tempVarName
-                             << "' is alive at suspension point " << coroStmt.index << "\n";
-            }
-        }
-
-        // Capture alive variables at this suspension point
-        // Traverse scopeStack from innermost to outermost, collecting all variables
-        for (auto it = scopeStack.rbegin(); it != scopeStack.rend(); ++it) {
-            const ScopeInfo &scope = *it;
-            // Add variables from this scope in reverse order (already in reverse from rbegin)
-            for (auto varIt = scope.variablesInScope.rbegin(); varIt != scope.variablesInScope.rend(); ++varIt) {
-                coroStmt.aliveVariables.push_back(*varIt);
-                REWRITE_LOG() << "      DEBUG: Variable '" << *varIt << "' is alive at suspension point " << coroStmt.index << "\n";
-            }
-        }
-
-        coroutineStatements.push_back(coroStmt);
-
-        REWRITE_LOG() << "    DEBUG: Added co_await with index " << coroStmt.index << " with " << coroStmt.aliveVariables.size() << " alive variables\n";
-
-        return true;
+    return VisitYieldOrAwaitExpr(coawait, CoroutineStatement::AWAIT);
     }
 
     // Handle co_return statements

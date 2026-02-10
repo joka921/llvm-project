@@ -194,10 +194,51 @@ cppcoro::generator<int> lambda () {
 }
 */
 
-cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
+cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
   // _coro_storage and CoroImpl assumed to be available in global namespace
-  struct _detail_coro_impl {
-    // Local variables (including ranged-for loop variables)
+  using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
+  struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
+    // No local variables found in this coroutine
+
+    // Subexpression temporaries
+    _coro_storage<int&, true> temp_1_0;
+    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_1;
+
+    // Destroy variables when coroutine is suspended at a specific state
+    void destroySuspendedCoro(size_t curState) {
+      switch (curState) {
+        case 1:
+          temp_1_0.destroy();
+          temp_1_1.destroy();
+          break;
+        case 0:  // initial state
+          break;
+      }
+    }
+
+    void doStep() {
+        switch (this->curState) {
+            case 0: break;
+            case 1: goto label_1;
+            default: return;
+        }
+
+
+    CO_YIELD(1,  CO_PAREN_INIT_OWNING(temp_1_0, CO_PAREN_INIT_OWNING(temp_1_1, std::string{"hallo"}).size()));
+        temp_1_1.destroy();
+        temp_1_0.destroy();
+CO_RETURN_FALLOFF(2);
+}
+};
+void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+return frame->pt.get_return_object();
+}
+
+cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
+  using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
+  struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
+    // Local variables
     _coro_storage<int&, true> x;
     _coro_storage<int&, true> y;
     _coro_storage<int&, true> i;
@@ -207,7 +248,7 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
     std::vector<size_t> activeTryBlocks;
 
     void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {
-        destroyBecauseOfExceptionHandling(activeTryBlocks.back());
+        destroyBecauseOfException(activeTryBlocks.back());
       nextState = dispatchExceptionHandling(std::move(eptr));
       resume();
     }
@@ -276,10 +317,9 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
           break;
       }
     }
-  };
 
-  using _ActualCoroType = cppcoro::generator<int, cppcoro::NoDetails, Handle>;
-  COROUTINE_HEADER_WITH_TRY(_ActualCoroType, _detail_coro_impl) 
+    void doStep() {
+    try {
 switch(this->curState) {
   case 0: break;
   case 2: goto label_2;
@@ -298,16 +338,21 @@ switch(this->curState) {
       CO_PAREN_INIT_OWNING(z,  CO_GET(y) + 1);
       CO_YIELD(3,  CO_GET(z));
       --CO_GET(i);
-        this->state.z.destroy();
+        this->z.destroy();
 }
-      this->state.i.destroy();
-    this->state.y.destroy();
+      this->i.destroy();
+    this->y.destroy();
 } TRY_END(1);
   CO_YIELD(4,  CO_GET(x));
   CO_RETURN_VOID(5);
-    this->state.x.destroy();
+    this->x.destroy();
 CO_RETURN_FALLOFF(6);
-COROUTINE_FOOTER_WITH_TRY()
+} catch(...) {this->handleException(std::current_exception(), this->curState, [this](){doStep();});}
+}
+};
+void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+return frame->pt.get_return_object();
 }
 
 // ============================================================
@@ -347,9 +392,9 @@ struct SimpleTask {
 // ============================================================
 
 SimpleTask testCoAwaitVoid() {
-    struct _detail_coro_impl {
+    using PromiseType = SimpleTask::promise_type;
+    struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
         _coro_storage<int&, true> x;
-        std::vector<size_t> activeTryBlocks;
 
         void destroySuspendedCoro(size_t curState) {
             switch (curState) {
@@ -361,10 +406,8 @@ SimpleTask testCoAwaitVoid() {
                     break;
             }
         }
-    };
 
-    using _ActualCoroType = SimpleTask;
-    COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+    void doStep() {
     switch(this->curState) { case 0: break; case 1: goto label_1; default: return; }
     CO_PAREN_INIT_OWNING(x, 42);
     // co_await SuspendAlways{};
@@ -372,9 +415,13 @@ SimpleTask testCoAwaitVoid() {
     // After resume, x should still be 42. Add 1 to prove we resumed.
     CO_GET(x) += 1;
     CO_RETURN_VALUE(2, CO_GET(x));
-    this->state.x.destroy();
+    this->x.destroy();
     CO_RETURN_VALUE_FALLOFF(3, 0);
-    COROUTINE_FOOTER()
+    }
+    };
+    void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+    auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+    return frame->pt.get_return_object();
 }
 
 // ============================================================
@@ -389,10 +436,10 @@ struct IntAwaiter {
 };
 
 SimpleTask testCoAwaitSuspend() {
-    struct _detail_coro_impl {
+    using PromiseType = SimpleTask::promise_type;
+    struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
         _coro_storage<int&, true> x;
         _coro_storage<IntAwaiter&, true> __awaiter_1;
-        std::vector<size_t> activeTryBlocks;
 
         void destroySuspendedCoro(size_t curState) {
             switch (curState) {
@@ -405,23 +452,25 @@ SimpleTask testCoAwaitSuspend() {
                     break;
             }
         }
-    };
 
-    using _ActualCoroType = SimpleTask;
-    COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+    void doStep() {
     switch(this->curState) { case 0: break; case 1: goto label_1; default: return; }
     CO_PAREN_INIT_OWNING(x, 10);
     // auto result = co_await IntAwaiter{100};
     CO_AWAIT_SUSPEND(1, __awaiter_1, IntAwaiter{100});
     {
         auto result = CO_GET(__awaiter_1).await_resume();
-        this->state.__awaiter_1.destroy();
+        this->__awaiter_1.destroy();
         CO_GET(x) += result;
     }
     CO_RETURN_VALUE(2, CO_GET(x));
-    this->state.x.destroy();
+    this->x.destroy();
     CO_RETURN_VALUE_FALLOFF(3, 0);
-    COROUTINE_FOOTER()
+    }
+    };
+    void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+    auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+    return frame->pt.get_return_object();
 }
 
 // ============================================================
@@ -469,18 +518,20 @@ struct AllocTask {
 };
 
 AllocTask testCustomAllocator() {
-    struct _detail_coro_impl {
-        std::vector<size_t> activeTryBlocks;
+    using PromiseType = AllocTask::promise_type;
+    struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
 
         void destroySuspendedCoro(size_t) {}
-    };
 
-    using _ActualCoroType = AllocTask;
-    COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+    void doStep() {
     switch(this->curState) { case 0: break; default: return; }
     CO_RETURN_VALUE(1, 99);
     CO_RETURN_VALUE_FALLOFF(2, 0);
-    COROUTINE_FOOTER()
+    }
+    };
+    void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+    auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+    return frame->pt.get_return_object();
 }
 
 // ============================================================
@@ -488,10 +539,10 @@ AllocTask testCustomAllocator() {
 // ============================================================
 
 SimpleTask testCoReturnValue() {
-    struct _detail_coro_impl {
+    using PromiseType = SimpleTask::promise_type;
+    struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
         _coro_storage<int&, true> a;
         _coro_storage<int&, true> b;
-        std::vector<size_t> activeTryBlocks;
 
         void destroySuspendedCoro(size_t curState) {
             switch (curState) {
@@ -503,18 +554,20 @@ SimpleTask testCoReturnValue() {
                     break;
             }
         }
-    };
 
-    using _ActualCoroType = SimpleTask;
-    COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl)
+    void doStep() {
     switch(this->curState) { case 0: break; default: return; }
     CO_PAREN_INIT_OWNING(a, 7);
     CO_PAREN_INIT_OWNING(b, 6);
     CO_RETURN_VALUE(1, CO_GET(a) * CO_GET(b));
-    this->state.a.destroy();
-    this->state.b.destroy();
+    this->a.destroy();
+    this->b.destroy();
     CO_RETURN_VALUE_FALLOFF(2, 0);
-    COROUTINE_FOOTER()
+    }
+    };
+    void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+    auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+    return frame->pt.get_return_object();
 }
 
 // ============================================================

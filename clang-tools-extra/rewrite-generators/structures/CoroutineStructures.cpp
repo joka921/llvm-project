@@ -257,7 +257,7 @@ CoroutineStatement::generateYieldOrAwaitReplacements(
         std::string destructorCalls = "\n";
         // Destroy in reverse order (last created first destroyed)
         for (auto it = temporaries.rbegin(); it != temporaries.rend(); ++it) {
-            destructorCalls += "        this->state." + it->tempVarName + ".destroy();\n";
+            destructorCalls += "        this->" + it->tempVarName + ".destroy();\n";
         }
 
         // Insert after the semicolon

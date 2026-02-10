@@ -90,7 +90,7 @@ void RangedForLoop::collectLoopVarConstruct(
             SourceLocation insertLoc = getLocForEndOfTokenFunc(lBraceLoc);
             SourceRange insertRange(insertLoc, insertLoc);
 
-            std::string constructCall = "\n    this->state." + loopVarName +
+            std::string constructCall = "\n    this->" + loopVarName +
                                         ".construct(*" + makeStateGetCall(beginVarName) + ");";
 
             int constructPriority = 20000 + static_cast<int>(index);

@@ -291,8 +291,9 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         structCode += "\n";
         */
 
-        // Generate the data structure
-        structCode += "  struct _detail_coro_impl {\n";
+        // Generate the unified coroutine class
+        structCode += "  using PromiseType = " + returnType + "::promise_type;\n";
+        structCode += "  struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {\n";
 
         // Debug: Print all variables that will be added to the struct
         REWRITE_LOG() << "  DEBUG: generateCoroImplStruct - Processing " << coro.localVariables.size() <<
@@ -399,7 +400,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
             // Add handleException function
             structCode += "\n    void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {\n";
-            structCode += "        destroyBecauseOfExceptionHandling(activeTryBlocks.back());\n";
+            structCode += "        destroyBecauseOfException(activeTryBlocks.back());\n";
             structCode += "      nextState = dispatchExceptionHandling(std::move(eptr));\n";
             structCode += "      resume();\n";
             structCode += "    }\n";
@@ -567,17 +568,11 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             REWRITE_LOG() << "    Added destroySuspendedCoro function\n";
         }
 
-        structCode += "  };\n\n";
-
-        // Add typedef to avoid comma issues in macro call
-        structCode += "  using _ActualCoroType = " + returnType + ";\n";
-
-        // Generate the COROUTINE_HEADER macro call
-        // The coroutine body will follow immediately after this
+        // Emit doStep() method directly (with try wrapper if needed)
         if (!coro.tryCatchBlocks.empty()) {
-            structCode += "  COROUTINE_HEADER_WITH_TRY(_ActualCoroType, _detail_coro_impl) ";
+            structCode += "\n    void doStep() {\n    try {\n";
         } else {
-            structCode += "  COROUTINE_HEADER(_ActualCoroType, _detail_coro_impl) ";
+            structCode += "\n    void doStep() {\n";
         }
 
         // Generate goto-based dispatch switch
@@ -1191,25 +1186,45 @@ void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, Corouti
                 REWRITE_LOG() << "  DEBUG: Added CO_RETURN_FALLOFF(" << falloffIndex << ") with priority "
                         << falloffReplacement.priority << "\n";
 
-                // Choose the appropriate footer macro based on whether we have try-catch blocks
-                std::string footerMacro = coro.tryCatchBlocks.empty() ? "COROUTINE_FOOTER" : "COROUTINE_FOOTER_WITH_TRY";
+                // Generate the footer code directly (no macros)
+                std::string footerCode;
 
-                if (!paramList.empty()) {
-                    replacement.replacement = footerMacro + "(" + paramList + ")\n";
-                } else {
-                    replacement.replacement = footerMacro + "()\n";
+                if (!coro.tryCatchBlocks.empty()) {
+                    // Close try block with catch handler
+                    footerCode += "} catch(...) {this->handleException(std::current_exception(), this->curState, [this](){doStep();});}\n";
                 }
 
-                // Use maximum priority to ensure COROUTINE_FOOTER comes after all destructors and CO_RETURN_FALLOFF
+                // Close doStep() and GeneratorStateMachine struct
+                footerCode += "}\n";  // close doStep
+                footerCode += "};\n";  // close GeneratorStateMachine
+
+                // Allocation and construction
+                footerCode += "void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));\n";
+
+                // Build the aggregate initializer: {{}, params...}
+                // {} calls CoroImpl constructor, remaining args init direct members
+                std::string initArgs;
+                if (!paramList.empty()) {
+                    initArgs = "{{}, " + paramList + "}";
+                } else {
+                    initArgs = "{{}}";
+                }
+
+                footerCode += "auto* frame = new (__coro_mem) GeneratorStateMachine" + initArgs + ";\n";
+                footerCode += "return frame->pt.get_return_object();\n";
+
+                replacement.replacement = footerCode;
+
+                // Use maximum priority to ensure footer comes after all destructors and CO_RETURN_FALLOFF
                 replacement.priority = std::numeric_limits<int>::max();
 
                 body_rewriter.scopeEndReplacements[fileOffset].push_back(replacement);
 
-                REWRITE_LOG() << "  DEBUG: Added " << footerMacro << " to scope end replacements with maximum priority ("
+                REWRITE_LOG() << "  DEBUG: Added footer code to scope end replacements with maximum priority ("
                         << replacement.priority << ") at file offset " << fileOffset << "\n";
-                REWRITE_LOG() << "  DEBUG: " << footerMacro << " replacement text: '" << replacement.replacement << "'\n";
+                REWRITE_LOG() << "  DEBUG: Footer replacement text: '" << replacement.replacement << "'\n";
 
-                REWRITE_LOG() << "  DEBUG: Successfully added " << footerMacro << " to scope end system\n";
+                REWRITE_LOG() << "  DEBUG: Successfully added footer code to scope end system\n";
             } else {
                 REWRITE_LOG() << "  ERROR: Invalid closing brace location for compound statement\n";
             }

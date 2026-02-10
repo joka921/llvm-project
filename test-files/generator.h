@@ -407,7 +407,7 @@ bool co_await_impl(auto &&awaiter, auto handle) {
   {                                                \
    this->curState = index; \
    promise().return_void(); \
-   this->state.destroySuspendedCoro(this->curState); \
+   this->destroySuspendedCoro(this->curState); \
    this->done_ = true; \
    if (!co_await_impl(promise().final_suspend(), Hdl::from_promise(pt))) { \
      return; \
@@ -420,7 +420,7 @@ bool co_await_impl(auto &&awaiter, auto handle) {
   {                                                              \
     this->curState = index;                                      \
     promise().return_value(value);                               \
-    this->state.destroySuspendedCoro(this->curState);            \
+    this->destroySuspendedCoro(this->curState);            \
     this->done_ = true;                                          \
     if (!co_await_impl(promise().final_suspend(),                \
                        Hdl::from_promise(pt))) {                 \
@@ -433,9 +433,9 @@ bool co_await_impl(auto &&awaiter, auto handle) {
 #define CO_RETURN_FALLOFF(index) CO_RETURN_VOID(index)
 #define CO_RETURN_VALUE_FALLOFF(index, value) CO_RETURN_VALUE(index, value)
 
-#define TRY_BEGIN(index) this->state.activeTryBlocks.push_back(index); void()
+#define TRY_BEGIN(index) this->activeTryBlocks.push_back(index); void()
 // TODO<joka921> Assert that this works in fact.
-#define TRY_END(index) this->state.activeTryBlocks.pop_back(); label_##index: void()
+#define TRY_END(index) this->activeTryBlocks.pop_back(); label_##index: void()
 
 namespace blubbi {
     template <typename T>
@@ -454,7 +454,7 @@ namespace blubbi {
 
 #define CO_AWAIT_SUSPEND(index, awaiter_storage, awaiter_expr)   \
   {                                                              \
-    this->state.awaiter_storage.construct(awaiter_expr);         \
+    this->awaiter_storage.construct(awaiter_expr);         \
     this->curState = index;                                      \
     if (!co_await_impl(CO_GET(awaiter_storage),                  \
                        Hdl::from_promise(pt))) {                 \
@@ -518,13 +518,14 @@ struct CoroImpl {
     }
 };
 
+// Legacy macros - kept for backward compatibility but the rewriter now generates
+// the full class structure directly.
 #define COROUTINE_HEADER(returnType, StateType)                              \
   using PromiseType =                                                  \
       returnType::promise_type;       \
   struct GeneratorStateMachine                                         \
       : CoroImpl<GeneratorStateMachine, PromiseType \
                                    > {                      \
-    StateType state; \
     void doStep() {
 
 #define COROUTINE_HEADER_WITH_TRY(returnType, StateType)                              \
@@ -533,7 +534,6 @@ returnType::promise_type;       \
 struct GeneratorStateMachine                                         \
 : CoroImpl<GeneratorStateMachine, PromiseType \
 > {                      \
-StateType state; \
 void doStep() { \
 try {
 
@@ -544,18 +544,18 @@ try {
   void* __coro_mem = coro_detail::promise_allocate<PromiseType>( \
     sizeof(GeneratorStateMachine));                               \
   auto* frame = new (__coro_mem)                                 \
-    GeneratorStateMachine{{}, {__VA_ARGS__}};                    \
+    GeneratorStateMachine{{}, __VA_ARGS__};                      \
   return frame->pt.get_return_object();
 
 #define COROUTINE_FOOTER_WITH_TRY(...) \
-} catch(...) {this->state.handleException(std::current_exception(), this->curState, [this](){doStep();});} \
+} catch(...) {this->handleException(std::current_exception(), this->curState, [this](){doStep();});} \
 }                      \
 }                      \
 ;                      \
 void* __coro_mem = coro_detail::promise_allocate<PromiseType>( \
   sizeof(GeneratorStateMachine));                               \
 auto* frame = new (__coro_mem)                                 \
-  GeneratorStateMachine{{}, {__VA_ARGS__}};                    \
+  GeneratorStateMachine{{}, __VA_ARGS__};                      \
 return frame->pt.get_return_object();
 
 #define FOR_LOOP_HEADER(N)
@@ -602,14 +602,14 @@ struct _coro_storage {
     }
 };
 
-#define CO_GET(arg) this->state.arg.get().ref_
+#define CO_GET(arg) this->arg.get().ref_
 #define CO_GET_STATE(arg) arg.get().ref_
 
 // TODO<joka921> Update the other OWNING also to the new lambda syntax.
-#define CO_BRACED_INIT(mem, ...) new(this->state.mem.buffer) typename decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;  this->state.mem.constructed=true
-#define CO_BRACED_INIT_OWNING(mem, ...) new(this->state.mem.buffer) typename decltype(this->state.mem)::Storage{ __VA_ARGS__} ;  this->state.mem.constructed=true
-#define CO_PAREN_INIT(mem, ...) new(this->state.mem.buffer) typename decltype(this->state.mem)::Storage{ &__VA_ARGS__} ;  this->state.mem.constructed=true
-#define CO_PAREN_INIT_OWNING(mem, ...) [&]() -> decltype(auto) {new(this->state.mem.buffer) typename decltype(this->state.mem)::Storage( __VA_ARGS__) ;  this->state.mem.constructed=true; return std::move(CO_GET(mem));}()
+#define CO_BRACED_INIT(mem, ...) new(this->mem.buffer) typename decltype(this->mem)::Storage{ &__VA_ARGS__} ;  this->mem.constructed=true
+#define CO_BRACED_INIT_OWNING(mem, ...) new(this->mem.buffer) typename decltype(this->mem)::Storage{ __VA_ARGS__} ;  this->mem.constructed=true
+#define CO_PAREN_INIT(mem, ...) new(this->mem.buffer) typename decltype(this->mem)::Storage{ &__VA_ARGS__} ;  this->mem.constructed=true
+#define CO_PAREN_INIT_OWNING(mem, ...) [&]() -> decltype(auto) {new(this->mem.buffer) typename decltype(this->mem)::Storage( __VA_ARGS__) ;  this->mem.constructed=true; return std::move(CO_GET(mem));}()
 
 
 template<typename Ref, bool isOwning>

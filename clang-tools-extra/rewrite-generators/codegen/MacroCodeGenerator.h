@@ -19,12 +19,12 @@ inline std::string makeGetCallInsideState(const std::string &varName) {
 
 // Helper function to generate state construct() call
 inline std::string makeStateConstructCall(const std::string &memberName, const std::string &initializer) {
-    return "this->state." + memberName + ".construct(" + initializer + ")";
+    return "this->" + memberName + ".construct(" + initializer + ")";
 }
 
 // Helper function to generate state destroy() call
 inline std::string makeStateDestroyCall(const std::string &memberName) {
-    return "this->state." + memberName + ".destroy()";
+    return "this->" + memberName + ".destroy()";
 }
 
 // Helper function to generate CO_BRACED_INIT prefix

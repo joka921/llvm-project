@@ -48,6 +48,7 @@ struct CoroutineStatement {
     const Stmt *stmt; // CoawaitExpr*, CoyieldExpr*, or CoreturnStmt*
     const Expr *operand; // The expression being yielded/awaited/returned
     unsigned index;
+    std::string awaiterMemberName; // e.g., "__awaiter_1"
     SourceLocation keywordLoc;
     SourceLocation operandStart;
     SourceLocation operandEnd;

@@ -64,14 +64,14 @@ CoroutineStatement::generateYieldOrAwaitReplacements(
     std::string macroStart;
 
     if (topLevelTemp) {
-        // Use CO_YIELD_TOPLEVEL(tempname, index, init_expr)
+        // Use CO_YIELD_TOPLEVEL(tempname, index, awaiterMem, init_expr)
         macroName = macroBaseName + "_TOPLEVEL";
-        macroStart = macroName + "(" + topLevelTemp->tempVarName + ", " + std::to_string(index) + ", ";
+        macroStart = macroName + "(" + topLevelTemp->tempVarName + ", " + std::to_string(index) + ", " + awaiterMemberName + ", ";
         REWRITE_LOG() << "    DEBUG: Using " << macroName << " for top-level temporary " << topLevelTemp->tempVarName << "\n";
     } else {
-        // Use regular CO_YIELD(index, operand)
-        macroName = macroBaseName;
-        macroStart = macroName + "(" + std::to_string(index) + ", ";
+        // Use regular CO_YIELD(index, awaiterMem, operand) or CO_AWAIT_VOID(index, awaiterMem, operand)
+        macroName = (macroBaseName == "CO_AWAIT") ? "CO_AWAIT_VOID" : macroBaseName;
+        macroStart = macroName + "(" + std::to_string(index) + ", " + awaiterMemberName + ", ";
         REWRITE_LOG() << "    DEBUG: Using " << macroName << " (no top-level temporary)\n";
     }
 
@@ -288,7 +288,7 @@ CoroutineStatement::generateReturnReplacements(
         // Case 1: co_return; (no operand) -> CO_RETURN_VOID(index);
         REWRITE_LOG() << "      DEBUG: co_return has no operand, using CO_RETURN_VOID\n";
 
-        std::string replacement = "CO_RETURN_VOID(" + std::to_string(index) + ");";
+        std::string replacement = "CO_RETURN_VOID(" + std::to_string(index) + ", __final_awaiter);";
         SourceRange keywordRange(keywordLoc, keywordEnd);
         replacements.emplace_back(keywordRange, replacement, priority, true);
     } else {
@@ -297,24 +297,24 @@ CoroutineStatement::generateReturnReplacements(
         bool isVoidType = operandType->isVoidType();
 
         if (isVoidType) {
-            // Case 2: co_return expr; where expr is void -> expr; CO_RETURN_VOID(index);
+            // Case 2: co_return expr; where expr is void -> expr; CO_RETURN_VOID(index, __final_awaiter);
             REWRITE_LOG() << "      DEBUG: co_return operand is void type, using CO_RETURN_VOID\n";
 
             // Replace "co_return " with nothing (just remove the keyword and space)
             SourceRange keywordRange(keywordLoc, keywordEnd);
             replacements.emplace_back(keywordRange, "", priority, true);
 
-            // Insert "; CO_RETURN_VOID(index)" after the operand
+            // Insert "; CO_RETURN_VOID(index, __final_awaiter)" after the operand
             SourceLocation operandEndLoc = Lexer::getLocForEndOfToken(operandEnd, 0, sourceManager, LangOptions());
             SourceRange insertRange(operandEndLoc, operandEndLoc);
-            std::string insertion = "; CO_RETURN_VOID(" + std::to_string(index) + ")";
+            std::string insertion = "; CO_RETURN_VOID(" + std::to_string(index) + ", __final_awaiter)";
             replacements.emplace_back(insertRange, insertion, priority + 1000, false);
         } else {
-            // Case 3: co_return expr; where expr is non-void -> CO_RETURN_VALUE(index, (expr))
+            // Case 3: co_return expr; where expr is non-void -> CO_RETURN_VALUE(index, __final_awaiter, (expr))
             REWRITE_LOG() << "      DEBUG: co_return operand is value type, using CO_RETURN_VALUE\n";
 
-            // Replace "co_return" with "CO_RETURN_VALUE(index, ("
-            std::string macroStart = "CO_RETURN_VALUE(" + std::to_string(index) + ", (";
+            // Replace "co_return" with "CO_RETURN_VALUE(index, __final_awaiter, ("
+            std::string macroStart = "CO_RETURN_VALUE(" + std::to_string(index) + ", __final_awaiter, (";
             SourceRange keywordRange(keywordLoc, keywordEnd);
             replacements.emplace_back(keywordRange, macroStart, priority, true);
 

@@ -392,30 +392,62 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             }
         }
 
-        // Add yield buffer for temporaries if needed
-        // Add exception handling infrastructure
-        if (!coro.tryCatchBlocks.empty()) {
-            structCode += "\n    // Exception handling infrastructure\n";
-            structCode += "    std::vector<size_t> activeTryBlocks;\n";
+        // Add awaiter storage members (initial, final, and per-suspension-point)
+        structCode += "\n    // Awaiter storage members\n";
+        structCode += "    _coro_storage<decltype(std::declval<PromiseType&>().initial_suspend())&, true> __initial_awaiter;\n";
+        structCode += "    _coro_storage<decltype(std::declval<PromiseType&>().final_suspend())&, true> __final_awaiter;\n";
 
-            // Add handleException function
-            structCode += "\n    void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {\n";
-            structCode += "        destroyBecauseOfException(activeTryBlocks.back());\n";
-            structCode += "      nextState = dispatchExceptionHandling(std::move(eptr));\n";
-            structCode += "      resume();\n";
-            structCode += "    }\n";
+        for (const auto &coroStmt : coro.coroutineStatements) {
+            if (coroStmt.type == CoroutineStatement::RETURN) continue;
 
-            // Add dispatchExceptionHandling function
-            structCode += "\n    size_t dispatchExceptionHandling(std::exception_ptr eptr) {\n";
-            structCode += "      switch (activeTryBlocks.back()) {\n";
-            for (const auto &tryCatch : coro.tryCatchBlocks) {
-                structCode += "        case " + std::to_string(tryCatch.resumeIndex) + ": return catchClauseImpl_" + std::to_string(tryCatch.resumeIndex) + "(std::move(eptr));\n";
+            std::string awaiterName = "__awaiter_" + std::to_string(coroStmt.index);
+
+            // Get awaiter type from the CoroutineSuspendExpr AST node
+            if (auto *suspendExpr = dyn_cast<CoroutineSuspendExpr>(coroStmt.stmt)) {
+                QualType awaiterQualType = suspendExpr->getOpaqueValue()->getType();
+                QualType baseType = awaiterQualType.getNonReferenceType();
+                std::string awaiterTypeStr = typeAsString(baseType, *astContext);
+                structCode += "    _coro_storage<" + awaiterTypeStr + " &, true> " + awaiterName + ";\n";
+                REWRITE_LOG() << "    Added awaiter member: _coro_storage<" << awaiterTypeStr << " &, true> " << awaiterName << "\n";
             }
-            structCode += "        default: std::terminate();\n";
-            structCode += "      }\n";
-            structCode += "    }\n";
+        }
 
-            // Add catch clause implementation member functions
+        // Add exception handling infrastructure (always generated)
+        structCode += "\n    // Exception handling infrastructure\n";
+        structCode += "    std::vector<size_t> activeTryBlocks;\n";
+
+        // Add handleException function with unhandled_exception fallback
+        structCode += "\n    void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {\n";
+        structCode += "      if (activeTryBlocks.empty()) {\n";
+        structCode += "        destroySuspendedCoro(this->curState);\n";
+        structCode += "        promise().unhandled_exception();\n";
+        structCode += "        this->done_ = true;\n";
+        structCode += "        this->__final_awaiter.construct(promise().final_suspend());\n";
+        structCode += "        if (!co_await_impl(this->__final_awaiter.get().ref_, Hdl::from_promise(pt))) {\n";
+        structCode += "          return;\n";
+        structCode += "        }\n";
+        structCode += "        this->__final_awaiter.get().ref_.await_resume();\n";
+        structCode += "        this->__final_awaiter.destroy();\n";
+        structCode += "        Hdl::from_promise(pt).destroy();\n";
+        structCode += "        return;\n";
+        structCode += "      }\n";
+        structCode += "      destroyBecauseOfException(activeTryBlocks.back());\n";
+        structCode += "      nextState = dispatchExceptionHandling(std::move(eptr));\n";
+        structCode += "      resume();\n";
+        structCode += "    }\n";
+
+        // Add dispatchExceptionHandling function
+        structCode += "\n    size_t dispatchExceptionHandling(std::exception_ptr eptr) {\n";
+        structCode += "      switch (activeTryBlocks.back()) {\n";
+        for (const auto &tryCatch : coro.tryCatchBlocks) {
+            structCode += "        case " + std::to_string(tryCatch.resumeIndex) + ": return catchClauseImpl_" + std::to_string(tryCatch.resumeIndex) + "(std::move(eptr));\n";
+        }
+        structCode += "        default: std::terminate();\n";
+        structCode += "      }\n";
+        structCode += "    }\n";
+
+        // Add catch clause implementation member functions (only when user has try-catch blocks)
+        if (!coro.tryCatchBlocks.empty()) {
             structCode += "\n    // Exception handler member functions\n";
             for (const auto &tryCatch : coro.tryCatchBlocks) {
                 structCode += "    size_t catchClauseImpl_" + std::to_string(tryCatch.resumeIndex) + "(std::exception_ptr eptr) {\n";
@@ -446,24 +478,24 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
                 REWRITE_LOG() << "    Added catchClauseImpl_" << tryCatch.resumeIndex << " to struct\n";
             }
-
-            // Add destroyBecauseOfException function
-            structCode += "\n    // Destroy variables in case of exception in try block\n";
-            structCode += "    void destroyBecauseOfException(size_t tryCatchBlockIndex) {\n";
-            structCode += "      switch (tryCatchBlockIndex) {\n";
-            for (const auto &tryCatch : coro.tryCatchBlocks) {
-                structCode += "        case " + std::to_string(tryCatch.resumeIndex) + ":\n";
-                // Destroy all variables in this try block in reverse order
-                for (const auto &varName : tryCatch.variablesInTryBlock) {
-                    structCode += "          if (" + varName + ".constructed) { " + varName + ".destroy(); }\n";
-                }
-                structCode += "          break;\n";
-            }
-            structCode += "        default: break;\n";
-            structCode += "      }\n";
-            structCode += "    }\n";
-            REWRITE_LOG() << "    Added destroyBecauseOfException function\n";
         }
+
+        // Add destroyBecauseOfException function (always generated)
+        structCode += "\n    // Destroy variables in case of exception in try block\n";
+        structCode += "    void destroyBecauseOfException(size_t tryCatchBlockIndex) {\n";
+        structCode += "      switch (tryCatchBlockIndex) {\n";
+        for (const auto &tryCatch : coro.tryCatchBlocks) {
+            structCode += "        case " + std::to_string(tryCatch.resumeIndex) + ":\n";
+            // Destroy all variables in this try block in reverse order
+            for (const auto &varName : tryCatch.variablesInTryBlock) {
+                structCode += "          if (" + varName + ".constructed) { " + varName + ".destroy(); }\n";
+            }
+            structCode += "          break;\n";
+        }
+        structCode += "        default: break;\n";
+        structCode += "      }\n";
+        structCode += "    }\n";
+        REWRITE_LOG() << "    Added exception handling infrastructure\n";
 
         // Add destroySuspendedCoro function (always needed if there are any coroutine statements)
         if (!coro.coroutineStatements.empty()) {
@@ -568,12 +600,8 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             REWRITE_LOG() << "    Added destroySuspendedCoro function\n";
         }
 
-        // Emit doStep() method directly (with try wrapper if needed)
-        if (!coro.tryCatchBlocks.empty()) {
-            structCode += "\n    void doStep() {\n    try {\n";
-        } else {
-            structCode += "\n    void doStep() {\n";
-        }
+        // Emit doStep() method with try wrapper (always needed for exception handling)
+        structCode += "\n    void doStep() {\n    try {\n";
 
         // Generate goto-based dispatch switch
         // Collect all resume point indices (suspension points + TRY_END resume points)
@@ -590,6 +618,10 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                           ": goto label_" + std::to_string(tryCatch.resumeIndex) + ";\n";
         }
         structCode += "  default: return;\n}\n";
+
+        // After the dispatch switch, process initial awaiter (reached via case 0)
+        structCode += "__initial_awaiter.get().ref_.await_resume();\n";
+        structCode += "__initial_awaiter.destroy();\n";
 
         return structCode;
     }
@@ -1179,7 +1211,7 @@ void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, Corouti
                         })->index + 1;
 
                 ScopeEndReplacement falloffReplacement;
-                falloffReplacement.replacement = "CO_RETURN_FALLOFF(" + std::to_string(falloffIndex) + ");\n";
+                falloffReplacement.replacement = "CO_RETURN_FALLOFF(" + std::to_string(falloffIndex) + ", __final_awaiter);\n";
                 falloffReplacement.priority = std::numeric_limits<int>::max() - 1; // Just before COROUTINE_FOOTER
                 body_rewriter.scopeEndReplacements[fileOffset].push_back(falloffReplacement);
 
@@ -1189,10 +1221,8 @@ void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, Corouti
                 // Generate the footer code directly (no macros)
                 std::string footerCode;
 
-                if (!coro.tryCatchBlocks.empty()) {
-                    // Close try block with catch handler
-                    footerCode += "} catch(...) {this->handleException(std::current_exception(), this->curState, [this](){doStep();});}\n";
-                }
+                // Close try block with catch handler (always needed for exception handling)
+                footerCode += "} catch(...) {this->handleException(std::current_exception(), this->curState, [this](){doStep();});}\n";
 
                 // Close doStep() and GeneratorStateMachine struct
                 footerCode += "}\n";  // close doStep
@@ -1211,7 +1241,12 @@ void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, Corouti
                 }
 
                 footerCode += "auto* frame = new (__coro_mem) GeneratorStateMachine" + initArgs + ";\n";
-                footerCode += "return frame->pt.get_return_object();\n";
+                footerCode += "auto ret = frame->pt.get_return_object();\n";
+                footerCode += "frame->__initial_awaiter.construct(frame->pt.initial_suspend());\n";
+                footerCode += "if (co_await_impl(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt))) {\n";
+                footerCode += "  frame->doStep();\n";
+                footerCode += "}\n";
+                footerCode += "return ret;\n";
 
                 replacement.replacement = footerCode;
 

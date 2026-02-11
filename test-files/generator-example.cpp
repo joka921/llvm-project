@@ -194,61 +194,42 @@ cppcoro::generator<int> lambda () {
 }
 */
 
-cppcoro::generator<int, cppcoro::NoDetails, Handle> yieldTemporaries() {
+
+cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
   // _coro_storage and CoroImpl assumed to be available in global namespace
   using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
   struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
-    // No local variables found in this coroutine
-
-    // Subexpression temporaries
-    _coro_storage<int&, true> temp_1_0;
-    _coro_storage<class std::basic_string<char, struct std::char_traits<char>, class std::allocator<char>>&, true> temp_1_1;
-
-    // Destroy variables when coroutine is suspended at a specific state
-    void destroySuspendedCoro(size_t curState) {
-      switch (curState) {
-        case 1:
-          temp_1_0.destroy();
-          temp_1_1.destroy();
-          break;
-        case 0:  // initial state
-          break;
-      }
-    }
-
-    void doStep() {
-        switch (this->curState) {
-            case 0: break;
-            case 1: goto label_1;
-            default: return;
-        }
-
-
-    CO_YIELD(1,  CO_PAREN_INIT_OWNING(temp_1_0, CO_PAREN_INIT_OWNING(temp_1_1, std::string{"hallo"}).size()));
-        temp_1_1.destroy();
-        temp_1_0.destroy();
-CO_RETURN_FALLOFF(2);
-}
-};
-void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
-auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
-return frame->pt.get_return_object();
-}
-
-cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
-  using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
-  struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
-    // Local variables
+    // Local variables (including ranged-for loop variables)
     _coro_storage<int&, true> x;
     _coro_storage<int&, true> y;
     _coro_storage<int&, true> i;
     _coro_storage<int&, true> z;
 
+    // Awaiter storage members
+    _coro_storage<decltype(std::declval<PromiseType&>().initial_suspend())&, true> __initial_awaiter;
+    _coro_storage<decltype(std::declval<PromiseType&>().final_suspend())&, true> __final_awaiter;
+    _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_2;
+    _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_3;
+    _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_4;
+
     // Exception handling infrastructure
     std::vector<size_t> activeTryBlocks;
 
     void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {
-        destroyBecauseOfException(activeTryBlocks.back());
+      if (activeTryBlocks.empty()) {
+        destroySuspendedCoro(this->curState);
+        promise().unhandled_exception();
+        this->done_ = true;
+        this->__final_awaiter.construct(promise().final_suspend());
+        if (!co_await_impl(this->__final_awaiter.get().ref_, Hdl::from_promise(pt))) {
+          return;
+        }
+        this->__final_awaiter.get().ref_.await_resume();
+        this->__final_awaiter.destroy();
+        Hdl::from_promise(pt).destroy();
+        return;
+      }
+      destroyBecauseOfException(activeTryBlocks.back());
       nextState = dispatchExceptionHandling(std::move(eptr));
       resume();
     }
@@ -262,27 +243,27 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
 
     // Exception handler member functions
     size_t catchClauseImpl_1(std::exception_ptr eptr) {
-        auto nextState = activeTryBlocks.back();
-        activeTryBlocks.pop_back();
-        auto lambda = [&]() {
-            try {
-                std::rethrow_exception(eptr);
-            } catch (class std::exception &e) {
-                std::cout << "Caught exception: " << e.what() << " x=" << CO_GET_STATE(x) << std::endl;
-            } catch (...) {
-                std::cout << "Caught unknown exception, x=" << CO_GET_STATE(x) << std::endl;
-            }
-            return nextState;
-        };
-        if (activeTryBlocks.empty()) {
-            return lambda();
-        } else {
-            try {
-                return lambda();
-            } catch (...) {
-                return dispatchExceptionHandling(std::current_exception());
-            }
+      auto nextState = activeTryBlocks.back();
+      activeTryBlocks.pop_back();
+      auto lambda = [&]() {
+        try {
+          std::rethrow_exception(eptr);
+        } catch (class std::exception & e) {
+        std::cout << "Caught exception: " << e.what() << " x=" << CO_GET_STATE(x) << std::endl;
+    } catch (...) {
+        std::cout << "Caught unknown exception, x=" << CO_GET_STATE(x) << std::endl;
+    } 
+        return nextState;
+      };
+      if (activeTryBlocks.empty()) {
+        return lambda();
+      } else {
+        try {
+          return lambda();
+        } catch (...) {
+          return dispatchExceptionHandling(std::current_exception());
         }
+      }
     }
 
     // Destroy variables in case of exception in try block
@@ -320,6 +301,7 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
 
     void doStep() {
     try {
+
 switch(this->curState) {
   case 0: break;
   case 2: goto label_2;
@@ -328,31 +310,38 @@ switch(this->curState) {
   case 1: goto label_1;
   default: return;
 }
+__initial_awaiter.get().ref_.await_resume();
+__initial_awaiter.destroy();
 
-  CO_PAREN_INIT_OWNING(x,  42);
-  TRY_BEGIN(1); {
-    CO_PAREN_INIT_OWNING(y,  CO_GET(x) + 1);
-    CO_YIELD(2,  CO_GET(y));
-    CO_PAREN_INIT_OWNING(i,  15);
-    while (CO_GET(i)) {
-      CO_PAREN_INIT_OWNING(z,  CO_GET(y) + 1);
-      CO_YIELD(3,  CO_GET(z));
-      --CO_GET(i);
-        this->z.destroy();
+    CO_PAREN_INIT_OWNING(x,  42);
+    TRY_BEGIN(1); {
+        CO_PAREN_INIT_OWNING(y,  CO_GET(x) + 1);
+        CO_YIELD(2, __awaiter_2,  CO_GET(y));
+        CO_PAREN_INIT_OWNING(i,  15);
+        while (CO_GET(i)) {
+            CO_PAREN_INIT_OWNING(z,  CO_GET(y) + 1);
+            CO_YIELD(3, __awaiter_3,  CO_GET(z));
+            --CO_GET(i);
+            this->z.destroy();
 }
-      this->i.destroy();
+        this->i.destroy();
     this->y.destroy();
 } TRY_END(1);
-  CO_YIELD(4,  CO_GET(x));
-  CO_RETURN_VOID(5);
+    CO_YIELD(4, __awaiter_4,  CO_GET(x));
+    CO_RETURN_VOID(5, __final_awaiter);
     this->x.destroy();
-CO_RETURN_FALLOFF(6);
+CO_RETURN_FALLOFF(6, __final_awaiter);
 } catch(...) {this->handleException(std::current_exception(), this->curState, [this](){doStep();});}
 }
 };
 void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
 auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
-return frame->pt.get_return_object();
+auto ret = frame->pt.get_return_object();
+frame->__initial_awaiter.construct(frame->pt.initial_suspend());
+if (co_await_impl(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt))) {
+  frame->doStep();
+}
+return ret;
 }
 
 // ============================================================

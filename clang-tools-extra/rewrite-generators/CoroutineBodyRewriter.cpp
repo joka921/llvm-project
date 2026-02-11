@@ -274,6 +274,7 @@ bool CoroutineBodyRewriter::VisitYieldOrAwaitExpr(YieldOrAwaitExpr *coyield, Cor
         coroStmt.stmt = coyield;
         coroStmt.operand = getOriginalCoroutineExprArgument(coyield);
         coroStmt.index = nextCoroStatementIndex++;
+        coroStmt.awaiterMemberName = "__awaiter_" + std::to_string(coroStmt.index);
 
         // Find the location of the co_yield keyword
         coroStmt.keywordLoc = coyield->getKeywordLoc();

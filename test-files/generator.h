@@ -385,53 +385,60 @@ bool co_await_impl(auto &&awaiter, auto handle) {
     }
 }
 
-#define CO_YIELD(index, value)                                   \
-  {                                                       \
-    auto&& awaiter = promise().yield_value(value);        \
-    this->curState = index;                                  \
-    if (!co_await_impl(awaiter, Hdl::from_promise(pt))) { \
-      return;                                             \
-    }                                                     \
-  }                                                       \
-  label_##index:
+#define CO_YIELD(index, awaiterMem, value)                            \
+  {                                                                    \
+    this->awaiterMem.construct(promise().yield_value(value));           \
+    this->curState = index;                                            \
+    if (!co_await_impl(CO_GET(awaiterMem), Hdl::from_promise(pt))) {   \
+      return;                                                          \
+    }                                                                  \
+  }                                                                    \
+  label_##index:                                                       \
+  CO_GET(awaiterMem).await_resume();                                   \
+  this->awaiterMem.destroy();
 
-#define CO_YIELD_TOPLEVEL(tempname, index, init_expr) \
+#define CO_YIELD_TOPLEVEL(tempname, index, awaiterMem, init_expr) \
   CO_PAREN_INIT_OWNING(tempname, init_expr); \
-  CO_YIELD(index, CO_GET(tempname))
+  CO_YIELD(index, awaiterMem, CO_GET(tempname))
 
-#define CO_AWAIT_TOPLEVEL(tempname, index, init_expr) \
+#define CO_AWAIT_TOPLEVEL(tempname, index, awaiterMem, init_expr) \
   CO_PAREN_INIT_OWNING(tempname, init_expr); \
-  CO_AWAIT_VOID(index, CO_GET(tempname))
+  CO_AWAIT_VOID(index, awaiterMem, CO_GET(tempname))
 
-#define CO_RETURN_VOID(index) \
-  {                                                \
-   this->curState = index; \
-   promise().return_void(); \
-   this->destroySuspendedCoro(this->curState); \
-   this->done_ = true; \
-   if (!co_await_impl(promise().final_suspend(), Hdl::from_promise(pt))) { \
-     return; \
-   } \
-   Hdl::from_promise(pt).destroy(); \
-   return; \
-   } void()
-
-#define CO_RETURN_VALUE(index, value)                           \
-  {                                                              \
-    this->curState = index;                                      \
-    promise().return_value(value);                               \
-    this->destroySuspendedCoro(this->curState);            \
-    this->done_ = true;                                          \
-    if (!co_await_impl(promise().final_suspend(),                \
-                       Hdl::from_promise(pt))) {                 \
-      return;                                                    \
-    }                                                            \
-    Hdl::from_promise(pt).destroy();                             \
-    return;                                                      \
+#define CO_RETURN_VOID(index, finalAwaiterMem)                                  \
+  {                                                                              \
+    this->curState = index;                                                      \
+    promise().return_void();                                                     \
+    this->destroySuspendedCoro(this->curState);                                  \
+    this->done_ = true;                                                          \
+    this->finalAwaiterMem.construct(promise().final_suspend());                  \
+    if (!co_await_impl(CO_GET(finalAwaiterMem), Hdl::from_promise(pt))) {        \
+      return;                                                                    \
+    }                                                                            \
+    CO_GET(finalAwaiterMem).await_resume();                                      \
+    this->finalAwaiterMem.destroy();                                             \
+    Hdl::from_promise(pt).destroy();                                             \
+    return;                                                                      \
   } void()
 
-#define CO_RETURN_FALLOFF(index) CO_RETURN_VOID(index)
-#define CO_RETURN_VALUE_FALLOFF(index, value) CO_RETURN_VALUE(index, value)
+#define CO_RETURN_VALUE(index, finalAwaiterMem, value)                           \
+  {                                                                              \
+    this->curState = index;                                                      \
+    promise().return_value(value);                                               \
+    this->destroySuspendedCoro(this->curState);                                  \
+    this->done_ = true;                                                          \
+    this->finalAwaiterMem.construct(promise().final_suspend());                  \
+    if (!co_await_impl(CO_GET(finalAwaiterMem), Hdl::from_promise(pt))) {        \
+      return;                                                                    \
+    }                                                                            \
+    CO_GET(finalAwaiterMem).await_resume();                                      \
+    this->finalAwaiterMem.destroy();                                             \
+    Hdl::from_promise(pt).destroy();                                             \
+    return;                                                                      \
+  } void()
+
+#define CO_RETURN_FALLOFF(index, finalAwaiterMem) CO_RETURN_VOID(index, finalAwaiterMem)
+#define CO_RETURN_VALUE_FALLOFF(index, finalAwaiterMem, value) CO_RETURN_VALUE(index, finalAwaiterMem, value)
 
 #define TRY_BEGIN(index) this->activeTryBlocks.push_back(index); void()
 // TODO<joka921> Assert that this works in fact.
@@ -442,25 +449,26 @@ namespace blubbi {
     using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
 }
 
-#define CO_AWAIT_VOID(index, awaiter_expr)                      \
-  {                                                              \
-    auto&& __awaiter = awaiter_expr;                             \
-    this->curState = index;                                      \
-    if (!co_await_impl(__awaiter, Hdl::from_promise(pt))) {      \
-      return;                                                    \
-    }                                                            \
-  }                                                              \
-  label_##index:
+#define CO_AWAIT_VOID(index, awaiterMem, expr)                                  \
+  {                                                                              \
+    this->awaiterMem.construct(coro_detail::get_awaitable(promise(), expr));      \
+    this->curState = index;                                                      \
+    if (!co_await_impl(CO_GET(awaiterMem), Hdl::from_promise(pt))) {             \
+      return;                                                                    \
+    }                                                                            \
+  }                                                                              \
+  label_##index:                                                                 \
+  CO_GET(awaiterMem).await_resume();                                             \
+  this->awaiterMem.destroy();
 
-#define CO_AWAIT_SUSPEND(index, awaiter_storage, awaiter_expr)   \
-  {                                                              \
-    this->awaiter_storage.construct(awaiter_expr);         \
-    this->curState = index;                                      \
-    if (!co_await_impl(CO_GET(awaiter_storage),                  \
-                       Hdl::from_promise(pt))) {                 \
-      return;                                                    \
-    }                                                            \
-  }                                                              \
+#define CO_AWAIT_SUSPEND(index, awaiterMem, awaiter_expr)                        \
+  {                                                                              \
+    this->awaiterMem.construct(awaiter_expr);                                    \
+    this->curState = index;                                                      \
+    if (!co_await_impl(CO_GET(awaiterMem), Hdl::from_promise(pt))) {             \
+      return;                                                                    \
+    }                                                                            \
+  }                                                                              \
   label_##index:
 
 template<typename Derived, typename PromiseType>
@@ -515,6 +523,18 @@ struct CoroImpl {
         // TODO allocator support
         auto *frame = new Derived;
         return frame->pt.get_return_object();
+    }
+
+    static auto ramp() {
+        // TODO<joka921> alignment.
+        void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(Derived));
+        auto *frame = new(__coro_mem) Derived{{}};
+        auto ret = frame->pt.get_return_object();
+        frame->__initial_awaiter.construct(frame->pt.initial_suspend());
+        if (co_await_impl(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt))) {
+            frame->doStep();
+        }
+        return ret;
     }
 };
 

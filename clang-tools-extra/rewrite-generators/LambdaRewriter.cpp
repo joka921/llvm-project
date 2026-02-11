@@ -16,8 +16,15 @@ LambdaRewriteResult LambdaRewriter::rewriteLambda(const LambdaExpr *lambda) {
     std::string className = generateClassName(lambda);
     std::vector<CaptureInfo> captures = analyzeCaptures(lambda);
 
+    // Generate member name with lowercase 'l' (distinct from struct name which uses uppercase 'L')
+    SourceLocation loc = lambda->getBeginLoc();
+    unsigned line = sourceManager.getSpellingLineNumber(loc);
+    unsigned col = sourceManager.getSpellingColumnNumber(loc);
+    std::string memberName = "__lambda_L" + std::to_string(line) + "_C" + std::to_string(col);
+
     LambdaRewriteResult result;
     result.className = className;
+    result.memberName = memberName;
     result.classDefinition = generateClassDefinition(lambda, className, captures);
     result.constructorCall = generateConstructorCall(className, captures);
     return result;
@@ -27,7 +34,7 @@ std::string LambdaRewriter::generateClassName(const LambdaExpr *lambda) {
     SourceLocation loc = lambda->getBeginLoc();
     unsigned line = sourceManager.getSpellingLineNumber(loc);
     unsigned col = sourceManager.getSpellingColumnNumber(loc);
-    return "__lambda_L" + std::to_string(line) + "_C" + std::to_string(col);
+    return "__Lambda_L" + std::to_string(line) + "_C" + std::to_string(col);
 }
 
 std::vector<CaptureInfo> LambdaRewriter::analyzeCaptures(const LambdaExpr *lambda) {

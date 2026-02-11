@@ -86,6 +86,7 @@ private:
     void collectTemporariesFromExpression(const Expr *expr, CoroutineStatement &coroStmt);
     std::string processCatchClause(const CXXCatchStmt *catchStmt);
     bool isPartOfDeclaration(const DeclRefExpr *declRef);
+    bool isLambdaInit(const Expr *init);
     std::string rewriteVariableReferencesInText(const std::string &text, const std::string &varName);
     std::string processInitExpression(const Expr *init, const std::string &currentVarName);
     std::string handleConstructorArgs(const CXXConstructExpr *constructExpr);

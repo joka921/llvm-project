@@ -375,7 +375,8 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                     memberName = it->second;
                 }
 
-                // For lambda variables, use the functor class name as the _coro_storage type
+                // For lambda variables, use the functor CLASS name as the _coro_storage type
+                // (distinct from the member name, which uses lowercase 'l')
                 std::string refType = var.referenceType;
                 auto lambdaIt = coro.lambdaVariableMapping.find(var.location);
                 if (lambdaIt != coro.lambdaVariableMapping.end()) {
@@ -404,6 +405,15 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                     flagMemberName = flagIt->second;
                 }
                 structCode += "        bool " + flagMemberName + " = false;\n";
+            }
+            // Also add flags for subexpression temporaries
+            std::set<std::string> addedTempFlags;
+            for (const auto &coroStmt : coro.coroutineStatements) {
+                for (const auto &temp : coroStmt.temporaries) {
+                    if (addedTempFlags.insert(temp.tempVarName).second) {
+                        structCode += "        bool " + temp.tempVarName + " = false;\n";
+                    }
+                }
             }
             structCode += "    } __constructed;\n";
         }

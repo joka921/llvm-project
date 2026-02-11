@@ -18,8 +18,9 @@ using namespace clang;
 /// Result of rewriting a lambda expression into a functor class
 struct LambdaRewriteResult {
     std::string classDefinition;   // Full struct definition text
-    std::string constructorCall;   // Aggregate-init expression, e.g. __lambda_L42_C5{x, y}
-    std::string className;         // The generated name, e.g. __lambda_L42_C5
+    std::string constructorCall;   // Aggregate-init expression, e.g. __Lambda_L42_C5{x, y}
+    std::string className;         // The generated struct name, e.g. __Lambda_L42_C5
+    std::string memberName;        // The member variable name, e.g. __lambda_L42_C5
 };
 
 /// Internal representation of a single lambda capture

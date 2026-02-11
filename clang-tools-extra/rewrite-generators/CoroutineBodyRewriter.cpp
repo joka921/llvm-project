@@ -55,7 +55,7 @@ void CoroutineBodyRewriter::buildDeclLocationMapping() {
             std::string memberName = var.name;
             auto lambdaIt = coroutineInfo.lambdaVariableMapping.find(var.location);
             if (lambdaIt != coroutineInfo.lambdaVariableMapping.end()) {
-                memberName = lambdaIt->second.className;
+                memberName = lambdaIt->second.memberName;
             }
             int count = variableNameCounts[memberName]++;
             if (count > 0) {
@@ -136,6 +136,20 @@ bool CoroutineBodyRewriter::TraverseCompoundStmt(CompoundStmt *compoundStmt) {
         return result;
     }
 
+    // Helper: detect if an initializer is a lambda (possibly wrapped in CXXConstructExpr)
+bool CoroutineBodyRewriter::isLambdaInit(const Expr *init) {
+        const Expr *unwrapped = unwrapExpr(init);
+        if (isa<LambdaExpr>(unwrapped)) return true;
+        // Look through move/copy constructor wrapping
+        if (auto *ctorExpr = dyn_cast<CXXConstructExpr>(unwrapped)) {
+            for (unsigned i = 0; i < ctorExpr->getNumArgs(); i++) {
+                if (isa<LambdaExpr>(unwrapExpr(ctorExpr->getArg(i))))
+                    return true;
+            }
+        }
+        return false;
+    }
+
     // Handle variable declarations - collect for later processing
 bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
         for (auto *decl: declStmt->decls()) {
@@ -155,7 +169,7 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                     std::string effectiveName = varName;
                     auto lambdaIt = coroutineInfo.lambdaVariableMapping.find(declLoc);
                     if (lambdaIt != coroutineInfo.lambdaVariableMapping.end()) {
-                        effectiveName = lambdaIt->second.className;
+                        effectiveName = lambdaIt->second.memberName;
                         REWRITE_LOG() << "    DEBUG: Lambda variable '" << varName << "' -> member name '" << effectiveName << "'\n";
                     }
 
@@ -170,6 +184,17 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                         unsigned tryBlockIndex = currentTryBlockStack.back();
                         tryCatchBlocks[tryBlockIndex].variablesInTryBlock.push_back(effectiveName);
                         REWRITE_LOG() << "    DEBUG: Added variable '" << effectiveName << "' to try block " << tryBlockIndex << "\n";
+                    }
+
+                    // Detect lambda initializers to associate with variable name
+                    // Must happen before form-specific handling because PAREN_INIT/BRACED_INIT
+                    // branches don't have lambda detection
+                    if (varDecl->hasInit()) {
+                        const Expr *rawInit = varDecl->getInit();
+                        if (isLambdaInit(rawInit)) {
+                            pendingLambdaVarName_ = varName;
+                            pendingLambdaVarDeclLoc_ = varDecl->getLocation();
+                        }
                     }
 
                     // Determine initialization form and generate appropriate prefix
@@ -263,14 +288,6 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                         } else {
                             // Replace declaration part with appropriate prefix
                             declReplacements.emplace_back(declOnlyRange, prefix, true);
-
-                            // Detect lambda initializers to associate with variable name
-                            if (const Expr *rawInit = varDecl->getInit()) {
-                                if (isa<LambdaExpr>(unwrapExpr(rawInit))) {
-                                    pendingLambdaVarName_ = varName;
-                                    pendingLambdaVarDeclLoc_ = varDecl->getLocation();
-                                }
-                            }
 
                             // Regular construct() call - recursively visit the initialization expression
                             TraverseStmt(varDecl->getInit());
@@ -849,6 +866,7 @@ bool CoroutineBodyRewriter::TraverseLambdaExpr(LambdaExpr *lambdaExpr) {
         lambdaInfo.classDefinition = rewriteResult.classDefinition;
         lambdaInfo.constructorCall = constructorCall;
         lambdaInfo.className = rewriteResult.className;
+        lambdaInfo.memberName = rewriteResult.memberName;
         lambdaInfo.lambdaSourceRange = lambdaRange;
 
         // Consume pending lambda-variable association (set by VisitDeclStmt)

@@ -37,7 +37,8 @@ struct TemporaryInfo {
 struct LambdaInCoroutine {
     std::string classDefinition;          // Functor struct text
     std::string constructorCall;          // Constructor call with CO_GET captures
-    std::string className;                // e.g. __lambda_L3_C16
+    std::string className;                // e.g. __Lambda_L3_C16 (struct type name)
+    std::string memberName;               // e.g. __lambda_L3_C16 (member variable name)
     SourceRange lambdaSourceRange;        // Source range of the lambda expression
     std::string originalVarName;          // Name of the variable this lambda initializes (empty if none)
     SourceLocation varDeclLocation;       // Location of that variable's declaration

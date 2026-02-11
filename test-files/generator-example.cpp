@@ -187,12 +187,12 @@ cppcoro::generator<int> yieldTemporaries() {
     co_yield (std::string{"hallo"}).size();
 }
 
-cppcoro::generator<int> lambda () {
-  int z = 3;
-  auto lambda = [u = 4, &z] (auto x) { return u + z * x };
+cppcoro::generator<int> lambdaAsMember () {
+    int z = 3;
+    auto lambda = [u = 4, &z] (auto x) { return u + z * x; };
 
-  co_yield lambda(3);
-  co_yield lambda(5);
+    co_yield lambda(3);
+    co_yield lambda(5);
 }
 */
 
@@ -203,7 +203,7 @@ struct __Lambda_L201_C19 {
     auto operator() (auto x) { return u + z * x; }
 };
 
-cppcoro::generator<int, cppcoro::NoDetails, Handle> lambda () {
+cppcoro::generator<int, cppcoro::NoDetails, Handle> lambdaAsMember () {
   // _coro_storage and CoroImpl assumed to be available in global namespace
   constexpr size_t kNoTryBlock = static_cast<size_t>(-1);
   using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
@@ -242,7 +242,7 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> lambda () {
 
     size_t dispatchExceptionHandling(std::exception_ptr eptr) {
       if (currentTryBlock_ == kNoTryBlock) {
-        if (this->__constructed.__lambda_L201_C19) { this->__lambda_L201_C19.destroy(); this->__constructed.__lambda_L201_C19 = false; }
+        if (this->__constructed.lambda) { this->lambda.destroy(); this->__constructed.lambda = false; }
         if (this->__constructed.z) { this->z.destroy(); this->__constructed.z = false; }
         promise().unhandled_exception();
         this->done_ = true;
@@ -283,7 +283,7 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> lambda () {
         case 1:
           __awaiter_1.destroy();
           temp_1_0.destroy();
-          __lambda_L201_C19.destroy();
+          lambda.destroy();
           z.destroy();
           break;
         case 0:  // initial state - initial awaiter is alive
@@ -293,41 +293,43 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> lambda () {
     }
 
     void destroyFinalSuspend() {
-        __final_awaiter.destroy();
+      __final_awaiter.destroy();
     }
 
     void doStep() {
-        try {
-            switch (this->curState) {
-                case 0: break;
-                case 1: goto label_1;
-                case 2: goto label_2;
-                default: return;
-            }
-            __initial_awaiter.get().ref_.await_resume();
-            __initial_awaiter.destroy();
+    try {
 
-            CO_PAREN_INIT_OWNING(z, 3);
-            CO_PAREN_INIT_OWNING(__lambda_L201_C19, __Lambda_L201_C19{4, CO_GET(z)});
-
-            CO_YIELD(1, __awaiter_1, CO_PAREN_INIT_OWNING(temp_1_0, CO_GET(__lambda_L201_C19)(3)));
-            this->temp_1_0.destroy();
-            CO_YIELD(2, __awaiter_2,
-                     CO_PAREN_INIT_OWNING(temp_2_0, CO_GET(__lambda_L201_C19)(5)));
-
-            this->temp_2_0.destroy();
-            CO_RETURN_FALLOFF(3, __final_awaiter);
-        } catch (...) { this->handleException(std::current_exception(), this->curState); }
-    }
-  };
-  void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
-  auto *frame = new(__coro_mem) GeneratorStateMachine{{}};
-  auto ret = frame->pt.get_return_object();
-  frame->__initial_awaiter.construct(frame->pt.initial_suspend());
-  CO_AWAIT_IMPL_IMPL(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt), ret);
-  frame->doStep();
-  return ret;
+switch(this->curState) {
+  case 0: break;
+  case 1: goto label_1;
+  case 2: goto label_2;
+  default: return;
 }
+__initial_awaiter.get().ref_.await_resume();
+__initial_awaiter.destroy();
+
+    CO_PAREN_INIT_OWNING(z,  3);
+    CO_PAREN_INIT_OWNING(__lambda_L201_C19,  __Lambda_L201_C19{4, CO_GET(z)});
+
+    CO_YIELD(1, __awaiter_1,  CO_PAREN_INIT_OWNING(temp_1_0, CO_GET(__lambda_L201_C19)(3)));
+    
+        this->temp_1_0.destroy(); this->__constructed.temp_1_0 = false;
+CO_YIELD(2, __awaiter_2,  CO_PAREN_INIT_OWNING(temp_2_0, CO_GET(__lambda_L201_C19)(5)));
+
+        this->temp_2_0.destroy(); this->__constructed.temp_2_0 = false;
+CO_RETURN_FALLOFF(3, __final_awaiter);
+} catch(...) {this->handleException(std::current_exception(), this->curState);}
+}
+};
+void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+auto ret = frame->pt.get_return_object();
+frame->__initial_awaiter.construct(frame->pt.initial_suspend());
+CO_AWAIT_IMPL_IMPL(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt), ret);
+frame->doStep();
+return ret;
+}
+
 
 #if false
 // ============================================================

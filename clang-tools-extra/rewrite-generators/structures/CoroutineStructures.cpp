@@ -257,12 +257,12 @@ CoroutineStatement::generateYieldOrAwaitReplacements(
         std::string destructorCalls = "\n";
         // Destroy in reverse order (last created first destroyed)
         for (auto it = temporaries.rbegin(); it != temporaries.rend(); ++it) {
-            destructorCalls += "        this->" + it->tempVarName + ".destroy();\n";
+            destructorCalls += "        " + makeStateDestroyAndClearFlag(it->tempVarName) + ";\n";
         }
 
         // Insert after the semicolon
         SourceRange afterSemiRange(insertionPointAfterSemicolon, insertionPointAfterSemicolon);
-        replacements.emplace_back(afterSemiRange, destructorCalls, priority + 2000, false);
+        replacements.emplace_back(afterSemiRange, destructorCalls, -(priority + 1), false);
     }
 
     for (const auto& [range, repl, priority, empty] : replacements) {

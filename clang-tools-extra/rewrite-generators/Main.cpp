@@ -14,6 +14,8 @@
 #include "CoroutineRewriter.h"
 
 #include <memory>
+#include <set>
+#include <string>
 
 using namespace clang;
 using namespace clang::tooling;
@@ -39,12 +41,26 @@ public:
 class CoroutineRewriterFrontendAction : public ASTFrontendAction {
 private:
     std::unique_ptr<Rewriter> rewriter;
-    SourceManager *sourceManager;
+    SourceManager *sourceManager = nullptr;
     std::unique_ptr<CoroutineRewriter> coroutineRewriter;
+    bool alreadyProcessed = false;
+
+    // Track files already processed to avoid double-processing when the
+    // compilation database contains duplicate entries for the same file.
+    static std::set<std::string> &getProcessedFiles() {
+        static std::set<std::string> files;
+        return files;
+    }
 
 public:
     std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(
         clang::CompilerInstance &CI, llvm::StringRef InFile) override {
+        if (!getProcessedFiles().insert(InFile.str()).second) {
+            alreadyProcessed = true;
+            REWRITE_LOG() << "Skipping already-processed file: " << InFile.str() << "\n";
+            return std::make_unique<ASTConsumer>(); // no-op
+        }
+
         sourceManager = &CI.getSourceManager();
         rewriter = std::make_unique<Rewriter>();
         rewriter->setSourceMgr(*sourceManager, CI.getLangOpts());
@@ -56,6 +72,8 @@ public:
     }
 
     void EndSourceFileAction() override {
+        if (alreadyProcessed) return;
+
         coroutineRewriter->performRewrites();
         const auto &coroutines = coroutineRewriter->getCoroutines();
         REWRITE_LOG() << "\nSummary: Processed " << coroutines.size() << " coroutine(s)\n";

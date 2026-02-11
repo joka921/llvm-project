@@ -525,10 +525,11 @@ struct CoroImpl {
         return frame->pt.get_return_object();
     }
 
-    static auto ramp() {
+    template <typename... CoroArgs>
+    static auto ramp(CoroArgs&&... coroArgs) {
         // TODO<joka921> alignment.
         void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(Derived));
-        auto *frame = new(__coro_mem) Derived{{}};
+        auto *frame = new(__coro_mem) Derived{std::forward<CoroArgs>(coroArgs)...};
         auto ret = frame->pt.get_return_object();
         frame->__initial_awaiter.construct(frame->pt.initial_suspend());
         if (co_await_impl(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt))) {

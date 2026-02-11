@@ -329,19 +329,19 @@ __initial_awaiter.destroy();
 } TRY_END(1);
     CO_YIELD(4, __awaiter_4,  CO_GET(x));
     CO_RETURN_VOID(5, __final_awaiter);
-    this->x.destroy();
+this->x.destroy();
 CO_RETURN_FALLOFF(6, __final_awaiter);
-} catch(...) {this->handleException(std::current_exception(), this->curState, [this](){doStep();});}
-}
-};
-void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
-auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
-auto ret = frame->pt.get_return_object();
-frame->__initial_awaiter.construct(frame->pt.initial_suspend());
-if (co_await_impl(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt))) {
-  frame->doStep();
-}
-return ret;
+    } catch (...) { this->handleException(std::current_exception(), this->curState, [this]() { doStep(); }); }
+    }
+  };
+  void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+  auto *frame = new(__coro_mem) GeneratorStateMachine{{}};
+  auto ret = frame->pt.get_return_object();
+  frame->__initial_awaiter.construct(frame->pt.initial_suspend());
+  if (co_await_impl(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt))) {
+      frame->doStep();
+  }
+  return ret;
 }
 
 // ============================================================

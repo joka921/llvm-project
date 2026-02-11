@@ -17,7 +17,8 @@ namespace cppcoro {
     struct SuspendAlways {
         constexpr bool await_ready() const noexcept { return false; }
 
-        constexpr void await_suspend([[maybe_unused]] auto handle) const noexcept {
+        template<typename Handle>
+        constexpr void await_suspend([[maybe_unused]] Handle handle) const noexcept {
         }
 
         constexpr void await_resume() const noexcept {
@@ -278,32 +279,55 @@ namespace cppcoro {
     } // namespace detail
 } // namespace cppcoro
 
+
 namespace coro_detail {
+    // A class that is implicitly convertible to anything, useful for type traits.
     struct ConvertibleToAnything {
         template<typename T>
         operator T();
     };
 
-    template<typename Promise, typename Expr, typename = void>
+    // `has_await_transform<Promise>::value` is true iff. `Promise` has a member function `await_transform` that can be called
+    // with a single argument.
+    // TODO Check whether actually an await_transform with 0 or > 1 arguments also should be detected.
+    template<typename Promise, typename = void>
     struct has_await_transform : std::false_type {
     };
 
-    template<typename Promise, typename Expr>
-    struct has_await_transform<Promise, Expr,
+    template<typename Promise>
+    struct has_await_transform<Promise,
                 std::void_t<decltype(std::declval<Promise &>()
                     .await_transform(std::declval<ConvertibleToAnything>()))> >
             : std::true_type {
     };
 
+    // Given a `promise` and a `co_await`ed expression, get the actual `awaitable`, possibly through the `await_transform` mechanism.
     template<typename Promise, typename Expr>
     decltype(auto) get_awaitable(Promise &promise, Expr &&expr) {
-        if constexpr (has_await_transform<Promise, Expr>::value) {
+        if constexpr (has_await_transform<Promise>::value) {
             return promise.await_transform(std::forward<Expr>(expr));
         } else {
             return std::forward<Expr>(expr);
         }
     }
 
+    // Type trait to check whether a given `Promise` has a `return_void` member function.
+    template<typename Promise, typename = void>
+    struct has_return_void : std::false_type {
+    };
+
+    template<typename Promise>
+    struct has_return_void<Promise,
+                std::void_t<decltype(std::declval<Promise &>()
+                    .return_void())> >
+            : std::true_type {
+    };
+
+
+    // Type trait that checks whether a given promise type has an overloaded `operator new`.
+    // Note: This only supports the simple form that only takes a `size_t`.
+    // TODO What about alignment.
+    // TODO Implement the leading allocator convention thing.
     template<typename P, typename = void>
     struct has_promise_new : std::false_type {
     };
@@ -325,6 +349,7 @@ namespace coro_detail {
             : std::true_type {
     };
 
+    // TODO: Is this function actually needed, or will overload resolution help us (if we ignore the leading allocator stuff).
     template<typename P>
     void *promise_allocate(size_t size) {
         if constexpr (has_promise_new<P>::value) {
@@ -335,6 +360,8 @@ namespace coro_detail {
     }
 } // namespace coro_detail
 
+// A type-erased "base" class for a coroutine frame, consists of three function pointers to implement
+// the member functions of the `CoroutineHandle` replacement below.
 struct HandleFrame {
     using F = void(void *);
     using B = bool(void *);
@@ -344,11 +371,20 @@ struct HandleFrame {
     B *doneFunc;
 };
 
+// A replacement for `std::coroutine_handle`. Consists of a single pointer to the `HandleFrame` from above.
 template<typename Promise = void>
 struct Handle {
     HandleFrame *ptr;
-    void resume() { ptr->resumeFunc(ptr->target); }
 
+    // resume, done, destroy, and operator bool just use the indirection to the `HandleFrame`.
+    void resume() { ptr->resumeFunc(ptr->target); }
+    operator bool() const { return static_cast<bool>(ptr); }
+    bool done() const { return ptr->doneFunc(ptr->target); }
+    void destroy() { ptr->destroyFunc(ptr->target); }
+
+    //  Only for non-void `Promise` types: convert from promise to handle and back.
+    //  Assumes that in our final coroutine frame the promise object will be declared directly after the
+    // `HandleFrame` above.
     static constexpr size_t promise_offset =
             (sizeof(HandleFrame) + alignof(Promise) - 1) & ~(alignof(Promise) - 1);
 
@@ -357,10 +393,6 @@ struct Handle {
                                                     promise_offset);
         return Handle{ptr};
     }
-
-    operator bool() const { return static_cast<bool>(ptr); }
-
-    bool done() const { return ptr->doneFunc(ptr->target); }
 
     Promise &promise() {
         return *reinterpret_cast<Promise *>(reinterpret_cast<char *>(ptr) +
@@ -372,114 +404,113 @@ struct Handle {
                                                   promise_offset);
     }
 
-    void destroy() { ptr->destroyFunc(ptr->target); }
 };
 
-template<typename T>
-inline constexpr bool alwaysFalse = false;
+template<typename Ref, bool isOwningStorage>
+struct _coro_storage {
+    static constexpr bool isOwning = isOwningStorage;
+    using Storage = std::conditional_t<isOwning, std::decay_t<Ref>, std::add_pointer_t<std::decay_t<Ref> > >;
+    alignas(Storage) char buffer[sizeof(Storage)];
+    bool constructed = false;
 
-bool co_await_impl(auto &&awaiter, auto handle) {
-    if (awaiter.await_ready()) {
-        return true;
-    }
-    using type = decltype(awaiter.await_suspend(handle));
-    if constexpr (std::is_void_v<type>) {
-        awaiter.await_suspend(handle);
-        return false;
-    } else if constexpr (std::same_as<type, bool>) {
-        return !awaiter.await_suspend(handle);
-    } else {
-        static_assert(alwaysFalse<type>,
-                      "await_suspend with symmetric transfer is not yet supported");
-    }
-}
+    struct Val {
+        Ref ref_;
+    };
 
-#define CO_YIELD(index, awaiterMem, value)                            \
-  {                                                                    \
-    this->awaiterMem.construct(promise().yield_value(value));           \
-    this->curState = index;                                            \
-    if (!co_await_impl(CO_GET(awaiterMem), Hdl::from_promise(pt))) {   \
-      return;                                                          \
-    }                                                                  \
-  }                                                                    \
+    template<typename... Args>
+    void construct(Args &&... args) {
+        if constexpr (!isOwning) {
+            new(buffer) Storage(&args...);
+        } else {
+            new(buffer) Storage(std::forward<Args>(args)...);
+        }
+        constructed = true;
+    }
+
+    void destroy() {
+        if (constructed) {
+            reinterpret_cast<Storage *>(buffer)->~Storage();
+            constructed = false;
+        }
+    }
+
+    Val get() {
+        Storage &storage = *reinterpret_cast<Storage *>(buffer);
+        if constexpr (isOwning) {
+            return Val{static_cast<Ref>(storage)};
+        } else {
+            return Val{static_cast<Ref>(*storage)};
+        }
+    }
+
+    ~_coro_storage() {
+        destroy();
+    }
+};
+
+#define CO_AWAIT_IMPL(awaiterMem) \
+  { \
+    auto& awaiter = CO_GET(awaiterMem); \
+    auto handle = Hdl::from_promise(pt); \
+    if (!awaiter.await_ready()) { \
+        using type = decltype(awaiter.await_suspend(handle)); \
+        if constexpr (std::is_void_v<type>) { \
+            awaiter.await_suspend(handle); \
+            return; \
+        } else if constexpr (std::is_same_v<type, bool>) { \
+            if (!awaiter.await_suspend(handle)) { return; } \
+        } else { \
+            awaiter.await_suspend(handle).resume(); \
+            return; \
+        } \
+    } \
+  }
+
+#define CO_RESUME(index, awaiterMem) \
   label_##index:                                                       \
   CO_GET(awaiterMem).await_resume();                                   \
   this->awaiterMem.destroy();
 
-#define CO_YIELD_TOPLEVEL(tempname, index, awaiterMem, init_expr) \
-  CO_PAREN_INIT_OWNING(tempname, init_expr); \
-  CO_YIELD(index, awaiterMem, CO_GET(tempname))
+#define CO_YIELD(index, awaiterMem, value)                            \
+    this->awaiterMem.construct(promise().yield_value(value));           \
+    this->curState = index;                                            \
+    CO_AWAIT_IMPL(awaiterMem); \
+    CO_RESUME(index, awaiterMem);
 
-#define CO_AWAIT_TOPLEVEL(tempname, index, awaiterMem, init_expr) \
-  CO_PAREN_INIT_OWNING(tempname, init_expr); \
-  CO_AWAIT_VOID(index, awaiterMem, CO_GET(tempname))
+#define CO_AWAIT_VOID(index, awaiterMem, expr)                                  \
+{                                                                              \
+this->awaiterMem.construct(coro_detail::get_awaitable(promise(), expr));      \
+this->curState = index;                                                      \
+    CO_AWAIT_IMPL(awaiterMem);                                                \
+    CO_RESUME(index, awaiterMem);
+
+#define CO_RETURN_IMPL(index, finalAwaiterMem)                                  \
+  this->destroySuspendedCoro(index);                                  \
+  this->done_ = true;                                                          \
+  this->finalAwaiterMem.construct(promise().final_suspend());                  \
+  CO_AWAIT_IMPL(finalAwaiterMem);                                              \
+  CO_GET(finalAwaiterMem).await_resume();                                      \
+  this->finalAwaiterMem.destroy();                                             \
+  Hdl::from_promise(pt).destroy();                                             \
+  return;                                                                      \
+  void()
 
 #define CO_RETURN_VOID(index, finalAwaiterMem)                                  \
-  {                                                                              \
-    this->curState = index;                                                      \
+    if constexpr (coro_detail::has_return_void<std::decay_t<decltype(promise())>>::value) { \
     promise().return_void();                                                     \
-    this->destroySuspendedCoro(this->curState);                                  \
-    this->done_ = true;                                                          \
-    this->finalAwaiterMem.construct(promise().final_suspend());                  \
-    if (!co_await_impl(CO_GET(finalAwaiterMem), Hdl::from_promise(pt))) {        \
-      return;                                                                    \
-    }                                                                            \
-    CO_GET(finalAwaiterMem).await_resume();                                      \
-    this->finalAwaiterMem.destroy();                                             \
-    Hdl::from_promise(pt).destroy();                                             \
-    return;                                                                      \
-  } void()
+    }                                                                             \
+    CO_RETURN_IMPL(index, finalAwaiterMem);                                     \
+    void()
 
 #define CO_RETURN_VALUE(index, finalAwaiterMem, value)                           \
-  {                                                                              \
-    this->curState = index;                                                      \
     promise().return_value(value);                                               \
-    this->destroySuspendedCoro(this->curState);                                  \
-    this->done_ = true;                                                          \
-    this->finalAwaiterMem.construct(promise().final_suspend());                  \
-    if (!co_await_impl(CO_GET(finalAwaiterMem), Hdl::from_promise(pt))) {        \
-      return;                                                                    \
-    }                                                                            \
-    CO_GET(finalAwaiterMem).await_resume();                                      \
-    this->finalAwaiterMem.destroy();                                             \
-    Hdl::from_promise(pt).destroy();                                             \
-    return;                                                                      \
-  } void()
+    CO_RETURN_IMPL(index, finalAwaiterMem);                                       \
+    void()
 
-#define CO_RETURN_FALLOFF(index, finalAwaiterMem) CO_RETURN_VOID(index, finalAwaiterMem)
-#define CO_RETURN_VALUE_FALLOFF(index, finalAwaiterMem, value) CO_RETURN_VALUE(index, finalAwaiterMem, value)
-
-inline constexpr size_t CO_NO_TRY_BLOCK = static_cast<size_t>(-1);
 #define TRY_BEGIN(try_index) this->currentTryBlock_ = (try_index); void()
 #define TRY_END(parent_index, label) this->currentTryBlock_ = (parent_index); label_##label: void()
 
-namespace blubbi {
-    template<typename T>
-    using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T> >;
-}
-
-#define CO_AWAIT_VOID(index, awaiterMem, expr)                                  \
-  {                                                                              \
-    this->awaiterMem.construct(coro_detail::get_awaitable(promise(), expr));      \
-    this->curState = index;                                                      \
-    if (!co_await_impl(CO_GET(awaiterMem), Hdl::from_promise(pt))) {             \
-      return;                                                                    \
-    }                                                                            \
-  }                                                                              \
-  label_##index:                                                                 \
-  CO_GET(awaiterMem).await_resume();                                             \
-  this->awaiterMem.destroy();
-
-#define CO_AWAIT_SUSPEND(index, awaiterMem, awaiter_expr)                        \
-  {                                                                              \
-    this->awaiterMem.construct(awaiter_expr);                                    \
-    this->curState = index;                                                      \
-    if (!co_await_impl(CO_GET(awaiterMem), Hdl::from_promise(pt))) {             \
-      return;                                                                    \
-    }                                                                            \
-  }                                                                              \
-  label_##index:
-
+inline constexpr size_t CO_NO_TRY_BLOCK = static_cast<size_t>(-1);
 template<typename Derived, typename PromiseType>
 struct CoroImpl {
     HandleFrame frm;
@@ -547,89 +578,8 @@ struct CoroImpl {
     }
 };
 
-// Legacy macros - kept for backward compatibility but the rewriter now generates
-// the full class structure directly.
-#define COROUTINE_HEADER(returnType, StateType)                              \
-  using PromiseType =                                                  \
-      returnType::promise_type;       \
-  struct GeneratorStateMachine                                         \
-      : CoroImpl<GeneratorStateMachine, PromiseType \
-                                   > {                      \
-    void doStep() {
-
-#define COROUTINE_HEADER_WITH_TRY(returnType, StateType)                              \
-using PromiseType =                                                  \
-returnType::promise_type;       \
-struct GeneratorStateMachine                                         \
-: CoroImpl<GeneratorStateMachine, PromiseType \
-> {                      \
-void doStep() { \
-try {
-
-#define COROUTINE_FOOTER(...) \
-  }                      \
-  }                      \
-  ;                      \
-  void* __coro_mem = coro_detail::promise_allocate<PromiseType>( \
-    sizeof(GeneratorStateMachine));                               \
-  auto* frame = new (__coro_mem)                                 \
-    GeneratorStateMachine{{}, __VA_ARGS__};                      \
-  return frame->pt.get_return_object();
-
-#define COROUTINE_FOOTER_WITH_TRY(...) \
-} catch(...) {this->handleException(std::current_exception(), this->curState);} \
-}                      \
-}                      \
-;                      \
-void* __coro_mem = coro_detail::promise_allocate<PromiseType>( \
-  sizeof(GeneratorStateMachine));                               \
-auto* frame = new (__coro_mem)                                 \
-  GeneratorStateMachine{{}, __VA_ARGS__};                      \
-return frame->pt.get_return_object();
-
 #define FOR_LOOP_HEADER(N)
 
-template<typename Ref, bool isOwningStorage>
-struct _coro_storage {
-    static constexpr bool isOwning = isOwningStorage;
-    using Storage = std::conditional_t<isOwning, std::decay_t<Ref>, std::add_pointer_t<std::decay_t<Ref> > >;
-    alignas(Storage) char buffer[sizeof(Storage)];
-    bool constructed = false;
-
-    struct Val {
-        Ref ref_;
-    };
-
-    template<typename... Args>
-    void construct(Args &&... args) {
-        if constexpr (!isOwning) {
-            new(buffer) Storage(&args...);
-        } else {
-            new(buffer) Storage(std::forward<Args>(args)...);
-        }
-        constructed = true;
-    }
-
-    void destroy() {
-        if (constructed) {
-            reinterpret_cast<Storage *>(buffer)->~Storage();
-            constructed = false;
-        }
-    }
-
-    Val get() {
-        Storage &storage = *reinterpret_cast<Storage *>(buffer);
-        if constexpr (isOwning) {
-            return Val{static_cast<Ref>(storage)};
-        } else {
-            return Val{static_cast<Ref>(*storage)};
-        }
-    }
-
-    ~_coro_storage() {
-        destroy();
-    }
-};
 
 #define CO_GET(arg) this->arg.get().ref_
 #define CO_GET_STATE(arg) arg.get().ref_

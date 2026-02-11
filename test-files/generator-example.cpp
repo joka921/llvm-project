@@ -11,12 +11,14 @@
 #include <vector>
 
 struct X {
-  int i;
+    int i;
 };
 
 struct Y {
-  Y(X) {}
+    Y(X) {
+    }
 };
+
 /*
 cppcoro::generator<int> gen() {
   int x = 3;
@@ -197,6 +199,8 @@ cppcoro::generator<int> lambda () {
 
 cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
   // _coro_storage and CoroImpl assumed to be available in global namespace
+  constexpr size_t kNoTryBlock = static_cast<size_t>(-1);
+  // tryBlockParent: {kNoTryBlock}
   using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
   struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
     // Local variables (including ranged-for loop variables)
@@ -213,11 +217,11 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
     _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_4;
 
     // Exception handling infrastructure
-    std::vector<size_t> activeTryBlocks;
+    size_t currentTryBlock_ = kNoTryBlock;
 
     void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {
-      if (activeTryBlocks.empty()) {
-        destroySuspendedCoro(this->curState);
+      if (currentTryBlock_ == kNoTryBlock) {
+          destroySafely(z, i, y, x);
         promise().unhandled_exception();
         this->done_ = true;
         this->__final_awaiter.construct(promise().final_suspend());
@@ -229,47 +233,47 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
         Hdl::from_promise(pt).destroy();
         return;
       }
-      destroyBecauseOfException(activeTryBlocks.back());
+      destroyBecauseOfException(currentTryBlock_);
       nextState = dispatchExceptionHandling(std::move(eptr));
       resume();
     }
 
     size_t dispatchExceptionHandling(std::exception_ptr eptr) {
-      switch (activeTryBlocks.back()) {
-        case 1: return catchClauseImpl_1(std::move(eptr));
+      switch (currentTryBlock_) {
+        case 0: return catchClauseImpl_0(std::move(eptr));
         default: std::terminate();
       }
     }
 
     // Exception handler member functions
-    size_t catchClauseImpl_1(std::exception_ptr eptr) {
-      auto nextState = activeTryBlocks.back();
-      activeTryBlocks.pop_back();
-      auto lambda = [&]() {
-        try {
-          std::rethrow_exception(eptr);
-        } catch (class std::exception & e) {
-        std::cout << "Caught exception: " << e.what() << " x=" << CO_GET_STATE(x) << std::endl;
-    } catch (...) {
-        std::cout << "Caught unknown exception, x=" << CO_GET_STATE(x) << std::endl;
-    } 
-        return nextState;
-      };
-      if (activeTryBlocks.empty()) {
-        return lambda();
-      } else {
-        try {
-          return lambda();
-        } catch (...) {
-          return dispatchExceptionHandling(std::current_exception());
+    size_t catchClauseImpl_0(std::exception_ptr eptr) {
+        auto nextState = 1;
+        currentTryBlock_ = kNoTryBlock;
+        auto lambda = [&]() {
+            try {
+                std::rethrow_exception(eptr);
+            } catch (class std::exception &e) {
+                std::cout << "Caught exception: " << e.what() << " x=" << CO_GET_STATE(x) << std::endl;
+            } catch (...) {
+                std::cout << "Caught unknown exception, x=" << CO_GET_STATE(x) << std::endl;
+            }
+            return nextState;
+        };
+        if (currentTryBlock_ == kNoTryBlock) {
+            return lambda();
+        } else {
+            try {
+                return lambda();
+            } catch (...) {
+                return dispatchExceptionHandling(std::current_exception());
+            }
         }
-      }
     }
 
     // Destroy variables in case of exception in try block
     void destroyBecauseOfException(size_t tryCatchBlockIndex) {
       switch (tryCatchBlockIndex) {
-        case 1:
+        case 0:
           if (y.constructed) { y.destroy(); }
           if (i.constructed) { i.destroy(); }
           if (z.constructed) { z.destroy(); }
@@ -281,6 +285,8 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
     // Destroy variables when coroutine is suspended at a specific state
     void destroySuspendedCoro(size_t curState) {
       switch (curState) {
+        case 6:
+        cleanup_5:
         case 5:
         cleanup_4:
         case 4:
@@ -313,35 +319,33 @@ switch(this->curState) {
 __initial_awaiter.get().ref_.await_resume();
 __initial_awaiter.destroy();
 
-    CO_PAREN_INIT_OWNING(x,  42);
-    TRY_BEGIN(1); {
-        CO_PAREN_INIT_OWNING(y,  CO_GET(x) + 1);
-        CO_YIELD(2, __awaiter_2,  CO_GET(y));
-        CO_PAREN_INIT_OWNING(i,  15);
-        while (CO_GET(i)) {
-            CO_PAREN_INIT_OWNING(z,  CO_GET(y) + 1);
-            CO_YIELD(3, __awaiter_3,  CO_GET(z));
-            --CO_GET(i);
-            this->z.destroy();
+  CO_PAREN_INIT_OWNING(x,  42);
+  TRY_BEGIN(0); {
+    CO_PAREN_INIT_OWNING(y,  CO_GET(x) + 1);
+    CO_YIELD(2, __awaiter_2,  CO_GET(y));
+    CO_PAREN_INIT_OWNING(i,  15);
+    while (CO_GET(i)) {
+      CO_PAREN_INIT_OWNING(z,  CO_GET(y) + 1);
+      CO_YIELD(3, __awaiter_3,  CO_GET(z));
+      --CO_GET(i);
+        this->z.destroy();
 }
-        this->i.destroy();
+      this->i.destroy();
     this->y.destroy();
-} TRY_END(1);
-    CO_YIELD(4, __awaiter_4,  CO_GET(x));
-    CO_RETURN_VOID(5, __final_awaiter);
-this->x.destroy();
-CO_RETURN_FALLOFF(6, __final_awaiter);
-    } catch (...) { this->handleException(std::current_exception(), this->curState, [this]() { doStep(); }); }
-    }
-  };
-  void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
-  auto *frame = new(__coro_mem) GeneratorStateMachine{{}};
-  auto ret = frame->pt.get_return_object();
-  frame->__initial_awaiter.construct(frame->pt.initial_suspend());
-  if (co_await_impl(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt))) {
-      frame->doStep();
-  }
-  return ret;
+} TRY_END(CO_NO_TRY_BLOCK, 1);
+  CO_YIELD(4, __awaiter_4,  CO_GET(x));
+  CO_RETURN_VOID(5, __final_awaiter);
+} catch(...) {this->handleException(std::current_exception(), this->curState, [this](){doStep();});}
+}
+};
+void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+auto ret = frame->pt.get_return_object();
+frame->__initial_awaiter.construct(frame->pt.initial_suspend());
+if (co_await_impl(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt))) {
+  frame->doStep();
+}
+return ret;
 }
 
 // ============================================================
@@ -366,7 +370,7 @@ struct SimpleTask {
     Handle<promise_type> handle;
 
     int run() {
-        handle.resume();  // start (past initial_suspend)
+        handle.resume(); // start (past initial_suspend)
         while (!handle.done()) {
             handle.resume();
         }
@@ -383,7 +387,7 @@ struct SimpleTask {
 SimpleTask testCoAwaitVoid() {
     using PromiseType = SimpleTask::promise_type;
     struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
-        _coro_storage<int&, true> x;
+        _coro_storage<int &, true> x;
 
         void destroySuspendedCoro(size_t curState) {
             switch (curState) {
@@ -396,20 +400,24 @@ SimpleTask testCoAwaitVoid() {
             }
         }
 
-    void doStep() {
-    switch(this->curState) { case 0: break; case 1: goto label_1; default: return; }
-    CO_PAREN_INIT_OWNING(x, 42);
-    // co_await SuspendAlways{};
-    CO_AWAIT_VOID(1, cppcoro::SuspendAlways{});
-    // After resume, x should still be 42. Add 1 to prove we resumed.
-    CO_GET(x) += 1;
-    CO_RETURN_VALUE(2, CO_GET(x));
-    this->x.destroy();
-    CO_RETURN_VALUE_FALLOFF(3, 0);
-    }
+        void doStep() {
+            switch (this->curState) {
+                case 0: break;
+                case 1: goto label_1;
+                default: return;
+            }
+            CO_PAREN_INIT_OWNING(x, 42);
+            // co_await SuspendAlways{};
+            CO_AWAIT_VOID(1, cppcoro::SuspendAlways{});
+            // After resume, x should still be 42. Add 1 to prove we resumed.
+            CO_GET(x) += 1;
+            CO_RETURN_VALUE(2, CO_GET(x));
+            this->x.destroy();
+            CO_RETURN_VALUE_FALLOFF(3, 0);
+        }
     };
-    void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
-    auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+    void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+    auto *frame = new(__coro_mem) GeneratorStateMachine{{}};
     return frame->pt.get_return_object();
 }
 
@@ -420,15 +428,18 @@ SimpleTask testCoAwaitVoid() {
 struct IntAwaiter {
     int value;
     bool await_ready() const noexcept { return false; }
-    void await_suspend(auto) const noexcept {}
+
+    void await_suspend(auto) const noexcept {
+    }
+
     int await_resume() const noexcept { return value; }
 };
 
 SimpleTask testCoAwaitSuspend() {
     using PromiseType = SimpleTask::promise_type;
     struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
-        _coro_storage<int&, true> x;
-        _coro_storage<IntAwaiter&, true> __awaiter_1;
+        _coro_storage<int &, true> x;
+        _coro_storage<IntAwaiter &, true> __awaiter_1;
 
         void destroySuspendedCoro(size_t curState) {
             switch (curState) {
@@ -442,23 +453,26 @@ SimpleTask testCoAwaitSuspend() {
             }
         }
 
-    void doStep() {
-    switch(this->curState) { case 0: break; case 1: goto label_1; default: return; }
-    CO_PAREN_INIT_OWNING(x, 10);
-    // auto result = co_await IntAwaiter{100};
-    CO_AWAIT_SUSPEND(1, __awaiter_1, IntAwaiter{100});
-    {
-        auto result = CO_GET(__awaiter_1).await_resume();
-        this->__awaiter_1.destroy();
-        CO_GET(x) += result;
-    }
-    CO_RETURN_VALUE(2, CO_GET(x));
-    this->x.destroy();
-    CO_RETURN_VALUE_FALLOFF(3, 0);
-    }
+        void doStep() {
+            switch (this->curState) {
+                case 0: break;
+                case 1: goto label_1;
+                default: return;
+            }
+            CO_PAREN_INIT_OWNING(x, 10);
+            // auto result = co_await IntAwaiter{100};
+            CO_AWAIT_SUSPEND(1, __awaiter_1, IntAwaiter{100}); {
+                auto result = CO_GET(__awaiter_1).await_resume();
+                this->__awaiter_1.destroy();
+                CO_GET(x) += result;
+            }
+            CO_RETURN_VALUE(2, CO_GET(x));
+            this->x.destroy();
+            CO_RETURN_VALUE_FALLOFF(3, 0);
+        }
     };
-    void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
-    auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+    void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+    auto *frame = new(__coro_mem) GeneratorStateMachine{{}};
     return frame->pt.get_return_object();
 }
 
@@ -473,12 +487,12 @@ struct AllocTask {
     struct promise_type {
         int result = 0;
 
-        static void* operator new(size_t size) {
+        static void *operator new(size_t size) {
             ++allocCount;
             return ::operator new(size);
         }
 
-        static void operator delete(void* ptr, size_t) {
+        static void operator delete(void *ptr, size_t) {
             ++deallocCount;
             ::operator delete(ptr);
         }
@@ -509,17 +523,20 @@ struct AllocTask {
 AllocTask testCustomAllocator() {
     using PromiseType = AllocTask::promise_type;
     struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
+        void destroySuspendedCoro(size_t) {
+        }
 
-        void destroySuspendedCoro(size_t) {}
-
-    void doStep() {
-    switch(this->curState) { case 0: break; default: return; }
-    CO_RETURN_VALUE(1, 99);
-    CO_RETURN_VALUE_FALLOFF(2, 0);
-    }
+        void doStep() {
+            switch (this->curState) {
+                case 0: break;
+                default: return;
+            }
+            CO_RETURN_VALUE(1, 99);
+            CO_RETURN_VALUE_FALLOFF(2, 0);
+        }
     };
-    void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
-    auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+    void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+    auto *frame = new(__coro_mem) GeneratorStateMachine{{}};
     return frame->pt.get_return_object();
 }
 
@@ -530,8 +547,8 @@ AllocTask testCustomAllocator() {
 SimpleTask testCoReturnValue() {
     using PromiseType = SimpleTask::promise_type;
     struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
-        _coro_storage<int&, true> a;
-        _coro_storage<int&, true> b;
+        _coro_storage<int &, true> a;
+        _coro_storage<int &, true> b;
 
         void destroySuspendedCoro(size_t curState) {
             switch (curState) {
@@ -544,18 +561,21 @@ SimpleTask testCoReturnValue() {
             }
         }
 
-    void doStep() {
-    switch(this->curState) { case 0: break; default: return; }
-    CO_PAREN_INIT_OWNING(a, 7);
-    CO_PAREN_INIT_OWNING(b, 6);
-    CO_RETURN_VALUE(1, CO_GET(a) * CO_GET(b));
-    this->a.destroy();
-    this->b.destroy();
-    CO_RETURN_VALUE_FALLOFF(2, 0);
-    }
+        void doStep() {
+            switch (this->curState) {
+                case 0: break;
+                default: return;
+            }
+            CO_PAREN_INIT_OWNING(a, 7);
+            CO_PAREN_INIT_OWNING(b, 6);
+            CO_RETURN_VALUE(1, CO_GET(a) * CO_GET(b));
+            this->a.destroy();
+            this->b.destroy();
+            CO_RETURN_VALUE_FALLOFF(2, 0);
+        }
     };
-    void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
-    auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+    void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+    auto *frame = new(__coro_mem) GeneratorStateMachine{{}};
     return frame->pt.get_return_object();
 }
 
@@ -565,7 +585,7 @@ SimpleTask testCoReturnValue() {
 
 int main() {
     bool allPassed = true;
-    auto check = [&](const char* name, bool cond) {
+    auto check = [&](const char *name, bool cond) {
         if (!cond) {
             std::cout << "FAIL: " << name << std::endl;
             allPassed = false;

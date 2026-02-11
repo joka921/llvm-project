@@ -230,6 +230,14 @@ SourceLocation CoroutineRewriter::findPreFunctionInsertionPoint(const FunctionDe
         return loc;
     }
 
+static unsigned computeFalloffIndex(const CoroutineInfo &coro) {
+    if (coro.coroutineStatements.empty()) return 1;
+    return std::max_element(coro.coroutineStatements.begin(), coro.coroutineStatements.end(),
+        [](const CoroutineStatement& a, const CoroutineStatement& b) {
+            return a.index < b.index;
+        })->index + 1;
+}
+
 std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro) {
         // Extract the return type from the coroutine function
         std::string returnType = "auto"; // Default fallback
@@ -290,6 +298,23 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         structCode += "  };\n";
         structCode += "\n";
         */
+
+        // Exception handling constants (function scope, accessible from local struct as constant expressions)
+        structCode += "  constexpr size_t kNoTryBlock = static_cast<size_t>(-1);\n";
+        if (!coro.tryCatchBlocks.empty()) {
+            // Document the parent structure as a comment (can't use constexpr array
+            // from local class methods per C++ rules)
+            structCode += "  // tryBlockParent: {";
+            for (size_t i = 0; i < coro.tryCatchBlocks.size(); ++i) {
+                if (i > 0) structCode += ", ";
+                if (coro.tryCatchBlocks[i].parentIndex == static_cast<unsigned>(-1)) {
+                    structCode += "kNoTryBlock";
+                } else {
+                    structCode += std::to_string(coro.tryCatchBlocks[i].parentIndex);
+                }
+            }
+            structCode += "}\n";
+        }
 
         // Generate the unified coroutine class
         structCode += "  using PromiseType = " + returnType + "::promise_type;\n";
@@ -414,12 +439,15 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
         // Add exception handling infrastructure (always generated)
         structCode += "\n    // Exception handling infrastructure\n";
-        structCode += "    std::vector<size_t> activeTryBlocks;\n";
+        structCode += "    size_t currentTryBlock_ = kNoTryBlock;\n";
 
         // Add handleException function with unhandled_exception fallback
         structCode += "\n    void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {\n";
-        structCode += "      if (activeTryBlocks.empty()) {\n";
-        structCode += "        destroySuspendedCoro(this->curState);\n";
+        structCode += "      if (currentTryBlock_ == kNoTryBlock) {\n";
+        // Destroy all local variables (exception could occur at any point)
+        for (auto it = coro.localVariables.rbegin(); it != coro.localVariables.rend(); ++it) {
+            structCode += "        if (" + it->name + ".constructed) { " + it->name + ".destroy(); }\n";
+        }
         structCode += "        promise().unhandled_exception();\n";
         structCode += "        this->done_ = true;\n";
         structCode += "        this->__final_awaiter.construct(promise().final_suspend());\n";
@@ -431,16 +459,16 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         structCode += "        Hdl::from_promise(pt).destroy();\n";
         structCode += "        return;\n";
         structCode += "      }\n";
-        structCode += "      destroyBecauseOfException(activeTryBlocks.back());\n";
+        structCode += "      destroyBecauseOfException(currentTryBlock_);\n";
         structCode += "      nextState = dispatchExceptionHandling(std::move(eptr));\n";
         structCode += "      resume();\n";
         structCode += "    }\n";
 
         // Add dispatchExceptionHandling function
         structCode += "\n    size_t dispatchExceptionHandling(std::exception_ptr eptr) {\n";
-        structCode += "      switch (activeTryBlocks.back()) {\n";
+        structCode += "      switch (currentTryBlock_) {\n";
         for (const auto &tryCatch : coro.tryCatchBlocks) {
-            structCode += "        case " + std::to_string(tryCatch.resumeIndex) + ": return catchClauseImpl_" + std::to_string(tryCatch.resumeIndex) + "(std::move(eptr));\n";
+            structCode += "        case " + std::to_string(tryCatch.index) + ": return catchClauseImpl_" + std::to_string(tryCatch.index) + "(std::move(eptr));\n";
         }
         structCode += "        default: std::terminate();\n";
         structCode += "      }\n";
@@ -450,9 +478,13 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         if (!coro.tryCatchBlocks.empty()) {
             structCode += "\n    // Exception handler member functions\n";
             for (const auto &tryCatch : coro.tryCatchBlocks) {
-                structCode += "    size_t catchClauseImpl_" + std::to_string(tryCatch.resumeIndex) + "(std::exception_ptr eptr) {\n";
-                structCode += "      auto nextState = activeTryBlocks.back();\n";
-                structCode += "      activeTryBlocks.pop_back();\n";
+                structCode += "    size_t catchClauseImpl_" + std::to_string(tryCatch.index) + "(std::exception_ptr eptr) {\n";
+                structCode += "      auto nextState = " + std::to_string(tryCatch.resumeIndex) + ";\n";
+                // Inline the parent value (can't use constexpr array from local class)
+                std::string parentValue = (tryCatch.parentIndex == static_cast<unsigned>(-1))
+                    ? "kNoTryBlock"
+                    : std::to_string(tryCatch.parentIndex);
+                structCode += "      currentTryBlock_ = " + parentValue + ";\n";
                 structCode += "      auto lambda = [&]() {\n";
                 structCode += "        try {\n";
                 structCode += "          std::rethrow_exception(eptr);\n";
@@ -465,7 +497,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
                 structCode += "\n        return nextState;\n";
                 structCode += "      };\n";
-                structCode += "      if (activeTryBlocks.empty()) {\n";
+                structCode += "      if (currentTryBlock_ == kNoTryBlock) {\n";
                 structCode += "        return lambda();\n";
                 structCode += "      } else {\n";
                 structCode += "        try {\n";
@@ -476,7 +508,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                 structCode += "      }\n";
                 structCode += "    }\n";
 
-                REWRITE_LOG() << "    Added catchClauseImpl_" << tryCatch.resumeIndex << " to struct\n";
+                REWRITE_LOG() << "    Added catchClauseImpl_" << tryCatch.index << " to struct\n";
             }
         }
 
@@ -485,7 +517,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         structCode += "    void destroyBecauseOfException(size_t tryCatchBlockIndex) {\n";
         structCode += "      switch (tryCatchBlockIndex) {\n";
         for (const auto &tryCatch : coro.tryCatchBlocks) {
-            structCode += "        case " + std::to_string(tryCatch.resumeIndex) + ":\n";
+            structCode += "        case " + std::to_string(tryCatch.index) + ":\n";
             // Destroy all variables in this try block in reverse order
             for (const auto &varName : tryCatch.variablesInTryBlock) {
                 structCode += "          if (" + varName + ".constructed) { " + varName + ".destroy(); }\n";
@@ -505,7 +537,14 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
             // Generate cases in descending order (from highest index to lowest)
             // This allows us to use fallthrough and goto for proper destruction order
+
+            // Add synthetic falloff entry (highest index, outermost scope variables)
+            CoroutineStatement falloffStmt;
+            falloffStmt.index = computeFalloffIndex(coro);
+            falloffStmt.aliveVariables = coro.outermostScopeVariables;
+
             std::vector<const CoroutineStatement*> sortedStmts;
+            sortedStmts.push_back(&falloffStmt);
             for (const auto &stmt : coro.coroutineStatements) {
                 sortedStmts.push_back(&stmt);
             }
@@ -1202,21 +1241,27 @@ void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, Corouti
                     }
                 }
 
-                // Add CO_RETURN_FALLOFF before COROUTINE_FOOTER
-                // Calculate the falloff index - it's the next available coroutine statement index
-                unsigned falloffIndex = coro.coroutineStatements.empty() ? 1 :
-                    std::max_element(coro.coroutineStatements.begin(), coro.coroutineStatements.end(),
-                        [](const CoroutineStatement& a, const CoroutineStatement& b) {
-                            return a.index < b.index;
-                        })->index + 1;
+                // Add CO_RETURN_FALLOFF before COROUTINE_FOOTER (unless body ends with co_return)
+                unsigned falloffIndex = computeFalloffIndex(coro);
 
-                ScopeEndReplacement falloffReplacement;
-                falloffReplacement.replacement = "CO_RETURN_FALLOFF(" + std::to_string(falloffIndex) + ", __final_awaiter);\n";
-                falloffReplacement.priority = std::numeric_limits<int>::max() - 1; // Just before COROUTINE_FOOTER
-                body_rewriter.scopeEndReplacements[fileOffset].push_back(falloffReplacement);
+                // Check if body ends with explicit co_return (makes falloff unreachable)
+                bool bodyEndsWithCoReturn = false;
+                if (!compoundStmt->body_empty()) {
+                    const Stmt *lastStmt = *(compoundStmt->body_end() - 1);
+                    bodyEndsWithCoReturn = isa<CoreturnStmt>(lastStmt);
+                }
 
-                REWRITE_LOG() << "  DEBUG: Added CO_RETURN_FALLOFF(" << falloffIndex << ") with priority "
-                        << falloffReplacement.priority << "\n";
+                if (!bodyEndsWithCoReturn) {
+                    ScopeEndReplacement falloffReplacement;
+                    falloffReplacement.replacement = "CO_RETURN_FALLOFF(" + std::to_string(falloffIndex) + ", __final_awaiter);\n";
+                    falloffReplacement.priority = std::numeric_limits<int>::max() - 1; // Just before COROUTINE_FOOTER
+                    body_rewriter.scopeEndReplacements[fileOffset].push_back(falloffReplacement);
+
+                    REWRITE_LOG() << "  DEBUG: Added CO_RETURN_FALLOFF(" << falloffIndex << ") with priority "
+                            << falloffReplacement.priority << "\n";
+                } else {
+                    REWRITE_LOG() << "  DEBUG: Skipping CO_RETURN_FALLOFF (body ends with co_return)\n";
+                }
 
                 // Generate the footer code directly (no macros)
                 std::string footerCode;

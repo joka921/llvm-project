@@ -20,6 +20,7 @@ struct TryCatchBlock {
     const CXXTryStmt *tryStmt;
     unsigned index;
     unsigned resumeIndex;  // goto label index, from same counter as suspension points
+    unsigned parentIndex = static_cast<unsigned>(-1);  // index of enclosing try block, or UINT_MAX if none
     SourceLocation tryKeywordLoc;
     SourceLocation tryBlockStart;  // Opening brace of try block
     SourceLocation tryBlockEnd;    // Closing brace of try block

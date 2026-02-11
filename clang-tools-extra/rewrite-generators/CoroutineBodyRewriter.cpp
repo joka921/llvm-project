@@ -112,7 +112,13 @@ bool CoroutineBodyRewriter::TraverseCompoundStmt(CompoundStmt *compoundStmt) {
         // ===== POST-TRAVERSAL (after all children have been visited) =====
         // Before popping scope, insert destructor calls
         if (!scopeStack.empty() && !scopeStack.back().variablesInScope.empty()) {
-            insertDestructorsForScope(scopeStack.back());
+            if (scopeStack.size() == 1) {
+                // Outermost scope: don't insert destroyers (handled by destroySuspendedCoro)
+                // Store variables for falloff case generation
+                coroutineInfo.outermostScopeVariables = scopeStack.back().variablesInScope;
+            } else {
+                insertDestructorsForScope(scopeStack.back());
+            }
         }
 
         // Pop scope
@@ -397,6 +403,11 @@ bool CoroutineBodyRewriter::TraverseCXXTryStmt(CXXTryStmt *tryStmt) {
                 tryCatch.catchEnd = catchStmt->getEndLoc();
             }
         }
+
+        // Compute parent index before pushing onto stack
+        tryCatch.parentIndex = currentTryBlockStack.empty()
+            ? static_cast<unsigned>(-1)
+            : currentTryBlockStack.back();
 
         // Push this try block index onto the stack before traversing children
         unsigned currentIndex = tryCatch.index;

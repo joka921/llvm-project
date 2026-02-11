@@ -279,51 +279,60 @@ namespace cppcoro {
 } // namespace cppcoro
 
 namespace coro_detail {
-
     struct ConvertibleToAnything {
-        template <typename T>
+        template<typename T>
         operator T();
     };
-  template<typename Promise, typename Expr, typename = void>
-  struct has_await_transform : std::false_type {};
 
-  template<typename Promise, typename Expr>
-  struct has_await_transform<Promise, Expr,
-    std::void_t<decltype(std::declval<Promise&>()
-      .await_transform(std::declval<ConvertibleToAnything>()))>>
-    : std::true_type {};
+    template<typename Promise, typename Expr, typename = void>
+    struct has_await_transform : std::false_type {
+    };
 
-  template<typename Promise, typename Expr>
-  decltype(auto) get_awaitable(Promise& promise, Expr&& expr) {
-    if constexpr (has_await_transform<Promise, Expr>::value) {
-      return promise.await_transform(std::forward<Expr>(expr));
-    } else {
-      return std::forward<Expr>(expr);
+    template<typename Promise, typename Expr>
+    struct has_await_transform<Promise, Expr,
+                std::void_t<decltype(std::declval<Promise &>()
+                    .await_transform(std::declval<ConvertibleToAnything>()))> >
+            : std::true_type {
+    };
+
+    template<typename Promise, typename Expr>
+    decltype(auto) get_awaitable(Promise &promise, Expr &&expr) {
+        if constexpr (has_await_transform<Promise, Expr>::value) {
+            return promise.await_transform(std::forward<Expr>(expr));
+        } else {
+            return std::forward<Expr>(expr);
+        }
     }
-  }
-  template<typename P, typename = void>
-  struct has_promise_new : std::false_type {};
-  template<typename P>
-  struct has_promise_new<P,
-    std::void_t<decltype(P::operator new(size_t{}))>>
-    : std::true_type {};
 
-  template<typename P, typename = void>
-  struct has_promise_delete : std::false_type {};
-  template<typename P>
-  struct has_promise_delete<P,
-    std::void_t<decltype(P::operator delete(
-      std::declval<void*>(), size_t{}))>>
-    : std::true_type {};
+    template<typename P, typename = void>
+    struct has_promise_new : std::false_type {
+    };
 
-  template<typename P>
-  void* promise_allocate(size_t size) {
-    if constexpr (has_promise_new<P>::value) {
-      return P::operator new(size);
-    } else {
-      return ::operator new(size);
+    template<typename P>
+    struct has_promise_new<P,
+                std::void_t<decltype(P::operator new(size_t{}))> >
+            : std::true_type {
+    };
+
+    template<typename P, typename = void>
+    struct has_promise_delete : std::false_type {
+    };
+
+    template<typename P>
+    struct has_promise_delete<P,
+                std::void_t<decltype(P::operator delete(
+                    std::declval<void *>(), size_t{}))> >
+            : std::true_type {
+    };
+
+    template<typename P>
+    void *promise_allocate(size_t size) {
+        if constexpr (has_promise_new<P>::value) {
+            return P::operator new(size);
+        } else {
+            return ::operator new(size);
+        }
     }
-  }
 } // namespace coro_detail
 
 struct HandleFrame {
@@ -341,7 +350,7 @@ struct Handle {
     void resume() { ptr->resumeFunc(ptr->target); }
 
     static constexpr size_t promise_offset =
-        (sizeof(HandleFrame) + alignof(Promise) - 1) & ~(alignof(Promise) - 1);
+            (sizeof(HandleFrame) + alignof(Promise) - 1) & ~(alignof(Promise) - 1);
 
     static Handle from_promise(Promise &p) {
         auto *ptr = reinterpret_cast<HandleFrame *>(reinterpret_cast<char *>(&p) -
@@ -440,13 +449,13 @@ bool co_await_impl(auto &&awaiter, auto handle) {
 #define CO_RETURN_FALLOFF(index, finalAwaiterMem) CO_RETURN_VOID(index, finalAwaiterMem)
 #define CO_RETURN_VALUE_FALLOFF(index, finalAwaiterMem, value) CO_RETURN_VALUE(index, finalAwaiterMem, value)
 
-#define TRY_BEGIN(index) this->activeTryBlocks.push_back(index); void()
-// TODO<joka921> Assert that this works in fact.
-#define TRY_END(index) this->activeTryBlocks.pop_back(); label_##index: void()
+inline constexpr size_t CO_NO_TRY_BLOCK = static_cast<size_t>(-1);
+#define TRY_BEGIN(try_index) this->currentTryBlock_ = (try_index); void()
+#define TRY_END(parent_index, label) this->currentTryBlock_ = (parent_index); label_##label: void()
 
 namespace blubbi {
-    template <typename T>
-    using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
+    template<typename T>
+    using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T> >;
 }
 
 #define CO_AWAIT_VOID(index, awaiterMem, expr)                                  \
@@ -497,17 +506,17 @@ struct CoroImpl {
     static void resume(void *blubb) { cast(blubb)->doStep(); }
 
     static void destroy(void *blubb) {
-        auto* self = cast(blubb);
+        auto *self = cast(blubb);
         if constexpr (coro_detail::has_promise_delete<PromiseType>::value) {
             self->~Derived();
             PromiseType::operator delete(
-                static_cast<void*>(self), sizeof(Derived));
+                static_cast<void *>(self), sizeof(Derived));
         } else {
             delete self;
         }
     }
 
-    static bool done( void *blubb) {
+    static bool done(void *blubb) {
         return cast(blubb)->done_;
     }
 
@@ -519,14 +528,13 @@ struct CoroImpl {
         frm.doneFunc = &CoroImpl::done;
     }
 
-    static auto make() {
-        // TODO allocator support
-        auto *frame = new Derived;
-        return frame->pt.get_return_object();
+    template<typename... T>
+    static void destroySafely(T &... mems) {
+        (..., mems.destroy());
     }
 
-    template <typename... CoroArgs>
-    static auto ramp(CoroArgs&&... coroArgs) {
+    template<typename... CoroArgs>
+    static auto ramp(CoroArgs &&... coroArgs) {
         // TODO<joka921> alignment.
         void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(Derived));
         auto *frame = new(__coro_mem) Derived{std::forward<CoroArgs>(coroArgs)...};
@@ -627,10 +635,25 @@ struct _coro_storage {
 #define CO_GET_STATE(arg) arg.get().ref_
 
 // TODO<joka921> Update the other OWNING also to the new lambda syntax.
-#define CO_BRACED_INIT(mem, ...) new(this->mem.buffer) typename decltype(this->mem)::Storage{ &__VA_ARGS__} ;  this->mem.constructed=true
-#define CO_BRACED_INIT_OWNING(mem, ...) new(this->mem.buffer) typename decltype(this->mem)::Storage{ __VA_ARGS__} ;  this->mem.constructed=true
-#define CO_PAREN_INIT(mem, ...) new(this->mem.buffer) typename decltype(this->mem)::Storage{ &__VA_ARGS__} ;  this->mem.constructed=true
-#define CO_PAREN_INIT_OWNING(mem, ...) [&]() -> decltype(auto) {new(this->mem.buffer) typename decltype(this->mem)::Storage( __VA_ARGS__) ;  this->mem.constructed=true; return std::move(CO_GET(mem));}()
+#define CO_INIT_REF(mem, ...)  \
+    new(this->mem.buffer) typename decltype(this->mem)::Storage{ &__VA_ARGS__} ;\
+    this->mem.constructed=true
+
+#define CO_BRACED_INIT(mem, ...) CO_INIT_REF(mem, __VA_ARGS__)
+#define CO_PAREN_INIT(mem, ...) CO_INIT_REF(mem, __VA_ARGS__)
+#define CO_PAREN_INIT_OWNING(mem, ...) \
+  [&]() -> decltype(auto) { \
+    new(this->mem.buffer) typename decltype(this->mem)::Storage( __VA_ARGS__); \
+    this->mem.constructed=true; \
+    return std::move(CO_GET(mem)); \
+  }()
+
+#define CO_BRACED_INIT_OWNING(mem, ...) \
+[&]() -> decltype(auto) { \
+new(this->mem.buffer) typename decltype(this->mem)::Storage{ __VA_ARGS__}; \
+this->mem.constructed=true; \
+return std::move(CO_GET(mem)); \
+}()
 
 
 template<typename Ref, bool isOwning>

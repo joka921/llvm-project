@@ -116,6 +116,9 @@ struct CoroutineInfo {
 
     // Regular lambdas found inside the coroutine body
     std::vector<LambdaInCoroutine> lambdasInBody;
+
+    // Variables alive at the outermost function body scope end (for falloff case in destroySuspendedCoro)
+    std::vector<std::string> outermostScopeVariables;
 };
 
 #endif // LLVM_REWRITE_GENERATORS_COROUTINESTRUCTURES_H

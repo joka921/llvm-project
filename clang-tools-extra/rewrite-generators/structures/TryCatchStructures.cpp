@@ -17,29 +17,32 @@ TryCatchBlock::generateReplacements(
     REWRITE_LOG() << "\n=== COLLECTING TRY-CATCH REPLACEMENTS ===\n";
     REWRITE_LOG() << "    DEBUG: Processing try-catch block " << index << " (resumeIndex=" << resumeIndex << ")\n";
 
-    // Part 1: Replace "try" keyword with "TRY_BEGIN(resumeIndex)"
+    // Part 1: Replace "try" keyword with "TRY_BEGIN(index)" (sequential index, not resumeIndex)
     if (tryKeywordLoc.isValid()) {
         SourceLocation tryEnd = getLocForEndOfToken(tryKeywordLoc);
         SourceRange tryKeywordRange(tryKeywordLoc, tryEnd);
 
-        std::string tryBegin = "TRY_BEGIN(" + std::to_string(resumeIndex) + ");";
+        std::string tryBegin = "TRY_BEGIN(" + std::to_string(index) + ");";
         int tryPriority = 20000 + static_cast<int>(index);
         replacements.emplace_back(tryKeywordRange, tryBegin, tryPriority, true);
 
-        REWRITE_LOG() << "        Added try keyword replacement with TRY_BEGIN(" << resumeIndex << ") at "
+        REWRITE_LOG() << "        Added try keyword replacement with TRY_BEGIN(" << index << ") at "
                 << tryKeywordRange.printToString(sourceManager) << " (priority " << tryPriority << ")\n";
     }
 
-    // Part 2: Insert "TRY_END(resumeIndex)" after the closing brace of try block
+    // Part 2: Insert "TRY_END(parentIndex, resumeIndex)" after the closing brace of try block
     if (tryBlockEnd.isValid()) {
         SourceLocation afterBrace = getLocForEndOfToken(tryBlockEnd);
         SourceRange endRange(afterBrace, afterBrace);
 
-        std::string tryEnd = " TRY_END(" + std::to_string(resumeIndex) + ");";
+        std::string parentStr = (parentIndex == static_cast<unsigned>(-1))
+            ? "CO_NO_TRY_BLOCK"
+            : std::to_string(parentIndex);
+        std::string tryEnd = " TRY_END(" + parentStr + ", " + std::to_string(resumeIndex) + ");";
         int endPriority = 30000 + static_cast<int>(index) + 1;
         replacements.emplace_back(endRange, tryEnd, endPriority, false);
 
-        REWRITE_LOG() << "        Added TRY_END(" << resumeIndex << ") insertion at "
+        REWRITE_LOG() << "        Added TRY_END(" << parentStr << ", " << resumeIndex << ") insertion at "
                 << endRange.printToString(sourceManager) << " (priority " << endPriority << ")\n";
     }
 

@@ -577,7 +577,7 @@ try {
   return frame->pt.get_return_object();
 
 #define COROUTINE_FOOTER_WITH_TRY(...) \
-} catch(...) {this->handleException(std::current_exception(), this->curState, [this](){doStep();});} \
+} catch(...) {this->handleException(std::current_exception(), this->curState);} \
 }                      \
 }                      \
 ;                      \

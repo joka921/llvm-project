@@ -219,26 +219,28 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
     // Exception handling infrastructure
     size_t currentTryBlock_ = kNoTryBlock;
 
-    void handleException(std::exception_ptr eptr, size_t& nextState, std::function<void()> resume) {
+    void handleException(std::exception_ptr eptr, size_t& nextState) {
+      nextState = dispatchExceptionHandling(std::move(eptr));
+      if (!this->done_) {
+        doStep();
+      }
+    }
+
+    size_t dispatchExceptionHandling(std::exception_ptr eptr) {
       if (currentTryBlock_ == kNoTryBlock) {
-          destroySafely(z, i, y, x);
+        destroySafely(z, i, y, x);
         promise().unhandled_exception();
         this->done_ = true;
         this->__final_awaiter.construct(promise().final_suspend());
         if (!co_await_impl(this->__final_awaiter.get().ref_, Hdl::from_promise(pt))) {
-          return;
+          return 0;
         }
         this->__final_awaiter.get().ref_.await_resume();
         this->__final_awaiter.destroy();
         Hdl::from_promise(pt).destroy();
-        return;
+        return 0;
       }
       destroyBecauseOfException(currentTryBlock_);
-      nextState = dispatchExceptionHandling(std::move(eptr));
-      resume();
-    }
-
-    size_t dispatchExceptionHandling(std::exception_ptr eptr) {
       switch (currentTryBlock_) {
         case 0: return catchClauseImpl_0(std::move(eptr));
         default: std::terminate();
@@ -259,14 +261,10 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
             }
             return nextState;
         };
-        if (currentTryBlock_ == kNoTryBlock) {
+        try {
             return lambda();
-        } else {
-            try {
-                return lambda();
-            } catch (...) {
-                return dispatchExceptionHandling(std::current_exception());
-            }
+        } catch (...) {
+            return dispatchExceptionHandling(std::current_exception());
         }
     }
 
@@ -274,9 +272,7 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
     void destroyBecauseOfException(size_t tryCatchBlockIndex) {
       switch (tryCatchBlockIndex) {
         case 0:
-          if (y.constructed) { y.destroy(); }
-          if (i.constructed) { i.destroy(); }
-          if (z.constructed) { z.destroy(); }
+          destroySafely(y, i, z);
           break;
         default: break;
       }
@@ -335,7 +331,7 @@ __initial_awaiter.destroy();
 } TRY_END(CO_NO_TRY_BLOCK, 1);
   CO_YIELD(4, __awaiter_4,  CO_GET(x));
   CO_RETURN_VOID(5, __final_awaiter);
-} catch(...) {this->handleException(std::current_exception(), this->curState, [this](){doStep();});}
+} catch(...) {this->handleException(std::current_exception(), this->curState);}
 }
 };
 void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));

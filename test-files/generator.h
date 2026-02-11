@@ -404,6 +404,12 @@ struct HandleFrame {
 template<typename Promise = void>
 struct Handle {
     HandleFrame *ptr;
+    Handle(HandleFrame *ptr) noexcept : ptr(ptr) {}
+    Handle& operator=(const Handle&) = default;
+    Handle(const Handle&) = default;
+    Handle(Handle&&) = default;
+    Handle& operator=(Handle&&) = default;
+    Handle& operator=(std::nullptr_t) noexcept { ptr = nullptr; return *this;}
 
     // resume, done, destroy, and operator bool just use the indirection to the `HandleFrame`.
     void resume() { ptr->resumeFunc(ptr->target); }
@@ -471,24 +477,25 @@ struct _coro_storage {
     }
 };
 
-#define CO_AWAIT_IMPL_IMPL(awaiterMem, handle, ...) \
+#define CO_AWAIT_IMPL_IMPL(awaiterInput, handle, ...) \
 { \
-auto& awaiter = CO_GET(awaiterMem); \
-if (!awaiter.await_ready()) { \
-using type = decltype(awaiter.await_suspend(handle)); \
-if constexpr (std::is_void_v<type>) { \
-awaiter.await_suspend(handle); \
-return __VA_ARGS__; \
-} else if constexpr (std::is_same_v<type, bool>) { \
-  if (! awaiter.await_suspend(handle)) { return __VA_ARGS__; } \
+  auto& awaiter = awaiterInput; \
+  if (!awaiter.await_ready()) { \
+    using type = decltype(awaiter.await_suspend(handle)); \
+    if constexpr (std::is_void_v<type>) { \
+    awaiter.await_suspend(handle); \
+    return __VA_ARGS__; \
+  } else if constexpr (std::is_same_v<type, bool>) { \
+    if (! [&](auto& awaiter) {if constexpr (std::is_same_v<type, bool>) return awaiter.await_suspend(handle); return true;}(awaiter)) { return __VA_ARGS__; } \
 } else { \
 /* TODO encourage tail call optimization for empty `__VA_ARGS__`*/ \
-awaiter.await_suspend(handle).resume(); \
-return __VA_ARGS__; \
+  throw std::runtime_error("not yet implemented"); \
+  /*awaiter.await_suspend(handle).resume(); */ \
+  return __VA_ARGS__; \
 } \
 } \
 } void()
-#define CO_AWAIT_IMPL(awaiterMem) CO_AWAIT_IMPL_IMPL(awaiterMem, Hdl::from_promise(pt))
+#define CO_AWAIT_IMPL(awaiterMem) CO_AWAIT_IMPL_IMPL(CO_GET(awaiterMem), Hdl::from_promise(pt))
 
 #define CO_RESUME(index, awaiterMem) \
   label_##index:                                                       \

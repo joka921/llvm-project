@@ -198,198 +198,173 @@ cppcoro::generator<int> lambda () {
 
 
 cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
-    // _coro_storage and CoroImpl assumed to be available in global namespace
-    constexpr size_t kNoTryBlock = static_cast<size_t>(-1);
-    // tryBlockParent: {kNoTryBlock}
-    using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
-    struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
-        // Local variables (including ranged-for loop variables)
-        _coro_storage<int &, true> x;
-        _coro_storage<int &, true> y;
-        _coro_storage<int &, true> i;
-        _coro_storage<int &, true> z;
+  // _coro_storage and CoroImpl assumed to be available in global namespace
+  constexpr size_t kNoTryBlock = static_cast<size_t>(-1);
+  // tryBlockParent: {kNoTryBlock}
+  using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
+  struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
+    // Local variables (including ranged-for loop variables)
+    _coro_storage<int&, true> x;
+    _coro_storage<int&, true> y;
+    _coro_storage<int&, true> i;
+    _coro_storage<int&, true> z;
 
-        // Constructed flags for local variables
-        struct {
-            bool x = false;
-            bool y = false;
-            bool i = false;
-            bool z = false;
-        } __constructed;
+    // Constructed flags for local variables
+    struct {
+        bool x = false;
+        bool y = false;
+        bool i = false;
+        bool z = false;
+    } __constructed;
 
-        // Awaiter storage members
-        _coro_storage<decltype(std::declval<PromiseType &>().initial_suspend()) &, true> __initial_awaiter;
-        _coro_storage<decltype(std::declval<PromiseType &>().final_suspend()) &, true> __final_awaiter;
-        _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_2;
-        _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_3;
-        _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_4;
+    // Awaiter storage members
+    _coro_storage<decltype(std::declval<PromiseType&>().initial_suspend())&, true> __initial_awaiter;
+    _coro_storage<decltype(std::declval<PromiseType&>().final_suspend())&, true> __final_awaiter;
+    _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_2;
+    _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_3;
+    _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_4;
 
-        // Exception handling infrastructure
-        size_t currentTryBlock_ = kNoTryBlock;
+    // Exception handling infrastructure
+    size_t currentTryBlock_ = kNoTryBlock;
 
-        void handleException(std::exception_ptr eptr, size_t &nextState) {
-            nextState = dispatchExceptionHandling(std::move(eptr));
-            if (!this->done_) {
-                doStep();
-            }
-        }
+    void handleException(std::exception_ptr eptr, size_t& nextState) {
+      nextState = dispatchExceptionHandling(std::move(eptr));
+      if (!this->done_) {
+        doStep();
+      }
+    }
 
-        size_t dispatchExceptionHandling(std::exception_ptr eptr) {
-            if (currentTryBlock_ == kNoTryBlock) {
-                if (this->__constructed.z) {
-                    this->z.destroy();
-                    this->__constructed.z = false;
-                }
-                if (this->__constructed.i) {
-                    this->i.destroy();
-                    this->__constructed.i = false;
-                }
-                if (this->__constructed.y) {
-                    this->y.destroy();
-                    this->__constructed.y = false;
-                }
-                if (this->__constructed.x) {
-                    this->x.destroy();
-                    this->__constructed.x = false;
-                }
-                promise().unhandled_exception();
-                this->done_ = true;
-                this->atFinalSuspend_ = true;
-                this->__final_awaiter.construct(promise().final_suspend());
-                CO_AWAIT_IMPL_IMPL(__final_awaiter, Handle<PromiseType>::from_promise(pt), 0);
-                this->__final_awaiter.get().ref_.await_resume();
-                this->__final_awaiter.destroy();
-                this->atFinalSuspend_ = false;
-                Hdl::from_promise(pt).destroy();
-                return 0;
-            }
-            destroyBecauseOfException(currentTryBlock_);
-            switch (currentTryBlock_) {
-                case 0: return catchClauseImpl_0(std::move(eptr));
-                default: std::terminate();
-            }
-        }
+    size_t dispatchExceptionHandling(std::exception_ptr eptr) {
+      if (currentTryBlock_ == kNoTryBlock) {
+        if (this->__constructed.z) { this->z.destroy(); this->__constructed.z = false; }
+        if (this->__constructed.i) { this->i.destroy(); this->__constructed.i = false; }
+        if (this->__constructed.y) { this->y.destroy(); this->__constructed.y = false; }
+        if (this->__constructed.x) { this->x.destroy(); this->__constructed.x = false; }
+        promise().unhandled_exception();
+        this->done_ = true;
+        this->atFinalSuspend_ = true;
+        this->__final_awaiter.construct(promise().final_suspend());
+        CO_AWAIT_IMPL_IMPL(this->__final_awaiter.get().ref_, Hdl::from_promise(pt), 0) ;
+        this->__final_awaiter.get().ref_.await_resume();
+        this->__final_awaiter.destroy();
+        this->atFinalSuspend_ = false;
+        Hdl::from_promise(pt).destroy();
+        return 0;
+      }
+      destroyBecauseOfException(currentTryBlock_);
+      switch (currentTryBlock_) {
+        case 0: return catchClauseImpl_0(std::move(eptr));
+        default: std::terminate();
+      }
+    }
 
-        // Exception handler member functions
-        size_t catchClauseImpl_0(std::exception_ptr eptr) {
-            auto nextState = 1;
-            currentTryBlock_ = kNoTryBlock;
-            auto lambda = [&]() {
-                try {
-                    std::rethrow_exception(eptr);
-                } catch (class std::exception &e) {
-                    std::cout << "Caught exception: " << e.what() << " x=" << CO_GET_STATE(x) << std::endl;
-                } catch (...) {
-                    std::cout << "Caught unknown exception, x=" << CO_GET_STATE(x) << std::endl;
-                }
-                return nextState;
-            };
-            try {
-                return lambda();
-            } catch (...) {
-                return dispatchExceptionHandling(std::current_exception());
-            }
-        }
+    // Exception handler member functions
+    size_t catchClauseImpl_0(std::exception_ptr eptr) {
+      auto nextState = 1;
+      currentTryBlock_ = kNoTryBlock;
+      auto lambda = [&]() {
+        try {
+          std::rethrow_exception(eptr);
+        } catch (class std::exception & e) {
+    std::cout << "Caught exception: " << e.what() << " x=" << CO_GET_STATE(x) << std::endl;
+  } catch (...) {
+    std::cout << "Caught unknown exception, x=" << CO_GET_STATE(x) << std::endl;
+  } 
+        return nextState;
+      };
+      try {
+        return lambda();
+      } catch (...) {
+        return dispatchExceptionHandling(std::current_exception());
+      }
+    }
 
-        // Destroy variables in case of exception in try block
-        void destroyBecauseOfException(size_t tryCatchBlockIndex) {
-            switch (tryCatchBlockIndex) {
-                case 0:
-                    if (this->__constructed.y) {
-                        this->y.destroy();
-                        this->__constructed.y = false;
-                    }
-                    if (this->__constructed.i) {
-                        this->i.destroy();
-                        this->__constructed.i = false;
-                    }
-                    if (this->__constructed.z) {
-                        this->z.destroy();
-                        this->__constructed.z = false;
-                    }
-                    break;
-                default: break;
-            }
-        }
+    // Destroy variables in case of exception in try block
+    void destroyBecauseOfException(size_t tryCatchBlockIndex) {
+      switch (tryCatchBlockIndex) {
+        case 0:
+          if (this->__constructed.y) { this->y.destroy(); this->__constructed.y = false; }
+          if (this->__constructed.i) { this->i.destroy(); this->__constructed.i = false; }
+          if (this->__constructed.z) { this->z.destroy(); this->__constructed.z = false; }
+          break;
+        default: break;
+      }
+    }
 
-        // Destroy variables when coroutine is suspended at a specific state
-        void destroySuspendedCoro(size_t curState) {
-            switch (curState) {
-                case 6:
-                cleanup_5:
-                case 5:
-                    break;
-                cleanup_4:
-                case 4:
-                    __awaiter_4.destroy();
-                    break;
-                cleanup_3:
-                case 3:
-                    __awaiter_3.destroy();
-                    z.destroy();
-                    i.destroy();
-                    break;
-                cleanup_2:
-                case 2:
-                    __awaiter_2.destroy();
-                    y.destroy();
-                    x.destroy();
-                    break;
-                case 0: // initial state - initial awaiter is alive
-                    __initial_awaiter.destroy();
-                    break;
-            }
-        }
+    // Destroy variables when coroutine is suspended at a specific state
+    void destroySuspendedCoro(size_t curState) {
+      switch (curState) {
+        case 6:
+        cleanup_5:
+        case 5:
+          break;
+        cleanup_4:
+        case 4:
+          __awaiter_4.destroy();
+          break;
+        cleanup_3:
+        case 3:
+          __awaiter_3.destroy();
+          z.destroy();
+          i.destroy();
+          break;
+        cleanup_2:
+        case 2:
+          __awaiter_2.destroy();
+          y.destroy();
+          x.destroy();
+          break;
+        case 0:  // initial state - initial awaiter is alive
+          __initial_awaiter.destroy();
+          break;
+      }
+    }
 
-        void destroyFinalSuspend() {
-            __final_awaiter.destroy();
-        }
+    void destroyFinalSuspend() {
+      __final_awaiter.destroy();
+    }
 
-        void doStep() {
-            try {
-                switch (this->curState) {
-                    case 0: break;
-                    case 2: goto label_2;
-                    case 3: goto label_3;
-                    case 4: goto label_4;
-                    case 1: goto label_1;
-                    default: return;
-                }
-                __initial_awaiter.get().ref_.await_resume();
-                __initial_awaiter.destroy();
+    void doStep() {
+    try {
 
-                CO_PAREN_INIT_OWNING(x, 42);
-                TRY_BEGIN(0); {
-                    CO_PAREN_INIT_OWNING(y, CO_GET(x) + 1);
-                    CO_YIELD(2, __awaiter_2, CO_GET(y));
-                    CO_PAREN_INIT_OWNING(i, 15);
-                    while (CO_GET(i)) {
-                        CO_PAREN_INIT_OWNING(z, CO_GET(y) + 1);
-                        CO_YIELD(3, __awaiter_3, CO_GET(z));
-                        --CO_GET(i);
-                        this->z.destroy();
-                        this->__constructed.z = false;
-                    }
-                    this->i.destroy();
-                    this->__constructed.i = false;
-                    this->y.destroy();
-                    this->__constructed.y = false;
-                }
-                TRY_END(CO_NO_TRY_BLOCK, 1);
-                CO_YIELD(4, __awaiter_4, CO_GET(x));
-                CO_RETURN_VOID(5, __final_awaiter);
-            } catch (...) { this->handleException(std::current_exception(), this->curState); }
-        }
-    };
-                void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
-                auto *frame = new(__coro_mem) GeneratorStateMachine{{}};
-                auto ret = frame->pt.get_return_object();
-                frame->__initial_awaiter.construct(frame->pt.initial_suspend());
-                CO_AWAIT_IMPL_IMPL(__initial_awaiter, Handle<PromiseType>::from_promise(frame->pt), ret)
+switch(this->curState) {
+  case 0: break;
+  case 2: goto label_2;
+  case 3: goto label_3;
+  case 4: goto label_4;
+  case 1: goto label_1;
+  default: return;
+}
+__initial_awaiter.get().ref_.await_resume();
+__initial_awaiter.destroy();
 
-                    frame->doStep();
-                    return ret;
-                }
+  CO_PAREN_INIT_OWNING(x,  42);
+  TRY_BEGIN(0); {
+    CO_PAREN_INIT_OWNING(y,  CO_GET(x) + 1);
+    CO_YIELD(2, __awaiter_2,  CO_GET(y));
+    CO_PAREN_INIT_OWNING(i,  15);
+    while (CO_GET(i)) {
+      CO_PAREN_INIT_OWNING(z,  CO_GET(y) + 1);
+      CO_YIELD(3, __awaiter_3,  CO_GET(z));
+      --CO_GET(i);
+        this->z.destroy(); this->__constructed.z = false;
+}
+      this->i.destroy(); this->__constructed.i = false;
+    this->y.destroy(); this->__constructed.y = false;
+} TRY_END(CO_NO_TRY_BLOCK, 1);
+  CO_YIELD(4, __awaiter_4,  CO_GET(x));
+  CO_RETURN_VOID(5, __final_awaiter);
+} catch(...) {this->handleException(std::current_exception(), this->curState);}
+}
+};
+void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+auto* frame = new (__coro_mem) GeneratorStateMachine{{}};
+auto ret = frame->pt.get_return_object();
+frame->__initial_awaiter.construct(frame->pt.initial_suspend());
+CO_AWAIT_IMPL_IMPL(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt), ret);
+frame->doStep();
+return ret;
+}
 
 #if false
 // ============================================================

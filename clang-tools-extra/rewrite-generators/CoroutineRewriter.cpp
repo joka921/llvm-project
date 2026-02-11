@@ -483,9 +483,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         structCode += "        this->done_ = true;\n";
         structCode += "        this->atFinalSuspend_ = true;\n";
         structCode += "        this->__final_awaiter.construct(promise().final_suspend());\n";
-        structCode += "        if (!co_await_impl(this->__final_awaiter.get().ref_, Hdl::from_promise(pt))) {\n";
-        structCode += "          return 0;\n";
-        structCode += "        }\n";
+        structCode += "        CO_AWAIT_IMPL_IMPL(this->__final_awaiter.get().ref_, Hdl::from_promise(pt), 0) ;\n";
         structCode += "        this->__final_awaiter.get().ref_.await_resume();\n";
         structCode += "        this->__final_awaiter.destroy();\n";
         structCode += "        this->atFinalSuspend_ = false;\n";
@@ -1335,9 +1333,8 @@ void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, Corouti
                 footerCode += "auto* frame = new (__coro_mem) GeneratorStateMachine" + initArgs + ";\n";
                 footerCode += "auto ret = frame->pt.get_return_object();\n";
                 footerCode += "frame->__initial_awaiter.construct(frame->pt.initial_suspend());\n";
-                footerCode += "if (co_await_impl(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt))) {\n";
-                footerCode += "  frame->doStep();\n";
-                footerCode += "}\n";
+                footerCode += "CO_AWAIT_IMPL_IMPL(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt), ret);\n";
+                footerCode += "frame->doStep();\n";
                 footerCode += "return ret;\n";
 
                 replacement.replacement = footerCode;

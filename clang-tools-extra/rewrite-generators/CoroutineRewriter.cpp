@@ -375,7 +375,14 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                     memberName = it->second;
                 }
 
-                structCode += "    _coro_storage<" + var.referenceType + ", " + (var.isOwning
+                // For lambda variables, use the functor class name as the _coro_storage type
+                std::string refType = var.referenceType;
+                auto lambdaIt = coro.lambdaVariableMapping.find(var.location);
+                if (lambdaIt != coro.lambdaVariableMapping.end()) {
+                    refType = lambdaIt->second.className + " &";
+                }
+
+                structCode += "    _coro_storage<" + refType + ", " + (var.isOwning
                             ? std::string{"true"}
                             : std::string{"false"}) + "> " + memberName +
                         ";\n";
@@ -383,6 +390,22 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                 REWRITE_LOG() << "    Added variable: " << memberName << " (original name: " << var.name
                              << ", location: " << var.location.printToString(sourceManager) << ")\n";
             }
+
+            // Generate constructed flags struct for local variables
+            structCode += "\n    // Constructed flags for local variables\n";
+            structCode += "    struct {\n";
+            std::set<SourceLocation> flagDeclLocations;
+            for (const auto &var : coro.localVariables) {
+                if (flagDeclLocations.count(var.location) > 0) continue;
+                flagDeclLocations.insert(var.location);
+                std::string flagMemberName = var.name;
+                auto flagIt = coro.declLocationToMemberName.find(var.location);
+                if (flagIt != coro.declLocationToMemberName.end()) {
+                    flagMemberName = flagIt->second;
+                }
+                structCode += "        bool " + flagMemberName + " = false;\n";
+            }
+            structCode += "    } __constructed;\n";
         }
 
         // Add storage for subexpression temporaries
@@ -452,25 +475,20 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         // Add dispatchExceptionHandling function — handles kNoTryBlock terminal path
         structCode += "\n    size_t dispatchExceptionHandling(std::exception_ptr eptr) {\n";
         structCode += "      if (currentTryBlock_ == kNoTryBlock) {\n";
-        // Destroy all local variables (exception could occur at any point)
-        if (!coro.localVariables.empty()) {
-            structCode += "        destroySafely(";
-            bool first = true;
-            for (auto it = coro.localVariables.rbegin(); it != coro.localVariables.rend(); ++it) {
-                if (!first) structCode += ", ";
-                structCode += it->name;
-                first = false;
-            }
-            structCode += ");\n";
+        // Destroy all local variables (exception could occur at any point, check flags)
+        for (auto it = coro.localVariables.rbegin(); it != coro.localVariables.rend(); ++it) {
+            structCode += "        " + makeStateDestroyIfConstructed(it->name) + "\n";
         }
         structCode += "        promise().unhandled_exception();\n";
         structCode += "        this->done_ = true;\n";
+        structCode += "        this->atFinalSuspend_ = true;\n";
         structCode += "        this->__final_awaiter.construct(promise().final_suspend());\n";
         structCode += "        if (!co_await_impl(this->__final_awaiter.get().ref_, Hdl::from_promise(pt))) {\n";
         structCode += "          return 0;\n";
         structCode += "        }\n";
         structCode += "        this->__final_awaiter.get().ref_.await_resume();\n";
         structCode += "        this->__final_awaiter.destroy();\n";
+        structCode += "        this->atFinalSuspend_ = false;\n";
         structCode += "        Hdl::from_promise(pt).destroy();\n";
         structCode += "        return 0;\n";
         structCode += "      }\n";
@@ -523,15 +541,8 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         structCode += "      switch (tryCatchBlockIndex) {\n";
         for (const auto &tryCatch : coro.tryCatchBlocks) {
             structCode += "        case " + std::to_string(tryCatch.index) + ":\n";
-            if (!tryCatch.variablesInTryBlock.empty()) {
-                structCode += "          destroySafely(";
-                bool first = true;
-                for (const auto &varName : tryCatch.variablesInTryBlock) {
-                    if (!first) structCode += ", ";
-                    structCode += varName;
-                    first = false;
-                }
-                structCode += ");\n";
+            for (const auto &varName : tryCatch.variablesInTryBlock) {
+                structCode += "          " + makeStateDestroyIfConstructed(varName) + "\n";
             }
             structCode += "          break;\n";
         }
@@ -643,12 +654,18 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                 }
             }
 
-            structCode += "        case 0:  // initial state\n";
+            structCode += "        case 0:  // initial state - initial awaiter is alive\n";
+            structCode += "          __initial_awaiter.destroy();\n";
             structCode += "          break;\n";
             structCode += "      }\n";
             structCode += "    }\n";
             REWRITE_LOG() << "    Added destroySuspendedCoro function\n";
         }
+
+        // Generate destroyFinalSuspend method (always needed)
+        structCode += "\n    void destroyFinalSuspend() {\n";
+        structCode += "      __final_awaiter.destroy();\n";
+        structCode += "    }\n";
 
         // Emit doStep() method with try wrapper (always needed for exception handling)
         structCode += "\n    void doStep() {\n    try {\n";
@@ -948,12 +965,17 @@ void CoroutineRewriter::performRewrites() {
                 if (!coro.lambdasInBody.empty()) {
                     SourceLocation preFuncLoc = findPreFunctionInsertionPoint(coro.function);
                     if (preFuncLoc.isValid()) {
+                        // Deduplicate lambda structs by class name (the body is traversed
+                        // twice which can produce duplicate entries in collectedLambdas)
+                        std::set<std::string> insertedLambdaClasses;
                         std::string allLambdaStructs;
                         for (const auto &lambda : coro.lambdasInBody) {
-                            allLambdaStructs += lambda.classDefinition + ";\n\n";
+                            if (insertedLambdaClasses.insert(lambda.className).second) {
+                                allLambdaStructs += lambda.classDefinition + ";\n\n";
+                            }
                         }
                         rewriter.InsertTextBefore(preFuncLoc, allLambdaStructs);
-                        REWRITE_LOG() << "Inserted " << coro.lambdasInBody.size()
+                        REWRITE_LOG() << "Inserted " << insertedLambdaClasses.size()
                                       << " lambda struct(s) before " << coro.function->getQualifiedNameAsString() << "\n";
                     }
                 }
@@ -1000,6 +1022,16 @@ void CoroutineRewriter::rewriteCoroutineBody(CoroutineInfo &coro) {
             const auto &coroutineStatements = initialRewriter.getCoroutineStatements();
             const_cast<CoroutineInfo &>(coro).coroutineStatements = coroutineStatements;
             REWRITE_LOG() << "  DEBUG: Found " << coroutineStatements.size() << " suspension points\n";
+
+            // Build lambda-variable mapping from initial pass (for renaming lambda vars to functor class names)
+            const auto &initialLambdas = initialRewriter.getCollectedLambdas();
+            for (const auto &lambda : initialLambdas) {
+                if (lambda.varDeclLocation.isValid()) {
+                    coro.lambdaVariableMapping[lambda.varDeclLocation] = lambda;
+                    REWRITE_LOG() << "  DEBUG: Lambda variable mapping: '" << lambda.originalVarName
+                                 << "' -> '" << lambda.className << "'\n";
+                }
+            }
 
             // Add ranged-for variables to the local variables set so they appear in the struct
             for (const auto &rangedFor: rangedForLoops) {
@@ -1284,8 +1316,12 @@ void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, Corouti
                 footerCode += "}\n";  // close doStep
                 footerCode += "};\n";  // close GeneratorStateMachine
 
-                // Allocation and construction
-                footerCode += "void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));\n";
+                // Allocation and construction (pass coroutine args per C++ spec)
+                footerCode += "void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine)";
+                if (!paramList.empty()) {
+                    footerCode += ", " + paramList;
+                }
+                footerCode += ");\n";
 
                 // Build the aggregate initializer: {{}, params...}
                 // {} calls CoroImpl constructor, remaining args init direct members

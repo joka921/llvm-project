@@ -51,10 +51,15 @@ void CoroutineBodyRewriter::buildDeclLocationMapping() {
             addedDeclLocations.insert(var.location);
 
             // Determine the member name (with suffix for shadowed variables)
+            // For lambda variables, use the functor class name instead of the original variable name
             std::string memberName = var.name;
-            int count = variableNameCounts[var.name]++;
+            auto lambdaIt = coroutineInfo.lambdaVariableMapping.find(var.location);
+            if (lambdaIt != coroutineInfo.lambdaVariableMapping.end()) {
+                memberName = lambdaIt->second.className;
+            }
+            int count = variableNameCounts[memberName]++;
             if (count > 0) {
-                memberName = var.name + "_shadow_" + std::to_string(count);
+                memberName = memberName + "_shadow_" + std::to_string(count);
             }
 
             // Store mapping in both places:
@@ -146,17 +151,25 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                     }
                     processedDeclarations.insert(declLoc);
 
+                    // Determine effective member name (lambda variables use functor class name)
+                    std::string effectiveName = varName;
+                    auto lambdaIt = coroutineInfo.lambdaVariableMapping.find(declLoc);
+                    if (lambdaIt != coroutineInfo.lambdaVariableMapping.end()) {
+                        effectiveName = lambdaIt->second.className;
+                        REWRITE_LOG() << "    DEBUG: Lambda variable '" << varName << "' -> member name '" << effectiveName << "'\n";
+                    }
+
                     // Add variable to current scope
                     if (!scopeStack.empty()) {
-                        scopeStack.back().variablesInScope.push_back(varName);
-                        REWRITE_LOG() << "    DEBUG: Added variable '" << varName << "' to current scope\n";
+                        scopeStack.back().variablesInScope.push_back(effectiveName);
+                        REWRITE_LOG() << "    DEBUG: Added variable '" << effectiveName << "' to current scope\n";
                     }
 
                     // If inside a try block, add this variable to that try block's list
                     if (!currentTryBlockStack.empty()) {
                         unsigned tryBlockIndex = currentTryBlockStack.back();
-                        tryCatchBlocks[tryBlockIndex].variablesInTryBlock.push_back(varName);
-                        REWRITE_LOG() << "    DEBUG: Added variable '" << varName << "' to try block " << tryBlockIndex << "\n";
+                        tryCatchBlocks[tryBlockIndex].variablesInTryBlock.push_back(effectiveName);
+                        REWRITE_LOG() << "    DEBUG: Added variable '" << effectiveName << "' to try block " << tryBlockIndex << "\n";
                     }
 
                     // Determine initialization form and generate appropriate prefix
@@ -174,17 +187,17 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
 
                     switch (form) {
                         case BRACED_INIT:
-                            prefix = makeBracedInitPrefix(varName, isOwning);
-                            REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_BRACED_INIT_OWNING" : "CO_BRACED_INIT") << " for variable '" << varName << "'\n";
+                            prefix = makeBracedInitPrefix(effectiveName, isOwning);
+                            REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_BRACED_INIT_OWNING" : "CO_BRACED_INIT") << " for variable '" << effectiveName << "'\n";
                             break;
                         case PAREN_INIT:
-                            prefix = makeParenInitPrefix(varName, isOwning);
-                            REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_PAREN_INIT_OWNING" : "CO_PAREN_INIT") << " for variable '" << varName << "'\n";
+                            prefix = makeParenInitPrefix(effectiveName, isOwning);
+                            REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_PAREN_INIT_OWNING" : "CO_PAREN_INIT") << " for variable '" << effectiveName << "'\n";
                             break;
                         case CONSTRUCT_CALL:
                         default:
-                            prefix = makeParenInitPrefix(varName, isOwning);
-                            REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_PAREN_INIT_OWNING" : "CO_PAREN_INIT") << " for construct call variable '" << varName << "'\n";
+                            prefix = makeParenInitPrefix(effectiveName, isOwning);
+                            REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_PAREN_INIT_OWNING" : "CO_PAREN_INIT") << " for construct call variable '" << effectiveName << "'\n";
                             break;
                     }
 
@@ -251,6 +264,14 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                             // Replace declaration part with appropriate prefix
                             declReplacements.emplace_back(declOnlyRange, prefix, true);
 
+                            // Detect lambda initializers to associate with variable name
+                            if (const Expr *rawInit = varDecl->getInit()) {
+                                if (isa<LambdaExpr>(unwrapExpr(rawInit))) {
+                                    pendingLambdaVarName_ = varName;
+                                    pendingLambdaVarDeclLoc_ = varDecl->getLocation();
+                                }
+                            }
+
                             // Regular construct() call - recursively visit the initialization expression
                             TraverseStmt(varDecl->getInit());
 
@@ -300,6 +321,12 @@ bool CoroutineBodyRewriter::VisitYieldOrAwaitExpr(YieldOrAwaitExpr *coyield, Cor
                              << "' is alive at suspension point " << coroStmt.index << "\n";
             }
         }
+
+        // Add the awaiter itself to alive variables (it's constructed at this suspension point)
+        // Insert at front so it's destroyed first (LIFO order — awaiter was constructed last)
+        coroStmt.aliveVariables.insert(coroStmt.aliveVariables.begin(), coroStmt.awaiterMemberName);
+        REWRITE_LOG() << "      DEBUG: Awaiter '" << coroStmt.awaiterMemberName
+                     << "' is alive at suspension point " << coroStmt.index << "\n";
 
         // Capture alive variables at this suspension point
         // Traverse scopeStack from innermost to outermost, collecting all variables
@@ -823,6 +850,15 @@ bool CoroutineBodyRewriter::TraverseLambdaExpr(LambdaExpr *lambdaExpr) {
         lambdaInfo.constructorCall = constructorCall;
         lambdaInfo.className = rewriteResult.className;
         lambdaInfo.lambdaSourceRange = lambdaRange;
+
+        // Consume pending lambda-variable association (set by VisitDeclStmt)
+        if (!pendingLambdaVarName_.empty()) {
+            lambdaInfo.originalVarName = pendingLambdaVarName_;
+            lambdaInfo.varDeclLocation = pendingLambdaVarDeclLoc_;
+            pendingLambdaVarName_.clear();
+            pendingLambdaVarDeclLoc_ = SourceLocation();
+        }
+
         collectedLambdas.push_back(lambdaInfo);
 
         // Return true WITHOUT calling base TraverseLambdaExpr - skip recursion into lambda body
@@ -1041,7 +1077,7 @@ void CoroutineBodyRewriter::insertLoopVariableDestructors(const Stmt *stmt, bool
 
             // Generate destroy calls in reverse order (LIFO) - variables are already in reverse order from rbegin()
             for (const auto &varName : varsToDestroy) {
-                destructorCalls += makeStateDestroyCall(varName) + ";\n    ";
+                destructorCalls += makeStateDestroyAndClearFlag(varName) + ";\n    ";
             }
 
             if (!destructorCalls.empty()) {
@@ -1458,7 +1494,7 @@ void CoroutineBodyRewriter::insertDestructorsForScope(const ScopeInfo &scope) {
             const std::string &varName = scopeVarsWithPriority[i].first;
             int varPriority = scopeVarsWithPriority[i].second;
 
-            std::string destructorCall = "    " + makeStateDestroyCall(varName) + ";\n";
+            std::string destructorCall = "    " + makeStateDestroyAndClearFlag(varName) + ";\n";
 
             // Use negative priority to ensure reverse order at same location
             int destructorPriority = -varPriority - static_cast<int>(i);
@@ -1596,7 +1632,7 @@ std::string CoroutineBodyRewriter::generateExplicitLoopForm(const RangedForLoop 
         }
 
         // Add destructor call for loop variable at end of each iteration
-        std::string loopVarDestroy = "    " + makeStateDestroyCall(rangedFor.loopVarName) + ";\n";
+        std::string loopVarDestroy = "    " + makeStateDestroyAndClearFlag(rangedFor.loopVarName) + ";\n";
         result += loopVarDestroy;
         REWRITE_LOG() << "        4.5. Added loop var destroy: '" << loopVarDestroy.substr(
             0, loopVarDestroy.length() - 1) << "'\n";

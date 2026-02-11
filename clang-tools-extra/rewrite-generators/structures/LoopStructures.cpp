@@ -120,7 +120,7 @@ void RangedForLoop::collectLoopVarDestroy(
         if (rBraceLoc.isValid()) {
             unsigned fileOffset = SM.getFileOffset(rBraceLoc);
 
-            std::string destroyCall = "    " + makeStateDestroyCall(loopVarName) + ";\n";
+            std::string destroyCall = "    " + makeStateDestroyAndClearFlag(loopVarName) + ";\n";
 
             // Use high priority to ensure it comes after regular variable destructors
             int destroyPriority = 30000 + static_cast<int>(index);
@@ -160,9 +160,9 @@ void RangedForLoop::collectFooterInsertions(
 
             // Create destroy calls for __end, __begin, __range (reverse order of construction)
             std::vector<std::string> destroyCalls = {
-                "    " + makeStateDestroyCall(endVarName) + ";\n",
-                "    " + makeStateDestroyCall(beginVarName) + ";\n",
-                "    " + makeStateDestroyCall(rangeVarName) + ";\n"
+                "    " + makeStateDestroyAndClearFlag(endVarName) + ";\n",
+                "    " + makeStateDestroyAndClearFlag(beginVarName) + ";\n",
+                "    " + makeStateDestroyAndClearFlag(rangeVarName) + ";\n"
             };
 
             // Add each destroy call with high priorities to ensure they come after loop variable destruction

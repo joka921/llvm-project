@@ -56,6 +56,10 @@ private:
     std::map<SourceLocation, std::string> declLocationToMemberName;
     std::vector<LambdaInCoroutine> collectedLambdas;
 
+    // Track lambda-variable association (set by VisitDeclStmt, consumed by TraverseLambdaExpr)
+    std::string pendingLambdaVarName_;
+    SourceLocation pendingLambdaVarDeclLoc_;
+
     enum InitializationForm {
         CONSTRUCT_CALL,
         BRACED_INIT,

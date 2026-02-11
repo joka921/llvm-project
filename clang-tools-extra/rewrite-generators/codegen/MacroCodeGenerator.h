@@ -27,6 +27,17 @@ inline std::string makeStateDestroyCall(const std::string &memberName) {
     return "this->" + memberName + ".destroy()";
 }
 
+// Destroy and clear the constructed flag (for normal flow, known to be constructed)
+inline std::string makeStateDestroyAndClearFlag(const std::string &memberName) {
+    return "this->" + memberName + ".destroy(); this->__constructed." + memberName + " = false";
+}
+
+// Destroy only if constructed, then clear flag (for exception paths)
+inline std::string makeStateDestroyIfConstructed(const std::string &memberName) {
+    return "if (this->__constructed." + memberName + ") { this->"
+         + memberName + ".destroy(); this->__constructed." + memberName + " = false; }";
+}
+
 // Helper function to generate CO_BRACED_INIT prefix
 inline std::string makeBracedInitPrefix(const std::string &varName, bool isOwning) {
     if (isOwning) {

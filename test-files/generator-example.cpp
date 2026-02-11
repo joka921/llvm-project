@@ -209,6 +209,14 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
         _coro_storage<int &, true> i;
         _coro_storage<int &, true> z;
 
+        // Constructed flags for local variables
+        struct {
+            bool x = false;
+            bool y = false;
+            bool i = false;
+            bool z = false;
+        } __constructed;
+
         // Awaiter storage members
         _coro_storage<decltype(std::declval<PromiseType &>().initial_suspend()) &, true> __initial_awaiter;
         _coro_storage<decltype(std::declval<PromiseType &>().final_suspend()) &, true> __final_awaiter;
@@ -228,13 +236,30 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
 
         size_t dispatchExceptionHandling(std::exception_ptr eptr) {
             if (currentTryBlock_ == kNoTryBlock) {
-                destroySafely(z, i, y, x);
+                if (this->__constructed.z) {
+                    this->z.destroy();
+                    this->__constructed.z = false;
+                }
+                if (this->__constructed.i) {
+                    this->i.destroy();
+                    this->__constructed.i = false;
+                }
+                if (this->__constructed.y) {
+                    this->y.destroy();
+                    this->__constructed.y = false;
+                }
+                if (this->__constructed.x) {
+                    this->x.destroy();
+                    this->__constructed.x = false;
+                }
                 promise().unhandled_exception();
                 this->done_ = true;
+                this->atFinalSuspend_ = true;
                 this->__final_awaiter.construct(promise().final_suspend());
-                CO_AWAIT_IMPL(__final_awaiter);
-                CO_GET(__final_awaiter).await_resume();
-                __final_awaiter.destroy();
+                CO_AWAIT_IMPL_IMPL(__final_awaiter, Handle<PromiseType>::from_promise(pt), 0);
+                this->__final_awaiter.get().ref_.await_resume();
+                this->__final_awaiter.destroy();
+                this->atFinalSuspend_ = false;
                 Hdl::from_promise(pt).destroy();
                 return 0;
             }
@@ -270,7 +295,18 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
         void destroyBecauseOfException(size_t tryCatchBlockIndex) {
             switch (tryCatchBlockIndex) {
                 case 0:
-                    destroySafely(y, i, z);
+                    if (this->__constructed.y) {
+                        this->y.destroy();
+                        this->__constructed.y = false;
+                    }
+                    if (this->__constructed.i) {
+                        this->i.destroy();
+                        this->__constructed.i = false;
+                    }
+                    if (this->__constructed.z) {
+                        this->z.destroy();
+                        this->__constructed.z = false;
+                    }
                     break;
                 default: break;
             }
@@ -282,21 +318,31 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
                 case 6:
                 cleanup_5:
                 case 5:
+                    break;
                 cleanup_4:
                 case 4:
+                    __awaiter_4.destroy();
                     break;
                 cleanup_3:
                 case 3:
+                    __awaiter_3.destroy();
                     z.destroy();
                     i.destroy();
+                    break;
                 cleanup_2:
                 case 2:
+                    __awaiter_2.destroy();
                     y.destroy();
                     x.destroy();
                     break;
-                case 0: // initial state
+                case 0: // initial state - initial awaiter is alive
+                    __initial_awaiter.destroy();
                     break;
             }
+        }
+
+        void destroyFinalSuspend() {
+            __final_awaiter.destroy();
         }
 
         void doStep() {
@@ -316,34 +362,32 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
                 TRY_BEGIN(0); {
                     CO_PAREN_INIT_OWNING(y, CO_GET(x) + 1);
                     CO_YIELD(2, __awaiter_2, CO_GET(y));
-                        CO_PAREN_INIT_OWNING(i, 15);
-                        while (CO_GET(i)) {
-                            CO_PAREN_INIT_OWNING(z, CO_GET(y) + 1);
-                            CO_YIELD(3, __awaiter_3, CO_GET(z));
-                                --CO_GET(i);
-                                this->z.destroy();
-                            }
-                            this->i.destroy();
-                            this->y.destroy();
-                        }
-                        TRY_END(CO_NO_TRY_BLOCK, 1);
-                        CO_YIELD(4, __awaiter_4, CO_GET(x));
-                            CO_RETURN_VOID(5, __final_awaiter);
-                            }
-                            catch
-                            (...) {
-                                this->handleException(std::current_exception(), this->curState);
-                            }
-                        }
-                    };
-                    void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
-                    auto *frame = new(__coro_mem) GeneratorStateMachine{{}};
-                    auto ret = frame->pt.get_return_object();
-                    frame->__initial_awaiter.construct(frame->pt.initial_suspend());
-                    if (co_await_impl(frame->__initial_awaiter.get().ref_,
-                                      Handle<PromiseType>::from_promise(frame->pt))) {
-                        frame->doStep();
+                    CO_PAREN_INIT_OWNING(i, 15);
+                    while (CO_GET(i)) {
+                        CO_PAREN_INIT_OWNING(z, CO_GET(y) + 1);
+                        CO_YIELD(3, __awaiter_3, CO_GET(z));
+                        --CO_GET(i);
+                        this->z.destroy();
+                        this->__constructed.z = false;
                     }
+                    this->i.destroy();
+                    this->__constructed.i = false;
+                    this->y.destroy();
+                    this->__constructed.y = false;
+                }
+                TRY_END(CO_NO_TRY_BLOCK, 1);
+                CO_YIELD(4, __awaiter_4, CO_GET(x));
+                CO_RETURN_VOID(5, __final_awaiter);
+            } catch (...) { this->handleException(std::current_exception(), this->curState); }
+        }
+    };
+                void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine));
+                auto *frame = new(__coro_mem) GeneratorStateMachine{{}};
+                auto ret = frame->pt.get_return_object();
+                frame->__initial_awaiter.construct(frame->pt.initial_suspend());
+                CO_AWAIT_IMPL_IMPL(__initial_awaiter, Handle<PromiseType>::from_promise(frame->pt), ret)
+
+                    frame->doStep();
                     return ret;
                 }
 

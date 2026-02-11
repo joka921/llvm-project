@@ -338,6 +338,20 @@ namespace coro_detail {
             : std::true_type {
     };
 
+    // Type trait that checks whether a given promise type has an overloaded `operator new`
+    // that accepts the coroutine arguments in addition to the size.
+    // Per the C++ spec, `promise_type::operator new(size, args...)` is tried first.
+    template<typename P, typename ArgsTuple, typename = void>
+    struct has_promise_new_with_args_impl : std::false_type {};
+
+    template<typename P, typename... Args>
+    struct has_promise_new_with_args_impl<P, std::tuple<Args...>,
+                std::void_t<decltype(P::operator new(size_t{}, std::declval<Args>()...))>>
+            : std::true_type {};
+
+    template<typename P, typename... Args>
+    using has_promise_new_with_args = has_promise_new_with_args_impl<P, std::tuple<Args...>>;
+
     template<typename P, typename = void>
     struct has_promise_delete : std::false_type {
     };
@@ -349,10 +363,25 @@ namespace coro_detail {
             : std::true_type {
     };
 
-    // TODO: Is this function actually needed, or will overload resolution help us (if we ignore the leading allocator stuff).
+    // Type trait for unsized promise delete: `P::operator delete(void*)`.
+    template<typename P, typename = void>
+    struct has_promise_delete_unsized : std::false_type {};
+
     template<typename P>
-    void *promise_allocate(size_t size) {
-        if constexpr (has_promise_new<P>::value) {
+    struct has_promise_delete_unsized<P,
+                std::void_t<decltype(P::operator delete(std::declval<void *>()))>>
+            : std::true_type {};
+
+    // Allocate the coroutine frame using the promise type's operator new if available.
+    // Per the C++ spec, the fallback chain is:
+    //   1. P::operator new(size, args...) — with coroutine arguments
+    //   2. P::operator new(size)          — without coroutine arguments
+    //   3. ::operator new(size)           — global
+    template<typename P, typename... Args>
+    void *promise_allocate(size_t size, Args&&... args) {
+        if constexpr (sizeof...(Args) > 0 && has_promise_new_with_args<P, Args...>::value) {
+            return P::operator new(size, std::forward<Args>(args)...);
+        } else if constexpr (has_promise_new<P>::value) {
             return P::operator new(size);
         } else {
             return ::operator new(size);
@@ -411,7 +440,6 @@ struct _coro_storage {
     static constexpr bool isOwning = isOwningStorage;
     using Storage = std::conditional_t<isOwning, std::decay_t<Ref>, std::add_pointer_t<std::decay_t<Ref> > >;
     alignas(Storage) char buffer[sizeof(Storage)];
-    bool constructed = false;
 
     struct Val {
         Ref ref_;
@@ -424,14 +452,10 @@ struct _coro_storage {
         } else {
             new(buffer) Storage(std::forward<Args>(args)...);
         }
-        constructed = true;
     }
 
     void destroy() {
-        if (constructed) {
-            reinterpret_cast<Storage *>(buffer)->~Storage();
-            constructed = false;
-        }
+        reinterpret_cast<Storage *>(buffer)->~Storage();
     }
 
     Val get() {
@@ -444,27 +468,27 @@ struct _coro_storage {
     }
 
     ~_coro_storage() {
-        destroy();
     }
 };
 
-#define CO_AWAIT_IMPL(awaiterMem) \
-  { \
-    auto& awaiter = CO_GET(awaiterMem); \
-    auto handle = Hdl::from_promise(pt); \
-    if (!awaiter.await_ready()) { \
-        using type = decltype(awaiter.await_suspend(handle)); \
-        if constexpr (std::is_void_v<type>) { \
-            awaiter.await_suspend(handle); \
-            return; \
-        } else if constexpr (std::is_same_v<type, bool>) { \
-            if (!awaiter.await_suspend(handle)) { return; } \
-        } else { \
-            awaiter.await_suspend(handle).resume(); \
-            return; \
-        } \
-    } \
-  }
+#define CO_AWAIT_IMPL_IMPL(awaiterMem, handle, ...) \
+{ \
+auto& awaiter = CO_GET(awaiterMem); \
+if (!awaiter.await_ready()) { \
+using type = decltype(awaiter.await_suspend(handle)); \
+if constexpr (std::is_void_v<type>) { \
+awaiter.await_suspend(handle); \
+return __VA_ARGS__; \
+} else if constexpr (std::is_same_v<type, bool>) { \
+  if (! awaiter.await_suspend(handle)) { return __VA_ARGS__; } \
+} else { \
+/* TODO encourage tail call optimization for empty `__VA_ARGS__`*/ \
+awaiter.await_suspend(handle).resume(); \
+return __VA_ARGS__; \
+} \
+} \
+} void()
+#define CO_AWAIT_IMPL(awaiterMem) CO_AWAIT_IMPL_IMPL(awaiterMem, Hdl::from_promise(pt))
 
 #define CO_RESUME(index, awaiterMem) \
   label_##index:                                                       \
@@ -487,10 +511,12 @@ this->curState = index;                                                      \
 #define CO_RETURN_IMPL(index, finalAwaiterMem)                                  \
   this->destroySuspendedCoro(index);                                  \
   this->done_ = true;                                                          \
+  this->atFinalSuspend_ = true;                                                \
   this->finalAwaiterMem.construct(promise().final_suspend());                  \
   CO_AWAIT_IMPL(finalAwaiterMem);                                              \
   CO_GET(finalAwaiterMem).await_resume();                                      \
   this->finalAwaiterMem.destroy();                                             \
+  this->atFinalSuspend_ = false;                                               \
   Hdl::from_promise(pt).destroy();                                             \
   return;                                                                      \
   void()
@@ -524,6 +550,7 @@ struct CoroImpl {
 
     size_t curState = 0;
     bool done_ = false;
+    bool atFinalSuspend_ = false;
     using Hdl = Handle<PromiseType>;
 
     PromiseType &promise() { return pt; }
@@ -538,10 +565,18 @@ struct CoroImpl {
 
     static void destroy(void *blubb) {
         auto *self = cast(blubb);
+        if (!self->done_) {
+            self->destroySuspendedCoro(self->curState);
+        } else if (self->atFinalSuspend_) {
+            self->destroyFinalSuspend();
+        }
         if constexpr (coro_detail::has_promise_delete<PromiseType>::value) {
             self->~Derived();
             PromiseType::operator delete(
                 static_cast<void *>(self), sizeof(Derived));
+        } else if constexpr (coro_detail::has_promise_delete_unsized<PromiseType>::value) {
+            self->~Derived();
+            PromiseType::operator delete(static_cast<void *>(self));
         } else {
             delete self;
         }
@@ -567,7 +602,7 @@ struct CoroImpl {
     template<typename... CoroArgs>
     static auto ramp(CoroArgs &&... coroArgs) {
         // TODO<joka921> alignment.
-        void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(Derived));
+        void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(Derived), std::forward<CoroArgs>(coroArgs)...);
         auto *frame = new(__coro_mem) Derived{std::forward<CoroArgs>(coroArgs)...};
         auto ret = frame->pt.get_return_object();
         frame->__initial_awaiter.construct(frame->pt.initial_suspend());
@@ -587,21 +622,21 @@ struct CoroImpl {
 // TODO<joka921> Update the other OWNING also to the new lambda syntax.
 #define CO_INIT_REF(mem, ...)  \
     new(this->mem.buffer) typename decltype(this->mem)::Storage{ &__VA_ARGS__} ;\
-    this->mem.constructed=true
+    this->__constructed.mem=true
 
 #define CO_BRACED_INIT(mem, ...) CO_INIT_REF(mem, __VA_ARGS__)
 #define CO_PAREN_INIT(mem, ...) CO_INIT_REF(mem, __VA_ARGS__)
 #define CO_PAREN_INIT_OWNING(mem, ...) \
   [&]() -> decltype(auto) { \
     new(this->mem.buffer) typename decltype(this->mem)::Storage( __VA_ARGS__); \
-    this->mem.constructed=true; \
+    this->__constructed.mem=true; \
     return std::move(CO_GET(mem)); \
   }()
 
 #define CO_BRACED_INIT_OWNING(mem, ...) \
 [&]() -> decltype(auto) { \
 new(this->mem.buffer) typename decltype(this->mem)::Storage{ __VA_ARGS__}; \
-this->mem.constructed=true; \
+this->__constructed.mem=true; \
 return std::move(CO_GET(mem)); \
 }()
 
@@ -614,6 +649,12 @@ struct coro_for_loop_storage {
     using End = decltype(std::declval<Ref>().end());
     _coro_storage<Begin &, true> begin_;
     _coro_storage<End &, true> end_;
+
+    struct {
+        bool range_ = false;
+        bool begin_ = false;
+        bool end_ = false;
+    } __constructed;
 };
 
 

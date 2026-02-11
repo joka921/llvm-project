@@ -39,6 +39,8 @@ struct LambdaInCoroutine {
     std::string constructorCall;          // Constructor call with CO_GET captures
     std::string className;                // e.g. __lambda_L3_C16
     SourceRange lambdaSourceRange;        // Source range of the lambda expression
+    std::string originalVarName;          // Name of the variable this lambda initializes (empty if none)
+    SourceLocation varDeclLocation;       // Location of that variable's declaration
 };
 
 struct CoroutineStatement {
@@ -116,6 +118,9 @@ struct CoroutineInfo {
 
     // Regular lambdas found inside the coroutine body
     std::vector<LambdaInCoroutine> lambdasInBody;
+
+    // Mapping from variable declaration location to lambda info (for lambda variable renaming)
+    std::map<SourceLocation, LambdaInCoroutine> lambdaVariableMapping;
 
     // Variables alive at the outermost function body scope end (for falloff case in destroySuspendedCoro)
     std::vector<std::string> outermostScopeVariables;

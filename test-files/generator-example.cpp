@@ -216,6 +216,8 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> lambda () {
     struct {
         bool z = false;
         bool __lambda_L201_C19 = false;
+        bool temp_1_0 = false;
+        bool temp_2_0 = false;
     } __constructed;
 
     // Subexpression temporaries
@@ -240,7 +242,7 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> lambda () {
 
     size_t dispatchExceptionHandling(std::exception_ptr eptr) {
       if (currentTryBlock_ == kNoTryBlock) {
-        if (this->__constructed.lambda) { this->lambda.destroy(); this->__constructed.lambda = false; }
+        if (this->__constructed.__lambda_L201_C19) { this->__lambda_L201_C19.destroy(); this->__constructed.__lambda_L201_C19 = false; }
         if (this->__constructed.z) { this->z.destroy(); this->__constructed.z = false; }
         promise().unhandled_exception();
         this->done_ = true;
@@ -281,7 +283,7 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> lambda () {
         case 1:
           __awaiter_1.destroy();
           temp_1_0.destroy();
-          lambda.destroy();
+          __lambda_L201_C19.destroy();
           z.destroy();
           break;
         case 0:  // initial state - initial awaiter is alive
@@ -309,8 +311,8 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> lambda () {
             CO_PAREN_INIT_OWNING(__lambda_L201_C19, __Lambda_L201_C19{4, CO_GET(z)});
 
             CO_YIELD(1, __awaiter_1, CO_PAREN_INIT_OWNING(temp_1_0, CO_GET(__lambda_L201_C19)(3)));
+            this->temp_1_0.destroy();
             CO_YIELD(2, __awaiter_2,
-                     this->temp_1_0.destroy();
                      CO_PAREN_INIT_OWNING(temp_2_0, CO_GET(__lambda_L201_C19)(5)));
 
             this->temp_2_0.destroy();

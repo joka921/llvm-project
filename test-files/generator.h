@@ -535,6 +535,8 @@ this->curState = index;                                                      \
     CO_RETURN_IMPL(index, finalAwaiterMem);                                     \
     void()
 
+#define CO_RETURN_FALLOFF(index, finalAwaiterMem) CO_RETURN_VOID(index, finalAwaiterMem)
+
 #define CO_RETURN_VALUE(index, finalAwaiterMem, value)                           \
     promise().return_value(value);                                               \
     CO_RETURN_IMPL(index, finalAwaiterMem);                                       \

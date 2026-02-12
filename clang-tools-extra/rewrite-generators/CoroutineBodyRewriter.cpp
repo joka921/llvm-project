@@ -210,21 +210,26 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                         }
                     }
 
+                    std::string suffix;
                     switch (form) {
                         case BRACED_INIT:
                             prefix = makeBracedInitPrefix(effectiveName, isOwning);
+                            suffix = "})";
                             REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_BRACED_INIT_OWNING" : "CO_BRACED_INIT") << " for variable '" << effectiveName << "'\n";
                             break;
                         case PAREN_INIT:
                             prefix = makeParenInitPrefix(effectiveName, isOwning);
                             REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_PAREN_INIT_OWNING" : "CO_PAREN_INIT") << " for variable '" << effectiveName << "'\n";
+                            suffix = "))";
                             break;
                         case CONSTRUCT_CALL:
                         default:
                             prefix = makeParenInitPrefix(effectiveName, isOwning);
                             REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_PAREN_INIT_OWNING" : "CO_PAREN_INIT") << " for construct call variable '" << effectiveName << "'\n";
+                            suffix = "))";
                             break;
                     }
+
 
                     if (varDecl->hasInit()) {
                         // Get the range for just the declaration part (type + name)
@@ -248,11 +253,11 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                                 SourceLocation afterLastChild = getLocForEndOfToken(childrenRange->getEnd());
                                 assert(afterLastChild.isValid() && "Invalid location for last child end");
                                 SourceRange suffixRange(afterLastChild, initEnd);
-                                declReplacements.emplace_back(suffixRange, ")", true);
+                                declReplacements.emplace_back(suffixRange, suffix, true);
                             } else {
                                 // Empty braced initialization - replace entire range
                                 SourceRange fullRange(declStart, varDecl->getInit()->getSourceRange().getEnd());
-                                declReplacements.emplace_back(fullRange, prefix + ")", true);
+                                declReplacements.emplace_back(fullRange, prefix + suffix, true);
                             }
                         } else if (form == PAREN_INIT) {
                             // For parenthesized initialization, handle ranges properly
@@ -273,17 +278,17 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                                 SourceLocation closingParen = findClosingParen(afterLastChild);
                                 if (closingParen.isValid()) {
                                     SourceRange suffixRange(afterLastChild, closingParen);
-                                    declReplacements.emplace_back(suffixRange, ")", true);
+                                    declReplacements.emplace_back(suffixRange, suffix, true);
                                 } else {
                                     REWRITE_LOG() << "    WARNING: Could not find closing parenthesis, using init end\n";
                                     SourceLocation initEnd = varDecl->getInit()->getSourceRange().getEnd();
                                     SourceRange suffixRange(afterLastChild, initEnd);
-                                    declReplacements.emplace_back(suffixRange, ")", true);
+                                    declReplacements.emplace_back(suffixRange, suffix, true);
                                 }
                             } else {
                                 // Empty parenthesized initialization - replace entire range
                                 SourceRange fullRange(declStart, varDecl->getInit()->getSourceRange().getEnd());
-                                declReplacements.emplace_back(fullRange, prefix + ")", true);
+                                declReplacements.emplace_back(fullRange, prefix + "))", true);
                             }
                         } else {
                             // Replace declaration part with appropriate prefix
@@ -297,11 +302,12 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                             SourceLocation afterInit = getLocForEndOfToken(initEnd);
                              assert(afterInit.isValid() && "Invalid location for last child end");
                             SourceRange closingRange(afterInit, afterInit);
-                            declReplacements.emplace_back(closingRange, ")", false);
+                            declReplacements.emplace_back(closingRange, suffix, false);
                         }
                     } else {
                         // No initialization - replace entire declaration with empty call
-                        std::string emptyCall = prefix + ")";
+                        // TODO This is not correct, we currently zero out ints unnecessarily here.
+                        std::string emptyCall = prefix + suffix;
                         SourceRange declRange = varDecl->getSourceRange();
                         declReplacements.emplace_back(declRange, emptyCall, true);
                     }

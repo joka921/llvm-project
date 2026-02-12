@@ -515,16 +515,20 @@ this->curState = index;                                                      \
     CO_AWAIT_IMPL(awaiterMem);                                                \
     CO_RESUME(index, awaiterMem);
 
+#define CO_RETURN_IMPL_IMPL(finalAwaiterMem, ...)                                  \
+this->done_ = true;                                                          \
+this->atFinalSuspend_ = true;                                                \
+this->finalAwaiterMem.construct(promise().final_suspend());                  \
+CO_AWAIT_IMPL_IMPL(this->finalAwaiterMem.get().ref_, Hdl::from_promise(pt), __VA_ARGS__);                                              \
+CO_GET(finalAwaiterMem).await_resume();                                      \
+this->finalAwaiterMem.destroy();                                             \
+this->atFinalSuspend_ = false;                                               \
+Hdl::from_promise(pt).destroy();                                             \
+void()
+
 #define CO_RETURN_IMPL(index, finalAwaiterMem)                                  \
-  this->destroySuspendedCoro(index);                                  \
-  this->done_ = true;                                                          \
-  this->atFinalSuspend_ = true;                                                \
-  this->finalAwaiterMem.construct(promise().final_suspend());                  \
-  CO_AWAIT_IMPL(finalAwaiterMem);                                              \
-  CO_GET(finalAwaiterMem).await_resume();                                      \
-  this->finalAwaiterMem.destroy();                                             \
-  this->atFinalSuspend_ = false;                                               \
-  Hdl::from_promise(pt).destroy();                                             \
+  this->destroySuspendedCoro(index);                                           \
+  CO_RETURN_IMPL_IMPL(finalAwaiterMem);                                 \
   return;                                                                      \
   void()
 
@@ -534,6 +538,9 @@ this->curState = index;                                                      \
     }                                                                             \
     CO_RETURN_IMPL(index, finalAwaiterMem);                                     \
     void()
+
+#define DESTROY_UNCONDITIONALLY(mem) this->mem.destroy(); this->__constructed.mem=false; void()
+#define DESTROY_IF_CONSTRUCTED(mem) if (this->__constructed.mem) {DESTROY_UNCONDITIONALLY(mem);} void()
 
 #define CO_RETURN_FALLOFF(index, finalAwaiterMem) CO_RETURN_VOID(index, finalAwaiterMem)
 
@@ -545,7 +552,74 @@ this->curState = index;                                                      \
 #define TRY_BEGIN(try_index) this->currentTryBlock_ = (try_index); void()
 #define TRY_END(parent_index, label) this->currentTryBlock_ = (parent_index); label_##label: void()
 
-inline constexpr size_t CO_NO_TRY_BLOCK = static_cast<size_t>(-1);
+
+#define FOR_LOOP_HEADER(N)
+
+
+#define CO_GET(arg) this->arg.get().ref_
+#define CO_GET_STATE(arg) arg.get().ref_
+
+// TODO<joka921> Update the other OWNING also to the new lambda syntax.
+#define CO_INIT_REF(mem, ...)  \
+    new(this->mem.buffer) typename decltype(this->mem)::Storage{ &__VA_ARGS__} ;\
+    this->__constructed.mem=true
+
+#define CO_BRACED_INIT(mem, ...) CO_INIT_REF(mem, __VA_ARGS__)
+#define CO_PAREN_INIT(mem, ...) CO_INIT_REF(mem, __VA_ARGS__)
+
+namespace coro_detail {
+    template <typename M, typename T>
+    auto* dependent_addressof(T& t) { return &t;}
+}
+
+#define CO_INIT(mem, ...) \
+[&](auto& member) -> decltype(auto) { \
+using M = std::decay_t<decltype(member)>; \
+if constexpr (M::isOwning) { \
+  new(member.buffer) typename M::Storage __VA_ARGS__; \
+} else { \
+    new(member.buffer) typename M::Storage{ coro_detail::dependent_addressof<M>(__VA_ARGS__)} ;\
+ } \
+this->__constructed.mem=true; \
+return std::move(CO_GET(mem)); \
+}(this->mem)
+
+#if false
+#define CO_PAREN_INIT_OWNING(mem, ...) \
+  [&]() -> decltype(auto) { \
+    new(this->mem.buffer) typename decltype(this->mem)::Storage( __VA_ARGS__); \
+    this->__constructed.mem=true; \
+    return std::move(CO_GET(mem)); \
+  }()
+
+#define CO_BRACED_INIT_OWNING(mem, ...) \
+[&]() -> decltype(auto) { \
+new(this->mem.buffer) typename decltype(this->mem)::Storage{ __VA_ARGS__}; \
+this->__constructed.mem=true; \
+return std::move(CO_GET(mem)); \
+}()
+
+#endif
+
+#define CO_PAREN_INIT_OWNING(mem, ...) CO_INIT(mem, (__VA_ARGS__))
+#define CO_BRACED_INIT_OWNING(mem, ...) CO_INIT(mem, {__VA_ARGS__})
+
+template<typename Ref, bool isOwning>
+struct coro_for_loop_storage {
+    _coro_storage<Ref, isOwning> range_;
+    // TODO<joka921> This doesn't work for nonmember begin and end, but that should work for most cases now.
+    using Begin = decltype(std::declval<Ref>().begin());
+    using End = decltype(std::declval<Ref>().end());
+    _coro_storage<Begin &, true> begin_;
+    _coro_storage<End &, true> end_;
+
+    struct {
+        bool range_ = false;
+        bool begin_ = false;
+        bool end_ = false;
+    } __constructed;
+};
+
 template<typename Derived, typename PromiseType>
 struct CoroImpl {
     HandleFrame frm;
@@ -556,8 +630,10 @@ struct CoroImpl {
                       offsetof(CoroImpl, frm) ==
                       Handle<PromiseType>::promise_offset);
     }
+    static constexpr size_t CO_NO_TRY_BLOCK = static_cast<size_t>(-1);
 
     size_t curState = 0;
+    size_t currentTryBlock_ = CO_NO_TRY_BLOCK;
     bool done_ = false;
     bool atFinalSuspend_ = false;
     using Hdl = Handle<PromiseType>;
@@ -577,7 +653,7 @@ struct CoroImpl {
         if (!self->done_) {
             self->destroySuspendedCoro(self->curState);
         } else if (self->atFinalSuspend_) {
-            self->destroyFinalSuspend();
+            self->__final_awaiter.destroy();
         }
         if constexpr (coro_detail::has_promise_delete<PromiseType>::value) {
             self->~Derived();
@@ -608,62 +684,32 @@ struct CoroImpl {
         (..., mems.destroy());
     }
 
+    Derived& derived() {return *static_cast<Derived*>(this);}
+
+    void handleException(std::exception_ptr eptr, size_t &nextState) {
+        nextState = derived().dispatchExceptionHandling(std::move(eptr));
+        if (!done_) {
+            derived().doStep();
+        }
+    }
+
+    void doStep() {
+        try {
+            derived().doStepImpl();
+        } catch (...) { handleException(std::current_exception(), curState); }
+    }
+
     template<typename... CoroArgs>
-    static auto ramp(CoroArgs &&... coroArgs) {
+    static auto ramp(CoroArgs&&... coroArgs) {
         // TODO<joka921> alignment.
         void *__coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(Derived), std::forward<CoroArgs>(coroArgs)...);
         auto *frame = new(__coro_mem) Derived{std::forward<CoroArgs>(coroArgs)...};
         auto ret = frame->pt.get_return_object();
         frame->__initial_awaiter.construct(frame->pt.initial_suspend());
-        if (co_await_impl(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt))) {
-            frame->doStep();
-        }
+        CO_AWAIT_IMPL_IMPL(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt), ret);
+        frame->doStep();
         return ret;
     }
-};
-
-#define FOR_LOOP_HEADER(N)
-
-
-#define CO_GET(arg) this->arg.get().ref_
-#define CO_GET_STATE(arg) arg.get().ref_
-
-// TODO<joka921> Update the other OWNING also to the new lambda syntax.
-#define CO_INIT_REF(mem, ...)  \
-    new(this->mem.buffer) typename decltype(this->mem)::Storage{ &__VA_ARGS__} ;\
-    this->__constructed.mem=true
-
-#define CO_BRACED_INIT(mem, ...) CO_INIT_REF(mem, __VA_ARGS__)
-#define CO_PAREN_INIT(mem, ...) CO_INIT_REF(mem, __VA_ARGS__)
-#define CO_PAREN_INIT_OWNING(mem, ...) \
-  [&]() -> decltype(auto) { \
-    new(this->mem.buffer) typename decltype(this->mem)::Storage( __VA_ARGS__); \
-    this->__constructed.mem=true; \
-    return std::move(CO_GET(mem)); \
-  }()
-
-#define CO_BRACED_INIT_OWNING(mem, ...) \
-[&]() -> decltype(auto) { \
-new(this->mem.buffer) typename decltype(this->mem)::Storage{ __VA_ARGS__}; \
-this->__constructed.mem=true; \
-return std::move(CO_GET(mem)); \
-}()
-
-
-template<typename Ref, bool isOwning>
-struct coro_for_loop_storage {
-    _coro_storage<Ref, isOwning> range_;
-    // TODO<joka921> This doesn't work for nonmember begin and end, but that should work for most cases now.
-    using Begin = decltype(std::declval<Ref>().begin());
-    using End = decltype(std::declval<Ref>().end());
-    _coro_storage<Begin &, true> begin_;
-    _coro_storage<End &, true> end_;
-
-    struct {
-        bool range_ = false;
-        bool begin_ = false;
-        bool end_ = false;
-    } __constructed;
 };
 
 

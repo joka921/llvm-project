@@ -29,19 +29,18 @@ inline std::string makeStateDestroyCall(const std::string &memberName) {
 
 // Destroy and clear the constructed flag (for normal flow, known to be constructed)
 inline std::string makeStateDestroyAndClearFlag(const std::string &memberName) {
-    return "this->" + memberName + ".destroy(); this->__constructed." + memberName + " = false";
+    return "DESTROY_UNCONDITIONALLY("+ memberName + ")";
 }
 
 // Destroy only if constructed, then clear flag (for exception paths)
 inline std::string makeStateDestroyIfConstructed(const std::string &memberName) {
-    return "if (this->__constructed." + memberName + ") { this->"
-         + memberName + ".destroy(); this->__constructed." + memberName + " = false; }";
+    return "DESTROY_IF_CONSTRUCTED("+ memberName + ");";
 }
 
 // Helper function to generate CO_BRACED_INIT prefix
 inline std::string makeBracedInitPrefix(const std::string &varName, bool isOwning) {
     if (isOwning) {
-        return "CO_BRACED_INIT_OWNING(" + varName + ", ";
+        return "CO_INIT(" + varName + ", { ";
     } else {
         return "CO_BRACED_INIT(" + varName + ", ";
     }
@@ -50,7 +49,7 @@ inline std::string makeBracedInitPrefix(const std::string &varName, bool isOwnin
 // Helper function to generate CO_PAREN_INIT prefix
 inline std::string makeParenInitPrefix(const std::string &varName, bool isOwning) {
     if (isOwning) {
-        return "CO_PAREN_INIT_OWNING(" + varName + ", ";
+        return "CO_INIT(" + varName + ",(";
     } else {
         return "CO_PAREN_INIT(" + varName + ", ";
     }

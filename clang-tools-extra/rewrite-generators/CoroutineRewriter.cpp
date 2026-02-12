@@ -299,8 +299,6 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         structCode += "\n";
         */
 
-        // Exception handling constants (function scope, accessible from local struct as constant expressions)
-        structCode += "  constexpr size_t kNoTryBlock = static_cast<size_t>(-1);\n";
         if (!coro.tryCatchBlocks.empty()) {
             // Document the parent structure as a comment (can't use constexpr array
             // from local class methods per C++ rules)
@@ -471,33 +469,15 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         }
 
         // Add exception handling infrastructure (always generated)
-        structCode += "\n    // Exception handling infrastructure\n";
-        structCode += "    size_t currentTryBlock_ = kNoTryBlock;\n";
-
-        // Add handleException function — delegates to dispatchExceptionHandling
-        structCode += "\n    void handleException(std::exception_ptr eptr, size_t& nextState) {\n";
-        structCode += "      nextState = dispatchExceptionHandling(std::move(eptr));\n";
-        structCode += "      if (!this->done_) {\n";
-        structCode += "        doStep();\n";
-        structCode += "      }\n";
-        structCode += "    }\n";
-
         // Add dispatchExceptionHandling function — handles kNoTryBlock terminal path
         structCode += "\n    size_t dispatchExceptionHandling(std::exception_ptr eptr) {\n";
-        structCode += "      if (currentTryBlock_ == kNoTryBlock) {\n";
+        structCode += "      if (currentTryBlock_ == CO_NO_TRY_BLOCK) {\n";
         // Destroy all local variables (exception could occur at any point, check flags)
         for (auto it = coro.localVariables.rbegin(); it != coro.localVariables.rend(); ++it) {
             structCode += "        " + makeStateDestroyIfConstructed(it->name) + "\n";
         }
         structCode += "        promise().unhandled_exception();\n";
-        structCode += "        this->done_ = true;\n";
-        structCode += "        this->atFinalSuspend_ = true;\n";
-        structCode += "        this->__final_awaiter.construct(promise().final_suspend());\n";
-        structCode += "        CO_AWAIT_IMPL_IMPL(this->__final_awaiter.get().ref_, Hdl::from_promise(pt), 0) ;\n";
-        structCode += "        this->__final_awaiter.get().ref_.await_resume();\n";
-        structCode += "        this->__final_awaiter.destroy();\n";
-        structCode += "        this->atFinalSuspend_ = false;\n";
-        structCode += "        Hdl::from_promise(pt).destroy();\n";
+        structCode += "        CO_RETURN_IMPL_IMPL(__final_awaiter, 0);\n";
         structCode += "        return 0;\n";
         structCode += "      }\n";
         structCode += "      destroyBecauseOfException(currentTryBlock_);\n";
@@ -670,13 +650,8 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             REWRITE_LOG() << "    Added destroySuspendedCoro function\n";
         }
 
-        // Generate destroyFinalSuspend method (always needed)
-        structCode += "\n    void destroyFinalSuspend() {\n";
-        structCode += "      __final_awaiter.destroy();\n";
-        structCode += "    }\n";
-
         // Emit doStep() method with try wrapper (always needed for exception handling)
-        structCode += "\n    void doStep() {\n    try {\n";
+        structCode += "\n    void doStepImpl() {\n    \n";
 
         // Generate goto-based dispatch switch
         // Collect all resume point indices (suspension points + TRY_END resume points)
@@ -1317,20 +1292,19 @@ void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, Corouti
                 // Generate the footer code directly (no macros)
                 std::string footerCode;
 
-                // Close try block with catch handler (always needed for exception handling)
-                footerCode += "} catch(...) {this->handleException(std::current_exception(), this->curState);}\n";
 
                 // Close doStep() and GeneratorStateMachine struct
-                footerCode += "}\n";  // close doStep
+                footerCode += "}\n";  // close doStepImpl
                 footerCode += "};\n";  // close GeneratorStateMachine
 
                 // Allocation and construction (pass coroutine args per C++ spec)
-                footerCode += "void* __coro_mem = coro_detail::promise_allocate<PromiseType>(sizeof(GeneratorStateMachine)";
+                footerCode += "return GeneratorStateMachine::ramp(";
                 if (!paramList.empty()) {
                     footerCode += ", " + paramList;
                 }
                 footerCode += ");\n";
 
+                /*
                 // Build the aggregate initializer: {{}, params...}
                 // {} calls CoroImpl constructor, remaining args init direct members
                 std::string initArgs;
@@ -1346,6 +1320,7 @@ void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, Corouti
                 footerCode += "CO_AWAIT_IMPL_IMPL(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt), ret);\n";
                 footerCode += "frame->doStep();\n";
                 footerCode += "return ret;\n";
+                */
 
                 replacement.replacement = footerCode;
 

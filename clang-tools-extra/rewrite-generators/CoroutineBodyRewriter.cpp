@@ -353,9 +353,15 @@ bool CoroutineBodyRewriter::VisitYieldOrAwaitExpr(YieldOrAwaitExpr *coyield, Cor
             }
         }
 
-        // Register temporaries and awaiter with the current try block for exception handling
+        // Track enclosing try block and register suspension point with it
         if (!currentTryBlockStack.empty()) {
             unsigned tryBlockIndex = currentTryBlockStack.back();
+            coroStmt.enclosingTryBlockIndex = static_cast<int>(tryBlockIndex);
+
+            // Register this suspension index with the directly-enclosing try block
+            tryCatchBlocks[tryBlockIndex].directSuspensionIndices.push_back(coroStmt.index);
+
+            // Register temporaries and awaiter for cleanup on exception
             for (const auto &temp : coroStmt.temporaries) {
                 tryCatchBlocks[tryBlockIndex].variablesInTryBlock.push_back(temp.tempVarName);
                 REWRITE_LOG() << "      DEBUG: Added temporary '" << temp.tempVarName
@@ -429,7 +435,6 @@ bool CoroutineBodyRewriter::TraverseCXXTryStmt(CXXTryStmt *tryStmt) {
         TryCatchBlock tryCatch;
         tryCatch.tryStmt = tryStmt;
         tryCatch.index = nextTryCatchIndex++;
-        tryCatch.resumeIndex = nextCoroStatementIndex++;
 
         // Get the try keyword location
         tryCatch.tryKeywordLoc = tryStmt->getBeginLoc();
@@ -441,27 +446,15 @@ bool CoroutineBodyRewriter::TraverseCXXTryStmt(CXXTryStmt *tryStmt) {
             tryCatch.tryBlockEnd = tryBlock->getRBracLoc();
         }
 
-        // Process each catch clause
-        unsigned numHandlers = tryStmt->getNumHandlers();
-        REWRITE_LOG() << "    DEBUG: Found " << numHandlers << " catch clause(s)\n";
-
-        for (unsigned i = 0; i < numHandlers; ++i) {
-            const CXXCatchStmt *catchStmt = tryStmt->getHandler(i);
-
-            // Get the catch clause text
-            std::string catchClauseText = processCatchClause(catchStmt);
-            tryCatch.catchClauses.push_back(catchClauseText);
-
-            // Update the end location to include all catch clauses
-            if (i == numHandlers - 1) {
-                tryCatch.catchEnd = catchStmt->getEndLoc();
-            }
-        }
-
         // Compute parent index before pushing onto stack
         tryCatch.parentIndex = currentTryBlockStack.empty()
             ? static_cast<unsigned>(-1)
             : currentTryBlockStack.back();
+
+        // Register as nested child of parent try block
+        if (tryCatch.parentIndex != static_cast<unsigned>(-1)) {
+            tryCatchBlocks[tryCatch.parentIndex].nestedTryIndices.push_back(tryCatch.index);
+        }
 
         // Push this try block index onto the stack before traversing children
         unsigned currentIndex = tryCatch.index;
@@ -473,6 +466,7 @@ bool CoroutineBodyRewriter::TraverseCXXTryStmt(CXXTryStmt *tryStmt) {
         REWRITE_LOG() << "    DEBUG: Added try-catch block with index " << tryCatch.index << "\n";
 
         // ===== TRAVERSE CHILDREN =====
+        // Traverse the try body (catch clauses stay inline and are traversed normally by the base)
         bool result = RecursiveASTVisitor::TraverseCXXTryStmt(tryStmt);
 
         // ===== POST-TRAVERSAL =====
@@ -480,72 +474,6 @@ bool CoroutineBodyRewriter::TraverseCXXTryStmt(CXXTryStmt *tryStmt) {
         currentTryBlockStack.pop_back();
 
         return result;
-    }
-
-    // Process a catch clause and transform variable references
-std::string CoroutineBodyRewriter::processCatchClause(const CXXCatchStmt *catchStmt) {
-        // Get the exception declaration (e.g., "MyException& e" or "...")
-        const VarDecl *exceptionDecl = catchStmt->getExceptionDecl();
-
-        std::string catchHeader;
-        if (exceptionDecl) {
-            // Named exception parameter
-            QualType exceptionType = exceptionDecl->getType();
-            std::string exceptionTypeName = typeAsString(exceptionType, *astContext);
-            std::string exceptionVarName = exceptionDecl->getNameAsString();
-            catchHeader = "catch (" + exceptionTypeName + " " + exceptionVarName + ")";
-        } else {
-            // Catch-all clause
-            catchHeader = "catch (...)";
-        }
-
-        // Get the catch block body
-        const Stmt *handlerBlock = catchStmt->getHandlerBlock();
-        if (!handlerBlock) {
-            return catchHeader + " {}";
-        }
-
-        // Get the source text of the handler block
-        SourceRange handlerRange = handlerBlock->getSourceRange();
-        CharSourceRange charRange = CharSourceRange::getTokenRange(handlerRange);
-        std::string handlerText = Lexer::getSourceText(charRange, sourceManager, LangOptions()).str();
-
-        // Collect all variable references with their declaration locations using AST
-        std::vector<std::pair<SourceRange, SourceLocation>> references;
-        VariableReferenceCollector collector(references, variableNames);
-        collector.TraverseStmt(const_cast<Stmt*>(handlerBlock));
-
-        // Sort references by position (reverse order so we can replace from end to start)
-        std::sort(references.begin(), references.end(),
-                  [&](const auto &a, const auto &b) {
-                      return sourceManager.getFileOffset(a.first.getBegin()) >
-                             sourceManager.getFileOffset(b.first.getBegin());
-                  });
-
-        // Replace each reference with CO_GET call using the correct member name
-        std::string transformedText = handlerText;
-        SourceLocation blockStart = handlerBlock->getBeginLoc();
-        unsigned blockStartOffset = sourceManager.getFileOffset(blockStart);
-
-        for (const auto &[refRange, declLoc] : references) {
-            // Get the member name from the mapping
-            auto it = declLocationToMemberName.find(declLoc);
-            if (it == declLocationToMemberName.end()) {
-                continue; // Skip if not in mapping
-            }
-            std::string memberName = it->second;
-            std::string replacement = makeGetCallInsideState(memberName);
-
-            // Calculate positions relative to the block start
-            unsigned refStartOffset = sourceManager.getFileOffset(refRange.getBegin());
-            unsigned refEndOffset = sourceManager.getFileOffset(refRange.getEnd()) + 1;
-            unsigned relativeStart = refStartOffset - blockStartOffset;
-            unsigned relativeEnd = refEndOffset - blockStartOffset;
-
-            transformedText.replace(relativeStart, relativeEnd - relativeStart, replacement);
-        }
-
-        return catchHeader + " " + transformedText;
     }
 
     // Transform variable references in arbitrary text
@@ -1764,7 +1692,8 @@ void CoroutineBodyRewriter::collectTryCatchReplacements() {
             // Delegate to the TryCatchBlock member function
             auto replacements = tryCatch.generateReplacements(
                 sourceManager,
-                [this](SourceLocation loc) { return this->getLocForEndOfToken(loc); }
+                [this](SourceLocation loc) { return this->getLocForEndOfToken(loc); },
+                tryCatchBlocks
             );
 
             // Add all replacements to globalReplacements

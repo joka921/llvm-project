@@ -102,6 +102,11 @@ public:
         return {referenceType, isOwning};
     }
 
+    // Skip catch clause bodies — variables declared inside catch handlers
+    // don't need to be hoisted to the coroutine frame since catch clauses
+    // stay inline in the new try-catch handling.
+    bool TraverseCXXCatchStmt(CXXCatchStmt *) { return true; }
+
     bool VisitDeclStmt(DeclStmt *declStmt) {
         for (auto *decl: declStmt->decls()) {
             if (auto *varDecl = dyn_cast<VarDecl>(decl)) {

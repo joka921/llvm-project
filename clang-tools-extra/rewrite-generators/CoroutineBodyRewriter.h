@@ -76,7 +76,6 @@ private:
     std::optional<SourceRange> handleBracedInitialization(const VarDecl *varDecl);
     void insertDestructorsForScope(const ScopeInfo &scope);
     void insertLoopVariableDestructors(const Stmt *stmt, bool isBreak);
-    std::string transformCatchClauseBody(const CXXCatchStmt *catchStmt, const std::string &exceptionVarName);
     void collectCoroutineStatementReplacements();
     void collectRangeReplacements();
     void collectRangedForLoopReplacements();
@@ -84,7 +83,6 @@ private:
     void collectScopeEndReplacements();
     void applyAllReplacements();
     void collectTemporariesFromExpression(const Expr *expr, CoroutineStatement &coroStmt);
-    std::string processCatchClause(const CXXCatchStmt *catchStmt);
     bool isPartOfDeclaration(const DeclRefExpr *declRef);
     bool isLambdaInit(const Expr *init);
     std::string rewriteVariableReferencesInText(const std::string &text, const std::string &varName);

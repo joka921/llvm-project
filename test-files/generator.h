@@ -549,8 +549,7 @@ void()
     CO_RETURN_IMPL(index, finalAwaiterMem);                                       \
     void()
 
-#define TRY_BEGIN(try_index) this->currentTryBlock_ = (try_index); void()
-#define TRY_END(parent_index, label) this->currentTryBlock_ = (parent_index); label_##label: void()
+// TRY_BEGIN / TRY_END macros removed — try-catch blocks now use inline nested switches
 
 
 #define FOR_LOOP_HEADER(N)
@@ -630,10 +629,7 @@ struct CoroImpl {
                       offsetof(CoroImpl, frm) ==
                       Handle<PromiseType>::promise_offset);
     }
-    static constexpr size_t CO_NO_TRY_BLOCK = static_cast<size_t>(-1);
-
     size_t curState = 0;
-    size_t currentTryBlock_ = CO_NO_TRY_BLOCK;
     bool done_ = false;
     bool atFinalSuspend_ = false;
     using Hdl = Handle<PromiseType>;
@@ -686,17 +682,12 @@ struct CoroImpl {
 
     Derived& derived() {return *static_cast<Derived*>(this);}
 
-    void handleException(std::exception_ptr eptr, size_t &nextState) {
-        nextState = derived().dispatchExceptionHandling(std::move(eptr));
-        if (!done_) {
-            derived().doStep();
-        }
-    }
-
     void doStep() {
         try {
             derived().doStepImpl();
-        } catch (...) { handleException(std::current_exception(), curState); }
+        } catch (...) {
+            derived().handleUnhandledException();
+        }
     }
 
     template<typename... CoroArgs>

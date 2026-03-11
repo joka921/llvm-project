@@ -57,6 +57,7 @@ struct CoroutineStatement {
     SourceLocation operandEnd;
     std::vector<std::string> aliveVariables; // Variables alive at this suspension point, in reverse order of declaration
     std::vector<TemporaryInfo> temporaries; // Subexpression temporaries that need lifetime extension
+    int enclosingTryBlockIndex = -1; // Index of innermost enclosing try block, or -1 if none
 
     // Generate replacements for this coroutine statement
     std::vector<std::tuple<SourceRange, std::string, int, bool>> generateReplacements(

@@ -515,74 +515,26 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             }
         }
 
-        // Add exception handling infrastructure (always generated)
-        // Add dispatchExceptionHandling function — handles kNoTryBlock terminal path
-        structCode += "\n    size_t dispatchExceptionHandling(std::exception_ptr eptr) {\n";
-        structCode += "      if (currentTryBlock_ == CO_NO_TRY_BLOCK) {\n";
-        // Destroy all local variables (exception could occur at any point, check flags)
+        // Generate destroyAllConstructed() — destroys all locals/awaiters/temporaries in reverse order
+        structCode += "\n    void destroyAllConstructed() {\n";
+        // Destroy all local variables (reverse order)
         for (auto it = coro.localVariables.rbegin(); it != coro.localVariables.rend(); ++it) {
-            structCode += "        " + makeStateDestroyIfConstructed(it->name) + "\n";
+            structCode += "      " + makeStateDestroyIfConstructed(it->name) + "\n";
         }
-        structCode += "        promise().unhandled_exception();\n";
-        structCode += "        CO_RETURN_IMPL_IMPL(__final_awaiter, 0);\n";
-        structCode += "        return 0;\n";
-        structCode += "      }\n";
-        structCode += "      destroyBecauseOfException(currentTryBlock_);\n";
-        structCode += "      switch (currentTryBlock_) {\n";
-        for (const auto &tryCatch : coro.tryCatchBlocks) {
-            structCode += "        case " + std::to_string(tryCatch.index) + ": return catchClauseImpl_" + std::to_string(tryCatch.index) + "(std::move(eptr));\n";
+        // Also destroy awaiters and temporaries from all suspension points
+        for (auto stmtIt = coro.coroutineStatements.rbegin(); stmtIt != coro.coroutineStatements.rend(); ++stmtIt) {
+            structCode += "      " + makeStateDestroyIfConstructed(stmtIt->awaiterMemberName) + "\n";
+            for (const auto &temp : stmtIt->temporaries) {
+                structCode += "      " + makeStateDestroyIfConstructed(temp.tempVarName) + "\n";
+            }
         }
-        structCode += "        default: std::terminate();\n";
-        structCode += "      }\n";
         structCode += "    }\n";
 
-        // Add catch clause implementation member functions (only when user has try-catch blocks)
-        if (!coro.tryCatchBlocks.empty()) {
-            structCode += "\n    // Exception handler member functions\n";
-            for (const auto &tryCatch : coro.tryCatchBlocks) {
-                structCode += "    size_t catchClauseImpl_" + std::to_string(tryCatch.index) + "(std::exception_ptr eptr) {\n";
-                structCode += "      auto nextState = " + std::to_string(tryCatch.resumeIndex) + ";\n";
-                // Inline the parent value (can't use constexpr array from local class)
-                std::string parentValue = (tryCatch.parentIndex == static_cast<unsigned>(-1))
-                    ? "kNoTryBlock"
-                    : std::to_string(tryCatch.parentIndex);
-                structCode += "      currentTryBlock_ = " + parentValue + ";\n";
-                structCode += "      auto lambda = [&]() {\n";
-                structCode += "        try {\n";
-                structCode += "          std::rethrow_exception(eptr);\n";
-                structCode += "        } ";
-
-                // Add all catch clauses
-                for (const auto &catchClause : tryCatch.catchClauses) {
-                    structCode += catchClause + " ";
-                }
-
-                structCode += "\n        return nextState;\n";
-                structCode += "      };\n";
-                structCode += "      try {\n";
-                structCode += "        return lambda();\n";
-                structCode += "      } catch (...) {\n";
-                structCode += "        return dispatchExceptionHandling(std::current_exception());\n";
-                structCode += "      }\n";
-                structCode += "    }\n";
-
-                REWRITE_LOG() << "    Added catchClauseImpl_" << tryCatch.index << " to struct\n";
-            }
-        }
-
-        // Add destroyBecauseOfException function (always generated)
-        structCode += "\n    // Destroy variables in case of exception in try block\n";
-        structCode += "    void destroyBecauseOfException(size_t tryCatchBlockIndex) {\n";
-        structCode += "      switch (tryCatchBlockIndex) {\n";
-        for (const auto &tryCatch : coro.tryCatchBlocks) {
-            structCode += "        case " + std::to_string(tryCatch.index) + ":\n";
-            for (const auto &varName : tryCatch.variablesInTryBlock) {
-                structCode += "          " + makeStateDestroyIfConstructed(varName) + "\n";
-            }
-            structCode += "          break;\n";
-        }
-        structCode += "        default: break;\n";
-        structCode += "      }\n";
+        // Generate handleUnhandledException() — called from CoroImpl::doStep()'s outer catch
+        structCode += "\n    void handleUnhandledException() {\n";
+        structCode += "      destroyAllConstructed();\n";
+        structCode += "      promise().unhandled_exception();\n";
+        structCode += "      CO_RETURN_IMPL_IMPL(__final_awaiter, 0);\n";
         structCode += "    }\n";
         REWRITE_LOG() << "    Added exception handling infrastructure\n";
 
@@ -701,18 +653,25 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         structCode += "\n    void doStepImpl() {\n    \n";
 
         // Generate goto-based dispatch switch
-        // Collect all resume point indices (suspension points + TRY_END resume points)
         // CO_RETURN indices are NOT included — they don't create resume points
+        // States inside try blocks route to the outermost enclosing try block's resume_try_N label
         structCode += "\nswitch(this->curState) {\n  case 0: break;\n";
         for (const auto &coroStmt : coro.coroutineStatements) {
             if (coroStmt.type != CoroutineStatement::RETURN) {
-                structCode += "  case " + std::to_string(coroStmt.index) +
-                              ": goto label_" + std::to_string(coroStmt.index) + ";\n";
+                if (coroStmt.enclosingTryBlockIndex < 0) {
+                    // Not inside any try block — go directly to the label
+                    structCode += "  case " + std::to_string(coroStmt.index) +
+                                  ": goto label_" + std::to_string(coroStmt.index) + ";\n";
+                } else {
+                    // Walk parentIndex chain to find outermost enclosing try block
+                    unsigned outermost = static_cast<unsigned>(coroStmt.enclosingTryBlockIndex);
+                    while (coro.tryCatchBlocks[outermost].parentIndex != static_cast<unsigned>(-1)) {
+                        outermost = coro.tryCatchBlocks[outermost].parentIndex;
+                    }
+                    structCode += "  case " + std::to_string(coroStmt.index) +
+                                  ": goto resume_try_" + std::to_string(outermost) + ";\n";
+                }
             }
-        }
-        for (const auto &tryCatch : coro.tryCatchBlocks) {
-            structCode += "  case " + std::to_string(tryCatch.resumeIndex) +
-                          ": goto label_" + std::to_string(tryCatch.resumeIndex) + ";\n";
         }
         structCode += "  default: return;\n}\n";
 

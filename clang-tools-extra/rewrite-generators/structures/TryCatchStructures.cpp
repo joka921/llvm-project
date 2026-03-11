@@ -78,9 +78,9 @@ TryCatchBlock::generateReplacements(
         SourceRange beforeClose(tryBlockEnd, tryBlockEnd);
 
         std::string cleanup = "\n} catch (...) {\n";
-        // Destroy variables in reverse order
-        for (const auto &varName : variablesInTryBlock) {
-            cleanup += "  DESTROY_IF_CONSTRUCTED(" + varName + ");\n";
+        // Destroy variables in reverse declaration order
+        for (auto it = variablesInTryBlock.rbegin(); it != variablesInTryBlock.rend(); ++it) {
+            cleanup += "  DESTROY_IF_CONSTRUCTED(" + *it + ");\n";
         }
         cleanup += "  throw;\n}\n";
 

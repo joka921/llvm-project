@@ -211,6 +211,26 @@ cppcoro::generator<int> gen(int a, int b) {
   co_yield c * 3;
   co_yield d + 3;
 }
+
+cppcoro::generator<int> testTryCatch() {
+  int x = 42;
+  try {
+    int y = x + 1;
+    co_yield y;
+    int i = 15;
+    while (i) {
+      int z = y + 1;
+      co_yield z;
+      --i;
+    }
+  } catch (std::exception& e) {
+    std::cout << "Caught exception: " << e.what() << " x=" << x << std::endl;
+  } catch (...) {
+    std::cout << "Caught unknown exception, x=" << x << std::endl;
+  }
+  co_yield x;
+  co_return;
+}
 */
 
 cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
@@ -230,6 +250,11 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
       bool y = false;
       bool i = false;
       bool z = false;
+      bool __initial_awaiter = false;
+      bool __final_awaiter = false;
+      bool __awaiter_1 = false;
+      bool __awaiter_2 = false;
+      bool __awaiter_3 = false;
     } __constructed;
 
     // Awaiter storage members
@@ -240,20 +265,20 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
     _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_3;
 
     void destroyAllConstructed() {
-      DESTROY_IF_CONSTRUCTED(z);
-      DESTROY_IF_CONSTRUCTED(i);
-      DESTROY_IF_CONSTRUCTED(y);
-      DESTROY_IF_CONSTRUCTED(x);
-      DESTROY_IF_CONSTRUCTED();
       DESTROY_IF_CONSTRUCTED(__awaiter_3);
       DESTROY_IF_CONSTRUCTED(__awaiter_2);
+      DESTROY_IF_CONSTRUCTED(z);
+      DESTROY_IF_CONSTRUCTED(i);
       DESTROY_IF_CONSTRUCTED(__awaiter_1);
+      DESTROY_IF_CONSTRUCTED(y);
+      DESTROY_IF_CONSTRUCTED(x);
+      DESTROY_IF_CONSTRUCTED(__initial_awaiter);
     }
 
     void handleUnhandledException() {
       destroyAllConstructed();
       promise().unhandled_exception();
-      CO_RETURN_IMPL_IMPL(__final_awaiter, 0);
+      CO_RETURN_IMPL_IMPL(__final_awaiter);
     }
 
     // Destroy variables when coroutine is suspended at a specific state
@@ -281,6 +306,7 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
           break;
         case 0: // initial state - initial awaiter is alive
           __initial_awaiter.destroy();
+          __constructed.__initial_awaiter = false;
           break;
       }
     }
@@ -294,7 +320,7 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
         default: return;
       }
       __initial_awaiter.get().ref_.await_resume();
-      __initial_awaiter.destroy();
+      DESTROY_UNCONDITIONALLY(__initial_awaiter);
 
       CO_INIT(x, ( 42));
     resume_try_0:
@@ -317,14 +343,14 @@ cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
           }
           DESTROY_UNCONDITIONALLY(i);
           DESTROY_UNCONDITIONALLY(y);
+        } catch (...) {
+          DESTROY_IF_CONSTRUCTED(__awaiter_2);
+          DESTROY_IF_CONSTRUCTED(z);
+          DESTROY_IF_CONSTRUCTED(i);
+          DESTROY_IF_CONSTRUCTED(__awaiter_1);
+          DESTROY_IF_CONSTRUCTED(y);
+          throw;
         }
-      } catch (...) {
-        DESTROY_IF_CONSTRUCTED(y);
-        DESTROY_IF_CONSTRUCTED(__awaiter_1);
-        DESTROY_IF_CONSTRUCTED(i);
-        DESTROY_IF_CONSTRUCTED(z);
-        DESTROY_IF_CONSTRUCTED(__awaiter_2);
-        throw;
       } catch (std::exception &e) {
         std::cout << "Caught exception: " << e.what() << " x=" << CO_GET(x) << std::endl;
       } catch (...) {

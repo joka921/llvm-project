@@ -500,10 +500,11 @@ struct _coro_storage {
 #define CO_RESUME(index, awaiterMem) \
   label_##index:                                                       \
   CO_GET(awaiterMem).await_resume();                                   \
-  this->awaiterMem.destroy();
+  DESTROY_UNCONDITIONALLY(awaiterMem);
 
 #define CO_YIELD(index, awaiterMem, value)                            \
     this->awaiterMem.construct(promise().yield_value(value));           \
+    this->__constructed.awaiterMem = true;                              \
     this->curState = index;                                            \
     CO_AWAIT_IMPL(awaiterMem); \
     CO_RESUME(index, awaiterMem);
@@ -511,6 +512,7 @@ struct _coro_storage {
 #define CO_AWAIT_VOID(index, awaiterMem, expr)                                  \
 {                                                                              \
 this->awaiterMem.construct(coro_detail::get_awaitable(promise(), expr));      \
+this->__constructed.awaiterMem = true;                                        \
 this->curState = index;                                                      \
     CO_AWAIT_IMPL(awaiterMem);                                                \
     CO_RESUME(index, awaiterMem);
@@ -519,9 +521,10 @@ this->curState = index;                                                      \
 this->done_ = true;                                                          \
 this->atFinalSuspend_ = true;                                                \
 this->finalAwaiterMem.construct(promise().final_suspend());                  \
+this->__constructed.finalAwaiterMem = true;                                  \
 CO_AWAIT_IMPL_IMPL(this->finalAwaiterMem.get().ref_, Hdl::from_promise(pt), __VA_ARGS__);                                              \
 CO_GET(finalAwaiterMem).await_resume();                                      \
-this->finalAwaiterMem.destroy();                                             \
+DESTROY_UNCONDITIONALLY(finalAwaiterMem);                                    \
 this->atFinalSuspend_ = false;                                               \
 Hdl::from_promise(pt).destroy();                                             \
 void()
@@ -650,6 +653,7 @@ struct CoroImpl {
             self->destroySuspendedCoro(self->curState);
         } else if (self->atFinalSuspend_) {
             self->__final_awaiter.destroy();
+            self->__constructed.__final_awaiter = false;
         }
         if constexpr (coro_detail::has_promise_delete<PromiseType>::value) {
             self->~Derived();
@@ -697,6 +701,7 @@ struct CoroImpl {
         auto *frame = new(__coro_mem) Derived{std::forward<CoroArgs>(coroArgs)...};
         auto ret = frame->pt.get_return_object();
         frame->__initial_awaiter.construct(frame->pt.initial_suspend());
+        frame->__constructed.__initial_awaiter = true;
         CO_AWAIT_IMPL_IMPL(frame->__initial_awaiter.get().ref_, Handle<PromiseType>::from_promise(frame->pt), ret);
         frame->doStep();
         return ret;

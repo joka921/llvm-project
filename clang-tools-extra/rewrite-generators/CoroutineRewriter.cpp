@@ -460,6 +460,14 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                     }
                 }
             }
+            // Add flags for awaiter members (initial, final, per-suspension-point)
+            structCode += "        bool __initial_awaiter = false;\n";
+            structCode += "        bool __final_awaiter = false;\n";
+            for (const auto &coroStmt : coro.coroutineStatements) {
+                if (coroStmt.type == CoroutineStatement::RETURN) continue;
+                std::string awaiterName = "__awaiter_" + std::to_string(coroStmt.index);
+                structCode += "        bool " + awaiterName + " = false;\n";
+            }
             structCode += "    } __constructed;\n";
         }
 
@@ -515,20 +523,36 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             }
         }
 
-        // Generate destroyAllConstructed() — destroys all locals/awaiters/temporaries in reverse order
-        structCode += "\n    void destroyAllConstructed() {\n";
-        // Destroy all local variables (reverse order)
-        for (auto it = coro.localVariables.rbegin(); it != coro.localVariables.rend(); ++it) {
-            structCode += "      " + makeStateDestroyIfConstructed(it->name) + "\n";
-        }
-        // Also destroy awaiters and temporaries from all suspension points
-        for (auto stmtIt = coro.coroutineStatements.rbegin(); stmtIt != coro.coroutineStatements.rend(); ++stmtIt) {
-            structCode += "      " + makeStateDestroyIfConstructed(stmtIt->awaiterMemberName) + "\n";
-            for (const auto &temp : stmtIt->temporaries) {
-                structCode += "      " + makeStateDestroyIfConstructed(temp.tempVarName) + "\n";
+        // Generate destroyAllConstructed() — destroys all locals/awaiters/temporaries
+        // in strictly reverse declaration order (interleaved by file position)
+        {
+            // Build a unified list of (file_offset, member_name) for all destroyable items
+            std::vector<std::pair<unsigned, std::string>> destroyItems;
+
+            for (const auto &var : coro.localVariables) {
+                destroyItems.emplace_back(static_cast<unsigned>(var.priority), var.name);
             }
+            for (const auto &coroStmt : coro.coroutineStatements) {
+                if (coroStmt.type == CoroutineStatement::RETURN) continue;
+                unsigned offset = sourceManager.getFileOffset(coroStmt.keywordLoc);
+                destroyItems.emplace_back(offset, coroStmt.awaiterMemberName);
+                for (const auto &temp : coroStmt.temporaries) {
+                    destroyItems.emplace_back(offset, temp.tempVarName);
+                }
+            }
+
+            // Sort by file offset descending (reverse declaration order)
+            std::sort(destroyItems.begin(), destroyItems.end(),
+                [](const auto &a, const auto &b) { return a.first > b.first; });
+
+            structCode += "\n    void destroyAllConstructed() {\n";
+            for (const auto &item : destroyItems) {
+                structCode += "      " + makeStateDestroyIfConstructed(item.second) + "\n";
+            }
+            // Initial awaiter is the earliest — destroy last
+            structCode += "      " + makeStateDestroyIfConstructed("__initial_awaiter") + "\n";
+            structCode += "    }\n";
         }
-        structCode += "    }\n";
 
         // Generate handleUnhandledException() — called from CoroImpl::doStep()'s outer catch
         structCode += "\n    void handleUnhandledException() {\n";
@@ -643,6 +667,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
             structCode += "        case 0:  // initial state - initial awaiter is alive\n";
             structCode += "          __initial_awaiter.destroy();\n";
+            structCode += "          __constructed.__initial_awaiter = false;\n";
             structCode += "          break;\n";
             structCode += "      }\n";
             structCode += "    }\n";
@@ -677,7 +702,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
         // After the dispatch switch, process initial awaiter (reached via case 0)
         structCode += "__initial_awaiter.get().ref_.await_resume();\n";
-        structCode += "__initial_awaiter.destroy();\n";
+        structCode += "DESTROY_UNCONDITIONALLY(__initial_awaiter);\n";
 
         return structCode;
     }

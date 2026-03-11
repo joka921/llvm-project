@@ -349,6 +349,53 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             structCode += "\n";
         }
 
+        // Generate explicit constructor (needed because CoroImpl base has non-trivial members,
+        // so aggregate initialization doesn't work)
+        {
+            // Build list of constructor parameters: __self (if member func) + function params
+            bool hasCtorParams = coro.isMemberFunction || !coro.parameters.empty();
+            if (hasCtorParams) {
+                structCode += "    // Constructor\n";
+                structCode += "    GeneratorStateMachine(";
+
+                bool first = true;
+                if (coro.isMemberFunction) {
+                    std::string selfType;
+                    if (coro.isConstMemberFunction) {
+                        selfType = "const " + coro.className + "*";
+                    } else {
+                        selfType = coro.className + "*";
+                    }
+                    structCode += selfType + " __self";
+                    first = false;
+                }
+
+                for (const auto &param : coro.parameters) {
+                    if (!first) structCode += ", ";
+                    structCode += "decltype(" + param.name + ") " + param.name;
+                    first = false;
+                }
+
+                structCode += ")\n      : ";
+
+                // Initializer list
+                first = true;
+                if (coro.isMemberFunction) {
+                    structCode += "__self(__self)";
+                    first = false;
+                }
+
+                for (const auto &param : coro.parameters) {
+                    if (!first) structCode += ", ";
+                    structCode += param.name + "(std::move(" + param.name + "))";
+                    first = false;
+                }
+
+                structCode += " {}\n\n";
+                REWRITE_LOG() << "    Added explicit constructor to GeneratorStateMachine\n";
+            }
+        }
+
         // Add all local variables (including ranged-for variables)
         // Use declaration location to deduplicate and handle shadowing
         if (coro.localVariables.empty()) {

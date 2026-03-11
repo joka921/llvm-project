@@ -51,12 +51,8 @@ void CoroutineBodyRewriter::buildDeclLocationMapping() {
             addedDeclLocations.insert(var.location);
 
             // Determine the member name (with suffix for shadowed variables)
-            // For lambda variables, use the functor class name instead of the original variable name
+            // Lambda variables keep their original name; the functor class name is only used for the type parameter
             std::string memberName = var.name;
-            auto lambdaIt = coroutineInfo.lambdaVariableMapping.find(var.location);
-            if (lambdaIt != coroutineInfo.lambdaVariableMapping.end()) {
-                memberName = lambdaIt->second.memberName;
-            }
             int count = variableNameCounts[memberName]++;
             if (count > 0) {
                 memberName = memberName + "_shadow_" + std::to_string(count);
@@ -165,13 +161,8 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                     }
                     processedDeclarations.insert(declLoc);
 
-                    // Determine effective member name (lambda variables use functor class name)
+                    // Determine effective member name (lambda variables keep their original name)
                     std::string effectiveName = varName;
-                    auto lambdaIt = coroutineInfo.lambdaVariableMapping.find(declLoc);
-                    if (lambdaIt != coroutineInfo.lambdaVariableMapping.end()) {
-                        effectiveName = lambdaIt->second.memberName;
-                        REWRITE_LOG() << "    DEBUG: Lambda variable '" << varName << "' -> member name '" << effectiveName << "'\n";
-                    }
 
                     // Add variable to current scope
                     if (!scopeStack.empty()) {
@@ -360,6 +351,19 @@ bool CoroutineBodyRewriter::VisitYieldOrAwaitExpr(YieldOrAwaitExpr *coyield, Cor
                 coroStmt.aliveVariables.push_back(*varIt);
                 REWRITE_LOG() << "      DEBUG: Variable '" << *varIt << "' is alive at suspension point " << coroStmt.index << "\n";
             }
+        }
+
+        // Register temporaries and awaiter with the current try block for exception handling
+        if (!currentTryBlockStack.empty()) {
+            unsigned tryBlockIndex = currentTryBlockStack.back();
+            for (const auto &temp : coroStmt.temporaries) {
+                tryCatchBlocks[tryBlockIndex].variablesInTryBlock.push_back(temp.tempVarName);
+                REWRITE_LOG() << "      DEBUG: Added temporary '" << temp.tempVarName
+                             << "' to try block " << tryBlockIndex << " for exception handling\n";
+            }
+            tryCatchBlocks[tryBlockIndex].variablesInTryBlock.push_back(coroStmt.awaiterMemberName);
+            REWRITE_LOG() << "      DEBUG: Added awaiter '" << coroStmt.awaiterMemberName
+                         << "' to try block " << tryBlockIndex << " for exception handling\n";
         }
 
         coroutineStatements.push_back(coroStmt);
@@ -652,6 +656,25 @@ bool CoroutineBodyRewriter::TraverseCXXForRangeStmt(CXXForRangeStmt *forRange) {
                 << ", " << rangedFor.beginVarName << ", " << rangedFor.endVarName << "\n";
 
         rangedForLoops.push_back(rangedFor);
+
+        // Add ranged-for synthetic variables to current scope for destruction tracking
+        if (!scopeStack.empty()) {
+            scopeStack.back().variablesInScope.push_back(rangedFor.rangeVarName);
+            scopeStack.back().variablesInScope.push_back(rangedFor.beginVarName);
+            scopeStack.back().variablesInScope.push_back(rangedFor.endVarName);
+            REWRITE_LOG() << "    DEBUG: Added ranged-for variables '"
+                    << rangedFor.rangeVarName << "', '" << rangedFor.beginVarName
+                    << "', '" << rangedFor.endVarName << "' to current scope\n";
+        }
+
+        // If inside a try block, add synthetic variables to that try block's list
+        if (!currentTryBlockStack.empty()) {
+            unsigned tryBlockIndex = currentTryBlockStack.back();
+            tryCatchBlocks[tryBlockIndex].variablesInTryBlock.push_back(rangedFor.rangeVarName);
+            tryCatchBlocks[tryBlockIndex].variablesInTryBlock.push_back(rangedFor.beginVarName);
+            tryCatchBlocks[tryBlockIndex].variablesInTryBlock.push_back(rangedFor.endVarName);
+            REWRITE_LOG() << "    DEBUG: Added ranged-for variables to try block " << tryBlockIndex << "\n";
+        }
 
         // ===== AUTOMATIC TRAVERSAL =====
         bool result = RecursiveASTVisitor::TraverseCXXForRangeStmt(forRange);

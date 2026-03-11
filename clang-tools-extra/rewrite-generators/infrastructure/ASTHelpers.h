@@ -64,7 +64,20 @@ inline bool isPrValue(const Expr* initializer) {
         return false;
     }
     initializer = unwrapExpr(initializer);
-    return initializer->getValueKind() == VK_PRValue || (dyn_cast<InitListExpr>(initializer) != nullptr);
+    if (initializer->getValueKind() == VK_PRValue) {
+        return true;
+    }
+    // An InitListExpr is a prvalue only if it has multiple elements (aggregate init)
+    // or if it has a single element that is itself a prvalue.
+    // Single-element InitListExpr with an lvalue element is reference binding (e.g., auto& x{b})
+    if (const auto *initList = dyn_cast<InitListExpr>(initializer)) {
+        if (initList->getNumInits() == 1) {
+            return isPrValue(initList->getInit(0));
+        }
+        // Zero or multiple elements: aggregate/value init, treat as prvalue
+        return true;
+    }
+    return false;
 }
 
 /// Converts a type to a fully qualified string

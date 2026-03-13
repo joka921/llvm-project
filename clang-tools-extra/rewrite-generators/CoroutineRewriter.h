@@ -22,6 +22,12 @@ using namespace clang;
 
 class CoroutineBodyRewriter;
 
+struct TemplateInstantiationInfo {
+    const FunctionDecl *instantiatedDecl;
+    const FunctionDecl *patternDecl;
+    const FunctionTemplateDecl *templateDecl;
+};
+
 class CoroutineRewriter : public RecursiveASTVisitor<CoroutineRewriter> {
 private:
     const SourceManager &sourceManager;
@@ -30,6 +36,7 @@ private:
     const LangOptions &langOptions;
     ASTContext *astContext;
     std::vector<CoroutineInfo> coroutines;
+    std::vector<TemplateInstantiationInfo> templateInstantiations;
 
     // Private helper methods
     bool containsCoroutineKeywords(const Stmt *stmt);
@@ -48,6 +55,12 @@ private:
     void replaceEntireBodyWithStateMachine(const CoroutineInfo &coro);
     void wrapBodyWithRunMethod(const CoroutineInfo &coro, CoroutineBodyRewriter &bodyRewriter);
 
+    // Template instantiation rewriting
+    void rewriteTemplateInstantiations();
+    void rewriteSingleTemplateInstantiation(const TemplateInstantiationInfo &info);
+    std::string buildInstantiatedSignature(const FunctionDecl *funcDecl);
+    SourceLocation findInsertionPointAfterIncludes();
+
 public:
     CoroutineRewriter(Rewriter &rewr, const SourceManager &SM,
                      clang::DiagnosticsEngine &diags, const LangOptions &langOpts)
@@ -57,6 +70,8 @@ public:
     void setASTContext(ASTContext &ctx) {
         astContext = &ctx;
     }
+
+    bool shouldVisitTemplateInstantiations() const { return true; }
 
     bool VisitFunctionDecl(FunctionDecl *funcDecl);
     bool VisitLambdaExpr(LambdaExpr *lambdaExpr);

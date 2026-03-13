@@ -10,6 +10,8 @@
 #include "./generator.h"
 #include <vector>
 
+
+
 struct X {
     int i;
 };
@@ -234,7 +236,180 @@ cppcoro::generator<int> testTryCatch() {
 */
 
 
-template <typename T>
-cppcoro::generator<int> gen(T a) {
-  co_yield a;
+class C {
+  int value = 42;
+  template <typename T>
+  cppcoro::generator<int, cppcoro::NoDetails, Handle> gen(T a);
+  /*
+  cppcoro::generator<int> gen(T a) {
+    auto x = a + 3 + value;
+    co_yield x;
+  }
+  */
+};
+
+inline template cppcoro::generator<int, cppcoro::NoDetails, Handle> C::gen<double>(double a) {
+
+  // _coro_storage and CoroImpl assumed to be available in global namespace
+  using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
+  struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
+    // Member function 'this' pointer
+    C* __self;
+
+    // Function parameters
+    decltype(a) a;
+
+    // Constructor
+    GeneratorStateMachine(C* __self, decltype(a) a)
+      : __self(__self), a(std::move(a)) {}
+
+    // Local variables (including ranged-for loop variables)
+    _coro_storage<double&, true> x;
+
+    // Constructed flags for local variables
+    struct {
+        bool x = false;
+        bool __initial_awaiter = false;
+        bool __final_awaiter = false;
+        bool __awaiter_1 = false;
+    } __constructed;
+
+    // Awaiter storage members
+    _coro_storage<decltype(std::declval<PromiseType&>().initial_suspend())&, true> __initial_awaiter;
+    _coro_storage<decltype(std::declval<PromiseType&>().final_suspend())&, true> __final_awaiter;
+    _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_1;
+
+    void destroyAllConstructed() {
+      DESTROY_IF_CONSTRUCTED(__awaiter_1);
+      DESTROY_IF_CONSTRUCTED(x);
+      DESTROY_IF_CONSTRUCTED(__initial_awaiter);
+    }
+
+    void handleUnhandledException() {
+      destroyAllConstructed();
+      promise().unhandled_exception();
+      CO_RETURN_IMPL_IMPL(__final_awaiter);
+    }
+
+    // Destroy variables when coroutine is suspended at a specific state
+    void destroySuspendedCoro(size_t curState) {
+      switch (curState) {
+        case 2:
+          break;
+        cleanup_1:
+        case 1:
+          __awaiter_1.destroy();
+          x.destroy();
+          break;
+        case 0:  // initial state - initial awaiter is alive
+          __initial_awaiter.destroy();
+          __constructed.__initial_awaiter = false;
+          break;
+      }
+    }
+
+    void doStepImpl() {
+
+
+switch(this->curState) {
+  case 0: break;
+  case 1: goto label_1;
+  default: return;
 }
+__initial_awaiter.get().ref_.await_resume();
+DESTROY_UNCONDITIONALLY(__initial_awaiter);
+
+    CO_INIT(x,( a + 3 + __self->value));
+    CO_YIELD(1, __awaiter_1,  CO_GET(x));
+  CO_RETURN_FALLOFF(2, __final_awaiter);
+}
+};
+return GeneratorStateMachine::ramp(this, a);
+}
+
+inline cppcoro::generator<int, cppcoro::NoDetails, Handle> C::gen(int a) {
+
+  // _coro_storage and CoroImpl assumed to be available in global namespace
+  using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
+  struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
+    // Member function 'this' pointer
+    C* __self;
+
+    // Function parameters
+    decltype(a) a;
+
+    // Constructor
+    GeneratorStateMachine(C* __self, decltype(a) a)
+      : __self(__self), a(std::move(a)) {}
+
+    // Local variables (including ranged-for loop variables)
+    _coro_storage<int&, true> x;
+
+    // Constructed flags for local variables
+    struct {
+        bool x = false;
+        bool __initial_awaiter = false;
+        bool __final_awaiter = false;
+        bool __awaiter_1 = false;
+    } __constructed;
+
+    // Awaiter storage members
+    _coro_storage<decltype(std::declval<PromiseType&>().initial_suspend())&, true> __initial_awaiter;
+    _coro_storage<decltype(std::declval<PromiseType&>().final_suspend())&, true> __final_awaiter;
+    _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_1;
+
+    void destroyAllConstructed() {
+      DESTROY_IF_CONSTRUCTED(__awaiter_1);
+      DESTROY_IF_CONSTRUCTED(x);
+      DESTROY_IF_CONSTRUCTED(__initial_awaiter);
+    }
+
+    void handleUnhandledException() {
+      destroyAllConstructed();
+      promise().unhandled_exception();
+      CO_RETURN_IMPL_IMPL(__final_awaiter);
+    }
+
+    // Destroy variables when coroutine is suspended at a specific state
+    void destroySuspendedCoro(size_t curState) {
+      switch (curState) {
+        case 2:
+          break;
+        cleanup_1:
+        case 1:
+          __awaiter_1.destroy();
+          x.destroy();
+          break;
+        case 0:  // initial state - initial awaiter is alive
+          __initial_awaiter.destroy();
+          __constructed.__initial_awaiter = false;
+          break;
+      }
+    }
+
+    void doStepImpl() {
+
+
+switch(this->curState) {
+  case 0: break;
+  case 1: goto label_1;
+  default: return;
+}
+__initial_awaiter.get().ref_.await_resume();
+DESTROY_UNCONDITIONALLY(__initial_awaiter);
+
+    CO_INIT(x,( a + 3 + __self->value));
+    CO_YIELD(1, __awaiter_1,  CO_GET(x));
+  CO_RETURN_FALLOFF(2, __final_awaiter);
+}
+};
+return GeneratorStateMachine::ramp(, this, a);
+}
+
+void use() {
+  C c;
+  auto x = c.gen(3);
+  auto y = c.gen(4.3);
+  auto z = c.gen(4);
+}
+

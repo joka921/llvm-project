@@ -1782,6 +1782,7 @@ void CoroutineBodyRewriter::collectRangeReplacements() {
     }
 
 void CoroutineBodyRewriter::applyAllReplacements() {
+        if (collectOnly_) return;  // Replacements are in globalReplacements, readable via getter
         // Use the generic ReplacementApplicator infrastructure
         ReplacementApplicator applicator(rewriter, sourceManager);
         applicator.applyReplacements(globalReplacements);

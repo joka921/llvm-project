@@ -51,6 +51,8 @@ private:
     unsigned nextTryCatchIndex;
     std::vector<unsigned> currentTryBlockStack;
 
+    bool collectOnly_ = false;
+
     bool isMemberFunction;
     [[maybe_unused]] const CXXRecordDecl *classDecl;
     std::map<SourceLocation, std::string> declLocationToMemberName;
@@ -125,6 +127,9 @@ public:
     bool VisitBreakStmt(BreakStmt *breakStmt);
     bool VisitContinueStmt(ContinueStmt *continueStmt);
     bool TraverseLambdaExpr(LambdaExpr *lambdaExpr);
+
+    // Collect-only mode: gather replacements without applying them via the Rewriter
+    void setCollectOnly(bool v) { collectOnly_ = v; }
 
     // Replacement application
     void applyReplacements();

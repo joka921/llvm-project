@@ -9,6 +9,7 @@
 #include "collectors/LocalVariableCollector.h"
 #include "codegen/MacroCodeGenerator.h"
 #include "infrastructure/DecltypeGenerator.h"
+#include "infrastructure/StringReplacementApplicator.h"
 #include "clang/Lex/Lexer.h"
 
 #include <sstream>
@@ -749,6 +750,11 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
     }
 
 bool CoroutineRewriter::VisitFunctionDecl(FunctionDecl *funcDecl) {
+        REWRITE_LOG() << "VISIT: " << funcDecl->getQualifiedNameAsString()
+                      << " hasBody=" << funcDecl->hasBody()
+                      << " isTmplInst=" << funcDecl->isTemplateInstantiation()
+                      << " describedTmpl=" << (funcDecl->getDescribedFunctionTemplate() != nullptr)
+                      << "\n";
         if (!funcDecl->hasBody()) {
             return true;
         }
@@ -756,6 +762,30 @@ bool CoroutineRewriter::VisitFunctionDecl(FunctionDecl *funcDecl) {
         auto fileId = sourceManager.getFileID(funcDecl->getLocation());
         if (fileId != sourceManager.getMainFileID()) {
             return true;
+        }
+
+        // Skip template definitions (dependent types can't be rewritten)
+        if (funcDecl->getDescribedFunctionTemplate()) {
+            REWRITE_LOG() << "Skipping template definition: "
+                          << funcDecl->getQualifiedNameAsString() << "\n";
+            return true;
+        }
+
+        // Detect implicit template instantiations of coroutines
+        if (funcDecl->isTemplateInstantiation() &&
+            funcDecl->getTemplateSpecializationKind() == TSK_ImplicitInstantiation) {
+            if (containsCoroutineKeywords(funcDecl->getBody())) {
+                const FunctionDecl *pattern = funcDecl->getTemplateInstantiationPattern();
+                if (pattern) {
+                    const FunctionTemplateDecl *tmplDecl = pattern->getDescribedFunctionTemplate();
+                    if (tmplDecl) {
+                        templateInstantiations.push_back({funcDecl, pattern, tmplDecl});
+                        REWRITE_LOG() << "Found template coroutine instantiation: "
+                                      << funcDecl->getQualifiedNameAsString() << "\n";
+                    }
+                }
+            }
+            return true;  // Don't add to regular coroutines vector
         }
 
         if (containsCoroutineKeywords(funcDecl->getBody())) {
@@ -1036,6 +1066,9 @@ void CoroutineRewriter::performRewrites() {
                 }
             }
         }
+
+        // Rewrite template instantiations
+        rewriteTemplateInstantiations();
     }
 
 void CoroutineRewriter::rewriteCoroutineBody(CoroutineInfo &coro) {
@@ -1424,4 +1457,247 @@ void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, Corouti
             REWRITE_LOG() << "  ERROR: Body is not a compound statement, cannot add closing braces\n";
         }
     }
+
+// ============================================================
+// Template instantiation rewriting
+// ============================================================
+
+SourceLocation CoroutineRewriter::findInsertionPointAfterIncludes() {
+    FileID mainFileID = sourceManager.getMainFileID();
+    StringRef content = sourceManager.getBufferData(mainFileID);
+    size_t lastIncludeEnd = 0;
+    size_t pos = 0;
+    while ((pos = content.find("#include", pos)) != StringRef::npos) {
+        size_t eol = content.find('\n', pos);
+        if (eol != StringRef::npos) lastIncludeEnd = eol + 1;
+        else lastIncludeEnd = content.size();
+        pos = (eol != StringRef::npos) ? eol + 1 : content.size();
+    }
+    return sourceManager.getLocForStartOfFile(mainFileID).getLocWithOffset(lastIncludeEnd);
+}
+
+std::string CoroutineRewriter::buildInstantiatedSignature(const FunctionDecl *funcDecl) {
+    std::string sig = "inline ";
+
+    // Return type
+    QualType retType = funcDecl->getReturnType();
+    QualType canonicalType = retType.getCanonicalType();
+    PrintingPolicy policy(astContext->getLangOpts());
+    policy.SuppressScope = false;
+    policy.PrintCanonicalTypes = true;
+    std::string returnType = canonicalType.getAsString(policy);
+    std::string modifiedReturnType = replaceLastTemplateArgWithHandle(returnType);
+    sig += modifiedReturnType + " ";
+
+    // For member functions, prefix with ClassName::
+    if (const auto *methodDecl = dyn_cast<CXXMethodDecl>(funcDecl)) {
+        sig += methodDecl->getParent()->getQualifiedNameAsString() + "::";
+    }
+
+    // Function name (without template args — this is a plain inline function)
+    sig += funcDecl->getNameAsString();
+
+    // Parameters with resolved types
+    sig += "(";
+    for (unsigned i = 0; i < funcDecl->getNumParams(); ++i) {
+        if (i > 0) sig += ", ";
+        const ParmVarDecl *param = funcDecl->getParamDecl(i);
+        std::string paramType = param->getType().getAsString(policy);
+        sig += paramType;
+        if (!param->getNameAsString().empty()) {
+            sig += " " + param->getNameAsString();
+        }
+    }
+    sig += ")";
+
+    return sig;
+}
+
+void CoroutineRewriter::rewriteTemplateInstantiations() {
+    if (templateInstantiations.empty()) return;
+
+    REWRITE_LOG() << "\n=== REWRITING TEMPLATE INSTANTIATIONS ===\n";
+    REWRITE_LOG() << "Found " << templateInstantiations.size() << " template instantiation(s)\n";
+
+    for (const auto &info : templateInstantiations) {
+        rewriteSingleTemplateInstantiation(info);
+    }
+
+    REWRITE_LOG() << "=== END TEMPLATE INSTANTIATIONS ===\n\n";
+}
+
+void CoroutineRewriter::rewriteSingleTemplateInstantiation(const TemplateInstantiationInfo &info) {
+    REWRITE_LOG() << "\n--- Rewriting template instantiation: "
+                  << info.instantiatedDecl->getQualifiedNameAsString() << " ---\n";
+
+    // 4a. Extract template source text
+    SourceRange tmplRange = info.templateDecl->getSourceRange();
+    CharSourceRange charRange = CharSourceRange::getTokenRange(tmplRange);
+    std::string templateSource = Lexer::getSourceText(charRange, sourceManager, langOptions).str();
+    unsigned baseFileOffset = sourceManager.getFileOffset(tmplRange.getBegin());
+
+    REWRITE_LOG() << "  Template source length: " << templateSource.size() << " bytes\n";
+    REWRITE_LOG() << "  Base file offset: " << baseFileOffset << "\n";
+
+    if (templateSource.empty()) {
+        REWRITE_LOG() << "  ERROR: Could not extract template source text\n";
+        return;
+    }
+
+    // 4b. Build CoroutineInfo from the instantiated AST (resolved types)
+    CoroutineInfo coro;
+    coro.function = info.instantiatedDecl;
+
+    if (!collectLocalVariables(info.instantiatedDecl->getBody(), coro.localVariables)) {
+        REWRITE_LOG() << "  Skipping due to variable name collisions\n";
+        return;
+    }
+
+    collectFunctionParameters(info.instantiatedDecl, coro.parameters);
+    collectMemberFunctionInfo(info.instantiatedDecl, coro);
+
+    // 4c. Two-pass body rewriting in collect-only mode
+    const Stmt *bodyStmt = info.instantiatedDecl->getBody();
+    if (!bodyStmt) return;
+
+    // Handle CoroutineBodyStmt wrapper
+    if (auto *coroBody = dyn_cast<CoroutineBodyStmt>(bodyStmt)) {
+        bodyStmt = coroBody->getBody();
+    }
+    if (!bodyStmt) return;
+
+    // Get the class record for member functions
+    const CXXRecordDecl *classRecord = nullptr;
+    if (coro.isMemberFunction) {
+        if (const auto *methodDecl = dyn_cast<CXXMethodDecl>(coro.function)) {
+            classRecord = methodDecl->getParent();
+        }
+    }
+
+    // Pass 1: collect ranged-for, try-catch, coroutine statements, lambdas
+    CoroutineBodyRewriter initialRewriter(coro.localVariables, rewriter, sourceManager,
+                                          coro, *astContext, coro.isMemberFunction, classRecord);
+    initialRewriter.TraverseStmt(const_cast<Stmt *>(bodyStmt));
+
+    if (coro.hasError) {
+        REWRITE_LOG() << "  Template instantiation has errors, skipping\n";
+        return;
+    }
+
+    // Transfer ranged-for loops, try-catch blocks, coroutine statements
+    coro.rangedForLoops = initialRewriter.getRangedForLoops();
+    coro.tryCatchBlocks = initialRewriter.getTryCatchBlocks();
+    coro.coroutineStatements = initialRewriter.getCoroutineStatements();
+
+    // Build lambda-variable mapping
+    const auto &initialLambdas = initialRewriter.getCollectedLambdas();
+    for (const auto &lambda : initialLambdas) {
+        if (lambda.varDeclLocation.isValid()) {
+            coro.lambdaVariableMapping[lambda.varDeclLocation] = lambda;
+        }
+    }
+
+    // Add ranged-for variables (same as rewriteCoroutineBody)
+    for (const auto &rangedFor : coro.rangedForLoops) {
+        LocalVariable loopVar;
+        loopVar.name = rangedFor.loopVarName;
+        loopVar.type = rangedFor.loopVarType;
+        loopVar.isReference = (loopVar.type.find("&") != std::string::npos);
+        loopVar.referenceType = loopVar.type;
+        loopVar.isOwning = !loopVar.isReference;
+        loopVar.location = rangedFor.fullRange.getBegin();
+        loopVar.priority = sourceManager.getFileOffset(loopVar.location);
+        coro.localVariables.insert(loopVar);
+
+        LocalVariable rangeVar;
+        rangeVar.name = rangedFor.rangeVarName;
+        std::tie(rangeVar.type, rangeVar.isOwning) =
+                getTypeForAutoRefRefVariable(rangedFor.rangeExpr, *astContext);
+        rangeVar.referenceType = rangeVar.type + " &";
+        rangeVar.isReference = false;
+        rangeVar.location = rangedFor.fullRange.getBegin();
+        rangeVar.priority = sourceManager.getFileOffset(rangeVar.location) + 1;
+        coro.localVariables.insert(rangeVar);
+
+        auto addBeginAndEndVar = [&](const std::string &beginOrEnd, const std::string &name, int priority) {
+            LocalVariable beginVar;
+            beginVar.name = name;
+            beginVar.type = "std::decay_t<decltype(std::declval<" + rangeVar.referenceType + ">()." + beginOrEnd + "())>";
+            beginVar.isOwning = true;
+            beginVar.referenceType = beginVar.type + " &";
+            beginVar.isReference = false;
+            beginVar.location = rangedFor.fullRange.getBegin();
+            beginVar.priority = sourceManager.getFileOffset(beginVar.location) + priority;
+            coro.localVariables.insert(beginVar);
+        };
+        addBeginAndEndVar("begin", rangedFor.beginVarName, 2);
+        addBeginAndEndVar("end", rangedFor.endVarName, 3);
+    }
+
+    // Pass 2: full rewrite with collect-only mode
+    CoroutineBodyRewriter finalRewriter(coro.localVariables, rewriter, sourceManager,
+                                        coro, *astContext, coro.isMemberFunction, classRecord);
+    finalRewriter.TraverseStmt(const_cast<Stmt *>(bodyStmt));
+
+    // Collect lambdas
+    coro.lambdasInBody = finalRewriter.getCollectedLambdas();
+
+    // Wrap with run method (this adds scope end replacements)
+    wrapBodyWithRunMethod(coro, finalRewriter);
+
+    // Set collect-only BEFORE applyReplacements to prevent Clang Rewriter modification
+    finalRewriter.setCollectOnly(true);
+    finalRewriter.applyReplacements();
+
+    // 4d. Convert SourceRange replacements to offset-based
+    StringReplacementApplicator stringApplicator;
+    for (const auto &[range, text, priority, isReplace] : finalRewriter.globalReplacements) {
+        stringApplicator.addReplacement(
+            StringReplacementApplicator::fromSourceRange(
+                range, text, priority, isReplace, sourceManager, langOptions, baseFileOffset));
+    }
+
+    // 4e. Apply to cloned source
+    std::string rewrittenSource = stringApplicator.applyTo(templateSource);
+
+    REWRITE_LOG() << "  Rewritten template source length: " << rewrittenSource.size() << "\n";
+
+    // Find the opening '{' in the rewritten text (skip the template<...> + signature)
+    size_t bracePos = rewrittenSource.find('{');
+    if (bracePos == std::string::npos) {
+        REWRITE_LOG() << "  ERROR: Could not find opening brace in rewritten template\n";
+        return;
+    }
+    std::string rewrittenBody = rewrittenSource.substr(bracePos);
+
+    // 4f. Generate struct code and build full function
+    std::string structCode = generateCoroImplStruct(coro);
+    std::string signature = buildInstantiatedSignature(info.instantiatedDecl);
+
+    // Assemble: signature + { + struct + inner body content + }
+    std::string fullFunction = signature + " {\n" + structCode + rewrittenBody.substr(1);
+
+    REWRITE_LOG() << "  Generated inline function:\n";
+    REWRITE_LOG() << "  Signature: " << signature << "\n";
+
+    // 4g. Insert at top of file (after includes)
+    SourceLocation insertLoc = findInsertionPointAfterIncludes();
+
+    // Insert lambda functor structs before the function
+    std::string lambdaStructs;
+    if (!coro.lambdasInBody.empty()) {
+        std::set<std::string> insertedLambdaClasses;
+        for (const auto &lambda : coro.lambdasInBody) {
+            if (insertedLambdaClasses.insert(lambda.className).second) {
+                lambdaStructs += lambda.classDefinition + ";\n\n";
+            }
+        }
+    }
+
+    rewriter.InsertTextBefore(insertLoc, "\n" + lambdaStructs + fullFunction + "\n");
+
+    REWRITE_LOG() << "  Inserted inline function after includes\n";
+    REWRITE_LOG() << "--- End template instantiation: "
+                  << info.instantiatedDecl->getQualifiedNameAsString() << " ---\n";
+}
 

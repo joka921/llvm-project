@@ -445,6 +445,7 @@ template<typename Ref, bool isOwningStorage>
 struct _coro_storage {
     static constexpr bool isOwning = isOwningStorage;
     using Storage = std::conditional_t<isOwning, std::decay_t<Ref>, std::add_pointer_t<std::decay_t<Ref> > >;
+    static constexpr bool isTriviallyDestructible = std::is_trivially_destructible_v<Storage>;
     alignas(Storage) char buffer[sizeof(Storage)];
 
     struct Val {

@@ -41,7 +41,8 @@ private:
     // Private helper methods
     bool containsCoroutineKeywords(const Stmt *stmt);
     bool containsTryCatchBlocks(const Stmt *stmt);
-    bool collectLocalVariables(const Stmt *body, std::set<LocalVariable> &variables);
+    bool collectLocalVariables(const Stmt *body, std::set<LocalVariable> &variables,
+                               bool useDiagEngine = true);
     void collectFunctionParameters(const FunctionDecl *funcDecl, std::vector<FunctionParameter> &parameters);
     void collectMemberFunctionInfo(const FunctionDecl *funcDecl, CoroutineInfo &coro);
     std::string replaceLastTemplateArgWithHandle(const std::string &returnType);

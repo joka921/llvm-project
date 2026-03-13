@@ -49,14 +49,21 @@ bool CoroutineRewriter::containsTryCatchBlocks(const Stmt *stmt) {
         return false;
     }
 
-bool CoroutineRewriter::collectLocalVariables(const Stmt *body, std::set<LocalVariable> &variables) {
+bool CoroutineRewriter::collectLocalVariables(const Stmt *body, std::set<LocalVariable> &variables,
+                                               bool useDiagEngine) {
         LocalVariableCollector collector(variables, sourceManager, *astContext);
         collector.TraverseStmt(const_cast<Stmt *>(body));
 
         // Check for variable name collisions
         if (collector.hasVariableNameCollisions()) {
-            DiagnosticsEngine &diags = astContext->getDiagnostics();
-            collector.reportCollisions(diags);
+            if (useDiagEngine) {
+                DiagnosticsEngine &diags = astContext->getDiagnostics();
+                collector.reportCollisions(diags);
+            } else {
+                // During EndSourceFileAction, the diagnostic consumer's
+                // TextDiag is already destroyed, so use llvm::errs() instead.
+                llvm::errs() << "error: variable name collision detected in coroutine\n";
+            }
             return false; // Collision detected, cannot rewrite
         }
 
@@ -458,10 +465,13 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                 REWRITE_LOG() << "    Added variable: " << memberName << " (original name: " << var.name
                              << ", location: " << var.location.printToString(sourceManager) << ")\n";
             }
+        }
 
-            // Generate constructed flags struct for local variables
-            structCode += "\n    // Constructed flags for local variables\n";
-            structCode += "    struct {\n";
+        // Generate constructed flags struct (always — needed for awaiter flags even with no locals)
+        structCode += "\n    // Constructed flags\n";
+        structCode += "    struct {\n";
+        // Local variable flags (only if there are locals)
+        if (!coro.localVariables.empty()) {
             std::set<SourceLocation> flagDeclLocations;
             for (const auto &var : coro.localVariables) {
                 if (flagDeclLocations.count(var.location) > 0) continue;
@@ -482,16 +492,16 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                     }
                 }
             }
-            // Add flags for awaiter members (initial, final, per-suspension-point)
-            structCode += "        bool __initial_awaiter = false;\n";
-            structCode += "        bool __final_awaiter = false;\n";
-            for (const auto &coroStmt : coro.coroutineStatements) {
-                if (coroStmt.type == CoroutineStatement::RETURN) continue;
-                std::string awaiterName = "__awaiter_" + std::to_string(coroStmt.index);
-                structCode += "        bool " + awaiterName + " = false;\n";
-            }
-            structCode += "    } __constructed;\n";
         }
+        // Awaiter flags (always present)
+        structCode += "        bool __initial_awaiter = false;\n";
+        structCode += "        bool __final_awaiter = false;\n";
+        for (const auto &coroStmt : coro.coroutineStatements) {
+            if (coroStmt.type == CoroutineStatement::RETURN) continue;
+            std::string awaiterName = "__awaiter_" + std::to_string(coroStmt.index);
+            structCode += "        bool " + awaiterName + " = false;\n";
+        }
+        structCode += "    } __constructed;\n";
 
         // Add storage for subexpression temporaries
         // Collect all unique temporaries from all coroutine statements
@@ -750,11 +760,6 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
     }
 
 bool CoroutineRewriter::VisitFunctionDecl(FunctionDecl *funcDecl) {
-        REWRITE_LOG() << "VISIT: " << funcDecl->getQualifiedNameAsString()
-                      << " hasBody=" << funcDecl->hasBody()
-                      << " isTmplInst=" << funcDecl->isTemplateInstantiation()
-                      << " describedTmpl=" << (funcDecl->getDescribedFunctionTemplate() != nullptr)
-                      << "\n";
         if (!funcDecl->hasBody()) {
             return true;
         }
@@ -967,10 +972,7 @@ void CoroutineRewriter::updateLambdaReturnType(const CoroutineInfo &coro) {
 
         // Check if lambda has an explicit trailing return type
         if (!coro.lambdaExpr->hasExplicitResultType()) {
-            unsigned diagID = diagnosticsEngine.getCustomDiagID(
-                clang::DiagnosticsEngine::Error,
-                "coroutine lambda must have an explicit trailing return type");
-            diagnosticsEngine.Report(coro.lambdaExpr->getBeginLoc(), diagID);
+            llvm::errs() << "error: coroutine lambda must have an explicit trailing return type\n";
             return;
         }
 
@@ -1028,6 +1030,15 @@ void CoroutineRewriter::updateLambdaReturnType(const CoroutineInfo &coro) {
     }
 
 void CoroutineRewriter::performRewrites() {
+        // Skip rewriting if there were compilation errors — the AST may be
+        // incomplete and we must not emit diagnostics via the DiagnosticsEngine
+        // because EndSourceFile() has already been called on the diagnostic
+        // consumer (TextDiagnosticPrinter) before EndSourceFileAction().
+        if (diagnosticsEngine.hasErrorOccurred()) {
+            llvm::errs() << "Skipping rewrite due to compilation errors\n";
+            return;
+        }
+
         for (auto &coro: coroutines) {
             if (coro.hasError) {
                 continue;
@@ -1098,12 +1109,10 @@ void CoroutineRewriter::rewriteCoroutineBody(CoroutineInfo &coro) {
 
             // Check if the body rewriter encountered an error (e.g., complex co_yield/co_await operand)
             if (coro.hasError) {
-                SourceLocation loc = coro.errorLoc.isValid() ? coro.errorLoc : coro.function->getLocation();
-                unsigned diagID = diagnosticsEngine.getCustomDiagID(
-                    clang::DiagnosticsEngine::Error,
-                    "coroutine contains co_yield/co_await with complex operand; "
-                    "only simple expressions (variables, literals, member access) are supported");
-                diagnosticsEngine.Report(loc, diagID);
+                llvm::errs() << "error: coroutine '"
+                             << coro.function->getQualifiedNameAsString()
+                             << "' contains co_yield/co_await with complex operand; "
+                                "only simple expressions (variables, literals, member access) are supported\n";
                 return;
             }
 
@@ -1416,7 +1425,7 @@ void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, Corouti
                 // Allocation and construction (pass coroutine args per C++ spec)
                 footerCode += "return GeneratorStateMachine::ramp(";
                 if (!paramList.empty()) {
-                    footerCode += ", " + paramList;
+                    footerCode += paramList;
                 }
                 footerCode += ");\n";
 
@@ -1477,7 +1486,14 @@ SourceLocation CoroutineRewriter::findInsertionPointAfterIncludes() {
 }
 
 std::string CoroutineRewriter::buildInstantiatedSignature(const FunctionDecl *funcDecl) {
-    std::string sig = "inline ";
+    // If this is a template specialization, use template<> explicit specialization syntax
+    bool isTemplateSpec = funcDecl->getTemplateSpecializationArgs() != nullptr;
+    std::string sig;
+    if (isTemplateSpec) {
+        sig = "template<>\ninline ";
+    } else {
+        sig = "inline ";
+    }
 
     // Return type
     QualType retType = funcDecl->getReturnType();
@@ -1494,8 +1510,22 @@ std::string CoroutineRewriter::buildInstantiatedSignature(const FunctionDecl *fu
         sig += methodDecl->getParent()->getQualifiedNameAsString() + "::";
     }
 
-    // Function name (without template args — this is a plain inline function)
+    // Function name
     sig += funcDecl->getNameAsString();
+
+    // Append explicit template args for template specializations (e.g., <int, double>)
+    if (isTemplateSpec) {
+        const auto *args = funcDecl->getTemplateSpecializationArgs();
+        sig += "<";
+        std::string argsStr;
+        llvm::raw_string_ostream rawOS(argsStr);
+        for (unsigned i = 0; i < args->size(); ++i) {
+            if (i > 0) rawOS << ", ";
+            args->get(i).print(policy, rawOS, /*IncludeType=*/false);
+        }
+        sig += argsStr;
+        sig += ">";
+    }
 
     // Parameters with resolved types
     sig += "(";
@@ -1548,7 +1578,8 @@ void CoroutineRewriter::rewriteSingleTemplateInstantiation(const TemplateInstant
     CoroutineInfo coro;
     coro.function = info.instantiatedDecl;
 
-    if (!collectLocalVariables(info.instantiatedDecl->getBody(), coro.localVariables)) {
+    if (!collectLocalVariables(info.instantiatedDecl->getBody(), coro.localVariables,
+                               /*useDiagEngine=*/false)) {
         REWRITE_LOG() << "  Skipping due to variable name collisions\n";
         return;
     }
@@ -1680,8 +1711,25 @@ void CoroutineRewriter::rewriteSingleTemplateInstantiation(const TemplateInstant
     REWRITE_LOG() << "  Generated inline function:\n";
     REWRITE_LOG() << "  Signature: " << signature << "\n";
 
-    // 4g. Insert at top of file (after includes)
-    SourceLocation insertLoc = findInsertionPointAfterIncludes();
+    // 4g. Choose insertion point
+    SourceLocation insertLoc;
+    if (const auto *methodDecl = dyn_cast<CXXMethodDecl>(info.instantiatedDecl)) {
+        const CXXRecordDecl *classDecl = methodDecl->getParent();
+        FileID classFileId = sourceManager.getFileID(classDecl->getLocation());
+        if (classFileId == sourceManager.getMainFileID()) {
+            // Class is in this file — insert after class definition end (past '};')
+            SourceLocation classEnd = classDecl->getSourceRange().getEnd();
+            insertLoc = Lexer::findLocationAfterToken(classEnd, tok::semi, sourceManager, langOptions, false);
+            if (insertLoc.isInvalid()) {
+                // Fallback: just past the '}'
+                insertLoc = Lexer::getLocForEndOfToken(classEnd, 0, sourceManager, langOptions);
+            }
+        } else {
+            insertLoc = findInsertionPointAfterIncludes();
+        }
+    } else {
+        insertLoc = findInsertionPointAfterIncludes();
+    }
 
     // Insert lambda functor structs before the function
     std::string lambdaStructs;

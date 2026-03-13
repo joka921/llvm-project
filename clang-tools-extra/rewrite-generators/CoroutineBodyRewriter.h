@@ -83,6 +83,7 @@ private:
     void collectScopeEndReplacements();
     void applyAllReplacements();
     void collectTemporariesFromExpression(const Expr *expr, CoroutineStatement &coroStmt);
+    bool isSimpleOperand(const Expr *expr);
     bool isPartOfDeclaration(const DeclRefExpr *declRef);
     bool isLambdaInit(const Expr *init);
     std::string rewriteVariableReferencesInText(const std::string &text, const std::string &varName);

@@ -325,15 +325,24 @@ bool CoroutineBodyRewriter::VisitYieldOrAwaitExpr(YieldOrAwaitExpr *coyield, Cor
             coroStmt.operandStart = coroStmt.operand->getBeginLoc();
             coroStmt.operandEnd = coroStmt.operand->getEndLoc();
 
-            // Collect subexpression temporaries (existing behavior)
-            collectTemporariesFromExpression(coyield->getOperand(), coroStmt);
-
-            // Add temporary variable names to alive variables
-            for (const auto &temp : coroStmt.temporaries) {
-                coroStmt.aliveVariables.push_back(temp.tempVarName);
-                REWRITE_LOG() << "      DEBUG: Temporary '" << temp.tempVarName
-                             << "' is alive at suspension point " << coroStmt.index << "\n";
+            if (!isSimpleOperand(coroStmt.operand)) {
+                // Complex operand — cannot safely analyze temporaries (especially in templates)
+                REWRITE_LOG() << "    ERROR: Complex co_yield/co_await operand — skipping coroutine\n";
+                coroutineInfo.hasError = true;
+                coroutineInfo.errorLoc = coroStmt.keywordLoc;
+                return true;
             }
+            // Simple operand — no temporaries possible, skip collectTemporariesFromExpression
+
+            // TODO: reinstate for non-template cases with complex operands
+            // collectTemporariesFromExpression(coyield->getOperand(), coroStmt);
+            //
+            // // Add temporary variable names to alive variables
+            // for (const auto &temp : coroStmt.temporaries) {
+            //     coroStmt.aliveVariables.push_back(temp.tempVarName);
+            //     REWRITE_LOG() << "      DEBUG: Temporary '" << temp.tempVarName
+            //                  << "' is alive at suspension point " << coroStmt.index << "\n";
+            // }
         }
 
         // Add the awaiter itself to alive variables (it's constructed at this suspension point)
@@ -1237,6 +1246,28 @@ std::string CoroutineBodyRewriter::processInitExpression(const Expr *init, const
             REWRITE_LOG() << "    DEBUG: Using rewriteExpression for other type\n";
             return rewriteExpressionExceptVar(init, currentVarName);
         }
+    }
+
+    // Check if an expression is "simple" — i.e., it cannot produce temporaries.
+    // Simple operands include variables, literals, `this`, and member access on simple bases.
+bool CoroutineBodyRewriter::isSimpleOperand(const Expr *expr) {
+        if (!expr) return true;
+        expr = unwrapExpr(expr);
+
+        if (isa<DeclRefExpr>(expr)) return true;
+        if (isa<IntegerLiteral>(expr)) return true;
+        if (isa<FloatingLiteral>(expr)) return true;
+        if (isa<StringLiteral>(expr)) return true;
+        if (isa<CharacterLiteral>(expr)) return true;
+        if (isa<CXXBoolLiteralExpr>(expr)) return true;
+        if (isa<CXXThisExpr>(expr)) return true;
+        if (isa<CXXNullPtrLiteralExpr>(expr)) return true;
+
+        if (const auto *memberExpr = dyn_cast<MemberExpr>(expr)) {
+            return isSimpleOperand(memberExpr->getBase());
+        }
+
+        return false;
     }
 
     // Collect all MaterializeTemporaryExpr nodes from an expression and create TemporaryInfo

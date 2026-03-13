@@ -87,6 +87,14 @@ struct LocalVariable {
     SourceLocation location;
     int priority; // Position in file for ordering by first appearance
 
+    // Dependent type support (for template coroutines)
+    bool isDependentType = false;
+    bool usesAutoDeduction = false;
+    const VarDecl *varDecl = nullptr; // Stored for decltype generation (AST lives through rewrite)
+
+    enum class AutoQualifier { None, Plain, LRef, RRef, ConstLRef };
+    AutoQualifier autoQualifier = AutoQualifier::None;
+
     bool operator<(const LocalVariable &other) const {
         // First compare by priority (file position), then by name for deterministic ordering
         if (priority != other.priority) {
@@ -105,6 +113,7 @@ struct CoroutineInfo {
     std::vector<FunctionParameter> parameters;
     SourceLocation insertionPoint;
     bool hasError = false;
+    SourceLocation errorLoc;  // Location of the construct that caused the error
 
     // Member function information
     bool isMemberFunction = false;

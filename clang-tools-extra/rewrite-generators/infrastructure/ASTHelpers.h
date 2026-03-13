@@ -105,22 +105,32 @@ inline std::pair<std::string, bool> getTypeForAutoRefRefVariable(const Expr* ini
     return {prefix + typeAsString(tp, astContext) + ">", isPrValue(initializer)};
 }
 
-/// Extracts the original argument from a coroutine suspend expression
+/// Extracts the original argument from a coroutine suspend expression.
+/// In a non-dependent context, the operand is `promise.yield_value(x)` — a CallExpr
+/// whose first argument is the user-written expression.
+/// In a dependent (template) context, the operand IS the user-written expression directly
+/// (e.g., just `a`), because the promise call can't be resolved yet.
 inline const Expr *getOriginalCoroutineExprArgument(const CoroutineSuspendExpr *expr) {
     if (!expr) return nullptr;
 
     const Expr *operand = expr->getOperand();
     if (!operand) return nullptr;
 
+    // In dependent context, the operand is the user-written expression directly
+    if (expr->getType()->isDependentType()) {
+        return operand->IgnoreImplicit();
+    }
+
     operand = operand->IgnoreImplicit();
 
-    // If it's a call (e.g., promise.yield_value(x)), extract the first argument
+    // Non-dependent: extract argument from promise.yield_value(x) / await_transform(x)
     if (const auto *call = dyn_cast<CallExpr>(operand)) {
         if (call->getNumArgs() > 0) {
             return call->getArg(0)->IgnoreImplicit();
         }
     }
-    llvm::errs() << "call to yield_value or similar is not a CallExpr";
+    llvm::errs() << "WARNING: call to yield_value or similar is not a CallExpr, "
+                 << "operand class: " << operand->getStmtClassName() << "\n";
     return operand;
 }
 

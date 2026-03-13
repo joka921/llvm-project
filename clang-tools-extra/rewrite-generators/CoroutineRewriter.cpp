@@ -8,6 +8,7 @@
 #include "infrastructure/ReplacementApplicator.h"
 #include "collectors/LocalVariableCollector.h"
 #include "codegen/MacroCodeGenerator.h"
+#include "infrastructure/DecltypeGenerator.h"
 #include "clang/Lex/Lexer.h"
 
 #include <sstream>
@@ -404,6 +405,14 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             structCode += "    // Local variables (including ranged-for loop variables)\n";
             std::set<SourceLocation> addedDeclLocations; // Track which declarations we've already added
 
+            // Set up decltype generator for dependent types in template coroutines
+            DecltypeExpressionGenerator decltypeGen(sourceManager, *astContext,
+                coro.parameters, coro.isMemberFunction);
+            std::set<std::string> declaredVarNames;
+            // Pre-populate with parameter names (available for decltype substitution)
+            for (const auto &param : coro.parameters)
+                declaredVarNames.insert(param.name);
+
             for (const auto &var: coro.localVariables) {
                 // Skip if we've already added this exact variable declaration
                 if (addedDeclLocations.count(var.location) > 0) {
@@ -422,16 +431,28 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
                 // For lambda variables, use the functor CLASS name as the _coro_storage type
                 // (distinct from the member name, which uses lowercase 'l')
-                std::string refType = var.referenceType;
                 auto lambdaIt = coro.lambdaVariableMapping.find(var.location);
                 if (lambdaIt != coro.lambdaVariableMapping.end()) {
-                    refType = lambdaIt->second.className + " &";
+                    std::string refType = lambdaIt->second.className + " &";
+                    structCode += "    _coro_storage<" + refType + ", " + (var.isOwning
+                                ? std::string{"true"}
+                                : std::string{"false"}) + "> " + memberName +
+                            ";\n";
+                } else if (var.isDependentType && var.usesAutoDeduction) {
+                    // Template coroutine with auto-deduced dependent type: use decltype
+                    auto dtResult = decltypeGen.generateForAutoVar(
+                        var.varDecl, var.autoQualifier, declaredVarNames);
+                    structCode += "    _coro_storage<" + dtResult.refTypeExpr + ", "
+                               + dtResult.isOwningExpr + "> " + memberName + ";\n";
+                } else {
+                    // Normal (non-dependent) code path
+                    structCode += "    _coro_storage<" + var.referenceType + ", " + (var.isOwning
+                                ? std::string{"true"}
+                                : std::string{"false"}) + "> " + memberName +
+                            ";\n";
                 }
 
-                structCode += "    _coro_storage<" + refType + ", " + (var.isOwning
-                            ? std::string{"true"}
-                            : std::string{"false"}) + "> " + memberName +
-                        ";\n";
+                declaredVarNames.insert(memberName);
 
                 REWRITE_LOG() << "    Added variable: " << memberName << " (original name: " << var.name
                              << ", location: " << var.location.printToString(sourceManager) << ")\n";
@@ -515,11 +536,30 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
             // Get awaiter type from the CoroutineSuspendExpr AST node
             if (auto *suspendExpr = dyn_cast<CoroutineSuspendExpr>(coroStmt.stmt)) {
-                QualType awaiterQualType = suspendExpr->getOpaqueValue()->getType();
-                QualType baseType = awaiterQualType.getNonReferenceType();
-                std::string awaiterTypeStr = typeAsString(baseType, *astContext);
-                structCode += "    _coro_storage<" + awaiterTypeStr + " &, true> " + awaiterName + ";\n";
-                REWRITE_LOG() << "    Added awaiter member: _coro_storage<" << awaiterTypeStr << " &, true> " << awaiterName << "\n";
+                if (suspendExpr->getType()->isDependentType()) {
+                    // In dependent (template) context, the awaiter type can't be resolved.
+                    // Use decltype on the promise's yield_value/await_transform call.
+                    std::string awaiterDecltype;
+                    if (coroStmt.type == CoroutineStatement::YIELD) {
+                        // co_yield expr -> promise.yield_value(expr)
+                        // The awaiter is the result of yield_value, use decltype
+                        awaiterDecltype = "decltype(std::declval<PromiseType&>().yield_value("
+                                        + getSourceText(suspendExpr->getOperand(), sourceManager) + "))";
+                    } else {
+                        // co_await expr -> promise.await_transform(expr) or expr directly
+                        awaiterDecltype = "decltype(std::declval<PromiseType&>().await_transform("
+                                        + getSourceText(suspendExpr->getOperand(), sourceManager) + "))";
+                    }
+                    structCode += "    _coro_storage<" + awaiterDecltype + " &, true> " + awaiterName + ";\n";
+                    REWRITE_LOG() << "    Added dependent awaiter member: _coro_storage<" << awaiterDecltype
+                                 << " &, true> " << awaiterName << "\n";
+                } else {
+                    QualType awaiterQualType = suspendExpr->getOpaqueValue()->getType();
+                    QualType baseType = awaiterQualType.getNonReferenceType();
+                    std::string awaiterTypeStr = typeAsString(baseType, *astContext);
+                    structCode += "    _coro_storage<" + awaiterTypeStr + " &, true> " + awaiterName + ";\n";
+                    REWRITE_LOG() << "    Added awaiter member: _coro_storage<" << awaiterTypeStr << " &, true> " << awaiterName << "\n";
+                }
             }
         }
 
@@ -554,11 +594,12 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             structCode += "    }\n";
         }
 
-        // Generate handleUnhandledException() — called from CoroImpl::doStep()'s outer catch
+        // Generate handleUnhandledException() — called from CoroImpl::doStep()'s outer catch.
+        // Must be in the derived class because CO_RETURN_IMPL_IMPL uses members of the derived class.
         structCode += "\n    void handleUnhandledException() {\n";
         structCode += "      destroyAllConstructed();\n";
         structCode += "      promise().unhandled_exception();\n";
-        structCode += "      CO_RETURN_IMPL_IMPL(__final_awaiter, 0);\n";
+        structCode += "      CO_RETURN_IMPL_IMPL(__final_awaiter);\n";
         structCode += "    }\n";
         REWRITE_LOG() << "    Added exception handling infrastructure\n";
 
@@ -1021,6 +1062,17 @@ void CoroutineRewriter::rewriteCoroutineBody(CoroutineInfo &coro) {
             CoroutineBodyRewriter initialRewriter(coro.localVariables, rewriter, sourceManager,
                                                   coro, *astContext, coro.isMemberFunction, classRecord);
             initialRewriter.TraverseStmt(const_cast<Stmt *>(bodyStmt));
+
+            // Check if the body rewriter encountered an error (e.g., complex co_yield/co_await operand)
+            if (coro.hasError) {
+                SourceLocation loc = coro.errorLoc.isValid() ? coro.errorLoc : coro.function->getLocation();
+                unsigned diagID = diagnosticsEngine.getCustomDiagID(
+                    clang::DiagnosticsEngine::Error,
+                    "coroutine contains co_yield/co_await with complex operand; "
+                    "only simple expressions (variables, literals, member access) are supported");
+                diagnosticsEngine.Report(loc, diagID);
+                return;
+            }
 
             // Get the ranged-for loops and add them to the coroutine info for struct generation
             const auto &rangedForLoops = initialRewriter.getRangedForLoops();

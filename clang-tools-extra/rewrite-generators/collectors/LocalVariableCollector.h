@@ -123,6 +123,28 @@ public:
                     var.location = varDecl->getLocation();
                     var.priority = sourceManager.getFileOffset(var.location); // Use file offset as priority
 
+                    // Detect dependent types (template coroutines)
+                    QualType declType = varDecl->getType();
+                    if (declType->isDependentType()) {
+                        var.isDependentType = true;
+                        var.varDecl = varDecl;
+
+                        if (declType.getTypePtr()->getContainedAutoType()) {
+                            var.usesAutoDeduction = true;
+
+                            if (declType->isRValueReferenceType()) {
+                                var.autoQualifier = LocalVariable::AutoQualifier::RRef;
+                            } else if (declType->isLValueReferenceType()) {
+                                bool isConst = declType.getNonReferenceType().isConstQualified();
+                                var.autoQualifier = isConst
+                                    ? LocalVariable::AutoQualifier::ConstLRef
+                                    : LocalVariable::AutoQualifier::LRef;
+                            } else {
+                                var.autoQualifier = LocalVariable::AutoQualifier::Plain;
+                            }
+                        }
+                    }
+
                     if (!var.name.empty()) {
                         // Track variable name for collision detection
                         variableNameLocations[var.name].push_back(var.location);

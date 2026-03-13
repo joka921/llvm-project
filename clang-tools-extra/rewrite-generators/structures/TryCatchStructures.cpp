@@ -73,22 +73,26 @@ TryCatchBlock::generateReplacements(
                 << insertRange.printToString(sourceManager) << " (priority " << priority << ")\n";
     }
 
-    // Part 3: Before closing '}' of try body, insert } catch (...) { cleanup; throw; }
+    // Part 3: At closing '}' of try body, insert the inner catch clause.
+    // The scope-end system replaces the original '}' with "destructors; }".
+    // That '}' closes the inner try (opened in Part 2). We append:
+    //   " catch (...) { cleanup; throw; }" (inner catch, attaches to inner try's })
+    //   "}" (closes the outer try body, replacing the original brace)
     if (tryBlockEnd.isValid()) {
-        SourceRange beforeClose(tryBlockEnd, tryBlockEnd);
+        SourceRange atClose(tryBlockEnd, tryBlockEnd);
 
-        std::string cleanup = "\n} catch (...) {\n";
+        std::string cleanup = " catch (...) {\n";
         // Destroy variables in reverse declaration order
         for (auto it = variablesInTryBlock.rbegin(); it != variablesInTryBlock.rend(); ++it) {
             cleanup += "  DESTROY_IF_CONSTRUCTED(" + *it + ");\n";
         }
-        cleanup += "  throw;\n}\n";
+        cleanup += "  throw;\n}\n}\n";
 
         int priority = 20000 + static_cast<int>(index) + 2;
-        replacements.emplace_back(beforeClose, cleanup, priority, false);
+        replacements.emplace_back(atClose, cleanup, priority, false);
 
         REWRITE_LOG() << "        Added inner catch cleanup at "
-                << beforeClose.printToString(sourceManager) << " (priority " << priority << ")\n";
+                << atClose.printToString(sourceManager) << " (priority " << priority << ")\n";
     }
 
     REWRITE_LOG() << "=== END COLLECTING TRY-CATCH REPLACEMENTS ===\n\n";

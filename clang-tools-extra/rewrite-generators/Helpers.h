@@ -92,16 +92,21 @@ const Expr *getOriginalCoroutineExprArgument(const CoroutineSuspendExpr *expr) {
     const Expr *operand = expr->getOperand();
     if (!operand) return nullptr;
 
+    // In dependent context, the operand is the user-written expression directly
+    if (expr->getType()->isDependentType()) {
+        return operand->IgnoreImplicit();
+    }
+
     operand = operand->IgnoreImplicit();
 
-    // If it's a call (e.g., promise.yield_value(x)), extract the first argument
+    // Non-dependent: extract argument from promise.yield_value(x) / await_transform(x)
     if (const auto *call = dyn_cast<CallExpr>(operand)) {
         if (call->getNumArgs() > 0) {
             return call->getArg(0)->IgnoreImplicit();
         }
-    } else {
     }
-    llvm::errs() << "call to yield_value or similar is not a CallExpr";
+    llvm::errs() << "WARNING: call to yield_value or similar is not a CallExpr, "
+                 << "operand class: " << operand->getStmtClassName() << "\n";
     return operand;
 }
 

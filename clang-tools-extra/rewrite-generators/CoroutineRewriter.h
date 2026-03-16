@@ -16,6 +16,8 @@
 
 #include "Common.h"
 #include "structures/CoroutineStructures.h"
+#include <map>
+#include <set>
 #include <vector>
 
 using namespace clang;
@@ -37,6 +39,7 @@ private:
     ASTContext *astContext;
     std::vector<CoroutineInfo> coroutines;
     std::vector<TemplateInstantiationInfo> templateInstantiations;
+    std::set<const FunctionTemplateDecl *> templateCoroutineDefinitions;
 
     // Private helper methods
     bool containsCoroutineKeywords(const Stmt *stmt);
@@ -58,9 +61,14 @@ private:
 
     // Template instantiation rewriting
     void rewriteTemplateInstantiations();
-    void rewriteSingleTemplateInstantiation(const TemplateInstantiationInfo &info);
+    void rewriteSingleTemplateInstantiation(const TemplateInstantiationInfo &info,
+                                            std::string &outputText);
     std::string buildInstantiatedSignature(const FunctionDecl *funcDecl);
     SourceLocation findInsertionPointAfterIncludes();
+
+    // #ifdef / #ifndef guards for template coroutines
+    void wrapTemplateDefinitionsWithIfndef();
+    std::string buildTemplateForwardDeclaration(const FunctionTemplateDecl *tmplDecl);
 
 public:
     CoroutineRewriter(Rewriter &rewr, const SourceManager &SM,

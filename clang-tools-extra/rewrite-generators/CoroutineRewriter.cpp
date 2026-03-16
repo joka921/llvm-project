@@ -773,6 +773,10 @@ bool CoroutineRewriter::VisitFunctionDecl(FunctionDecl *funcDecl) {
         if (funcDecl->getDescribedFunctionTemplate()) {
             REWRITE_LOG() << "Skipping template definition: "
                           << funcDecl->getQualifiedNameAsString() << "\n";
+            // Track it for #ifndef wrapping if it's a coroutine
+            if (containsCoroutineKeywords(funcDecl->getBody())) {
+                templateCoroutineDefinitions.insert(funcDecl->getDescribedFunctionTemplate());
+            }
             return true;
         }
 
@@ -1078,8 +1082,11 @@ void CoroutineRewriter::performRewrites() {
             }
         }
 
-        // Rewrite template instantiations
+        // Rewrite template instantiations (wrapped in #ifdef)
         rewriteTemplateInstantiations();
+
+        // Wrap original template coroutine definitions in #ifndef
+        wrapTemplateDefinitionsWithIfndef();
     }
 
 void CoroutineRewriter::rewriteCoroutineBody(CoroutineInfo &coro) {
@@ -1549,14 +1556,62 @@ void CoroutineRewriter::rewriteTemplateInstantiations() {
     REWRITE_LOG() << "\n=== REWRITING TEMPLATE INSTANTIATIONS ===\n";
     REWRITE_LOG() << "Found " << templateInstantiations.size() << " template instantiation(s)\n";
 
+    // Group instantiations by their template declaration
+    std::map<const FunctionTemplateDecl*, std::vector<const TemplateInstantiationInfo*>> groups;
     for (const auto &info : templateInstantiations) {
-        rewriteSingleTemplateInstantiation(info);
+        groups[info.templateDecl].push_back(&info);
+    }
+
+    for (const auto &[tmplDecl, infos] : groups) {
+        std::string groupText;
+
+        // Build all instantiation text for this template group
+        for (const auto *info : infos) {
+            rewriteSingleTemplateInstantiation(*info, groupText);
+        }
+
+        if (groupText.empty()) continue;
+
+        // Determine insertion point (same logic as before, use first instantiation)
+        SourceLocation insertLoc;
+        if (const auto *methodDecl = dyn_cast<CXXMethodDecl>(infos[0]->instantiatedDecl)) {
+            const CXXRecordDecl *classDecl = methodDecl->getParent();
+            FileID classFileId = sourceManager.getFileID(classDecl->getLocation());
+            if (classFileId == sourceManager.getMainFileID()) {
+                SourceLocation classEnd = classDecl->getSourceRange().getEnd();
+                insertLoc = Lexer::findLocationAfterToken(classEnd, tok::semi, sourceManager, langOptions, false);
+                if (insertLoc.isInvalid()) {
+                    insertLoc = Lexer::getLocForEndOfToken(classEnd, 0, sourceManager, langOptions);
+                }
+            } else {
+                insertLoc = findInsertionPointAfterIncludes();
+            }
+        } else {
+            insertLoc = findInsertionPointAfterIncludes();
+        }
+
+        // Build forward declaration for nonmember templates
+        std::string forwardDecl;
+        if (!isa<CXXMethodDecl>(infos[0]->instantiatedDecl)) {
+            forwardDecl = buildTemplateForwardDeclaration(tmplDecl);
+        }
+
+        // Wrap everything in #ifdef
+        std::string wrappedText = "\n#ifdef COROUTINES_REWRITTEN_TO_STATEMACHINES\n";
+        if (!forwardDecl.empty()) {
+            wrappedText += forwardDecl + "\n";
+        }
+        wrappedText += groupText;
+        wrappedText += "#endif // COROUTINES_REWRITTEN_TO_STATEMACHINES\n";
+
+        rewriter.InsertTextBefore(insertLoc, wrappedText);
     }
 
     REWRITE_LOG() << "=== END TEMPLATE INSTANTIATIONS ===\n\n";
 }
 
-void CoroutineRewriter::rewriteSingleTemplateInstantiation(const TemplateInstantiationInfo &info) {
+void CoroutineRewriter::rewriteSingleTemplateInstantiation(const TemplateInstantiationInfo &info,
+                                                           std::string &outputText) {
     REWRITE_LOG() << "\n--- Rewriting template instantiation: "
                   << info.instantiatedDecl->getQualifiedNameAsString() << " ---\n";
 
@@ -1711,41 +1766,107 @@ void CoroutineRewriter::rewriteSingleTemplateInstantiation(const TemplateInstant
     REWRITE_LOG() << "  Generated inline function:\n";
     REWRITE_LOG() << "  Signature: " << signature << "\n";
 
-    // 4g. Choose insertion point
-    SourceLocation insertLoc;
-    if (const auto *methodDecl = dyn_cast<CXXMethodDecl>(info.instantiatedDecl)) {
-        const CXXRecordDecl *classDecl = methodDecl->getParent();
-        FileID classFileId = sourceManager.getFileID(classDecl->getLocation());
-        if (classFileId == sourceManager.getMainFileID()) {
-            // Class is in this file — insert after class definition end (past '};')
-            SourceLocation classEnd = classDecl->getSourceRange().getEnd();
-            insertLoc = Lexer::findLocationAfterToken(classEnd, tok::semi, sourceManager, langOptions, false);
-            if (insertLoc.isInvalid()) {
-                // Fallback: just past the '}'
-                insertLoc = Lexer::getLocForEndOfToken(classEnd, 0, sourceManager, langOptions);
-            }
-        } else {
-            insertLoc = findInsertionPointAfterIncludes();
-        }
-    } else {
-        insertLoc = findInsertionPointAfterIncludes();
-    }
-
-    // Insert lambda functor structs before the function
-    std::string lambdaStructs;
+    // Append lambda functor structs before the function
     if (!coro.lambdasInBody.empty()) {
         std::set<std::string> insertedLambdaClasses;
         for (const auto &lambda : coro.lambdasInBody) {
             if (insertedLambdaClasses.insert(lambda.className).second) {
-                lambdaStructs += lambda.classDefinition + ";\n\n";
+                outputText += lambda.classDefinition + ";\n\n";
             }
         }
     }
 
-    rewriter.InsertTextBefore(insertLoc, "\n" + lambdaStructs + fullFunction + "\n");
-
-    REWRITE_LOG() << "  Inserted inline function after includes\n";
+    outputText += fullFunction + "\n\n";
     REWRITE_LOG() << "--- End template instantiation: "
                   << info.instantiatedDecl->getQualifiedNameAsString() << " ---\n";
+}
+
+// ============================================================
+// #ifdef / #ifndef guards for template coroutines
+// ============================================================
+
+void CoroutineRewriter::wrapTemplateDefinitionsWithIfndef() {
+    if (templateCoroutineDefinitions.empty()) return;
+
+    REWRITE_LOG() << "\n=== WRAPPING TEMPLATE DEFINITIONS WITH #ifndef ===\n";
+
+    for (const FunctionTemplateDecl *tmplDecl : templateCoroutineDefinitions) {
+        SourceRange range = tmplDecl->getSourceRange();
+
+        // Insert #ifndef before the template declaration
+        rewriter.InsertTextBefore(range.getBegin(),
+            "#ifndef COROUTINES_REWRITTEN_TO_STATEMACHINES\n");
+
+        // Insert #endif after the template definition (after the closing '}')
+        rewriter.InsertTextAfterToken(range.getEnd(),
+            "\n#endif // !COROUTINES_REWRITTEN_TO_STATEMACHINES\n");
+
+        REWRITE_LOG() << "  Wrapped template: "
+                      << tmplDecl->getNameAsString() << "\n";
+    }
+
+    REWRITE_LOG() << "=== END TEMPLATE DEFINITION WRAPPING ===\n\n";
+}
+
+std::string CoroutineRewriter::buildTemplateForwardDeclaration(const FunctionTemplateDecl *tmplDecl) {
+    const FunctionDecl *patternDecl = tmplDecl->getTemplatedDecl();
+    if (!patternDecl) return "";
+
+    std::string result;
+
+    // Template parameter list: "template <typename T, typename U>"
+    result += "template <";
+    const TemplateParameterList *params = tmplDecl->getTemplateParameters();
+    for (unsigned i = 0; i < params->size(); ++i) {
+        if (i > 0) result += ", ";
+        const NamedDecl *param = params->getParam(i);
+        if (const auto *typeParam = dyn_cast<TemplateTypeParmDecl>(param)) {
+            result += (typeParam->wasDeclaredWithTypename() ? "typename " : "class ");
+            result += typeParam->getNameAsString();
+        } else if (const auto *nonTypeParam = dyn_cast<NonTypeTemplateParmDecl>(param)) {
+            PrintingPolicy policy(astContext->getLangOpts());
+            result += nonTypeParam->getType().getAsString(policy);
+            result += " ";
+            result += nonTypeParam->getNameAsString();
+        }
+    }
+    result += ">\n";
+
+    // Return type — use the modified return type (with Handle) from any instantiation
+    // Find an instantiation of this template to get the resolved return type
+    PrintingPolicy canonPolicy(astContext->getLangOpts());
+    canonPolicy.SuppressScope = false;
+    canonPolicy.PrintCanonicalTypes = true;
+
+    std::string returnType;
+    for (const auto &info : templateInstantiations) {
+        if (info.templateDecl == tmplDecl) {
+            QualType retType = info.instantiatedDecl->getReturnType().getCanonicalType();
+            returnType = replaceLastTemplateArgWithHandle(retType.getAsString(canonPolicy));
+            break;
+        }
+    }
+
+    if (returnType.empty()) {
+        // Fallback: use pattern decl's return type as-is
+        returnType = patternDecl->getReturnType().getAsString(canonPolicy);
+    }
+
+    result += "inline " + returnType + " " + patternDecl->getNameAsString() + "(";
+
+    // Parameters from pattern decl — use non-canonical policy to preserve names like T
+    PrintingPolicy paramPolicy(astContext->getLangOpts());
+    paramPolicy.SuppressScope = false;
+    for (unsigned i = 0; i < patternDecl->getNumParams(); ++i) {
+        if (i > 0) result += ", ";
+        const ParmVarDecl *param = patternDecl->getParamDecl(i);
+        result += param->getType().getAsString(paramPolicy);
+        if (!param->getNameAsString().empty()) {
+            result += " " + param->getNameAsString();
+        }
+    }
+
+    result += ");\n";
+    return result;
 }
 

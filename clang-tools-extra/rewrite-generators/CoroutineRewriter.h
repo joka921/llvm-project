@@ -41,6 +41,29 @@ private:
     std::vector<TemplateInstantiationInfo> templateInstantiations;
     std::set<const FunctionTemplateDecl *> templateCoroutineDefinitions;
 
+    // Lambda coroutines queued for extraction (non-generic)
+    std::vector<CoroutineInfo> lambdaCoroutines;
+
+    // Generic lambda coroutines — maps lambda closure type to extraction info
+    struct GenericLambdaInfo {
+        const LambdaExpr *lambdaExpr;
+        std::string extractedName;
+        bool isFileScopeLambda;
+        const FunctionDecl *enclosingFunction;
+        std::vector<TemplateInstantiationInfo> instantiations;
+    };
+    std::vector<GenericLambdaInfo> genericLambdaCoroutines;
+
+    // Unmatched generic lambda instantiations (collected during VisitFunctionDecl,
+    // matched to GenericLambdaInfo entries during extractGenericLambdaCoroutines)
+    struct UnmatchedLambdaInstantiation {
+        const FunctionDecl *instantiatedDecl;
+        const FunctionDecl *patternDecl;
+        const FunctionTemplateDecl *templateDecl;
+        const CXXRecordDecl *closureType;
+    };
+    std::vector<UnmatchedLambdaInstantiation> unmatchedLambdaInstantiations;
+
     // Private helper methods
     bool containsCoroutineKeywords(const Stmt *stmt);
     bool containsTryCatchBlocks(const Stmt *stmt);
@@ -69,6 +92,19 @@ private:
     // #ifdef / #ifndef guards for template coroutines
     void wrapTemplateDefinitionsWithIfndef();
     std::string buildTemplateForwardDeclaration(const FunctionTemplateDecl *tmplDecl);
+
+    // Lambda coroutine extraction
+    void extractLambdaCoroutines();
+    void extractSingleLambdaCoroutine(CoroutineInfo &coro);
+    void extractGenericLambdaCoroutines();
+    void extractSingleGenericLambda(GenericLambdaInfo &info);
+    std::string generateLambdaFunctionName(const LambdaExpr *lambda);
+    std::string buildLambdaFunctionSignature(const CoroutineInfo &coro);
+    std::string buildGenericLambdaStructDeclaration(const GenericLambdaInfo &info);
+    std::string buildGenericLambdaSpecializationSignature(const FunctionDecl *funcDecl,
+                                                          const std::string &structName);
+    bool isFileScopeLambda(const LambdaExpr *lambda);
+    const FunctionDecl *findEnclosingFunction(const LambdaExpr *lambda);
 
 public:
     CoroutineRewriter(Rewriter &rewr, const SourceManager &SM,

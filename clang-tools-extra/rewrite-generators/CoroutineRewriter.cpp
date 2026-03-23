@@ -24,6 +24,7 @@ bool CoroutineRewriter::containsCoroutineKeywords(const Stmt *stmt) {
 
         for (auto it = stmt->child_begin(); it != stmt->child_end(); ++it) {
             if (const Stmt *child = *it) {
+                if (isa<LambdaExpr>(child)) continue;  // Lambda bodies belong to the lambda, not the enclosing function
                 if (containsCoroutineKeywords(child)) {
                     return true;
                 }
@@ -41,6 +42,7 @@ bool CoroutineRewriter::containsTryCatchBlocks(const Stmt *stmt) {
 
         for (auto it = stmt->child_begin(); it != stmt->child_end(); ++it) {
             if (const Stmt *child = *it) {
+                if (isa<LambdaExpr>(child)) continue;  // Don't recurse into lambda bodies
                 if (containsTryCatchBlocks(child)) {
                     return true;
                 }
@@ -781,9 +783,25 @@ bool CoroutineRewriter::VisitFunctionDecl(FunctionDecl *funcDecl) {
         }
 
         // Detect implicit template instantiations of coroutines
+        REWRITE_LOG() << "DEBUG VisitFunctionDecl: " << funcDecl->getQualifiedNameAsString()
+                      << " isTemplateInst=" << funcDecl->isTemplateInstantiation()
+                      << " TSK=" << funcDecl->getTemplateSpecializationKind()
+                      << " hasBody=" << funcDecl->hasBody() << "\n";
         if (funcDecl->isTemplateInstantiation() &&
             funcDecl->getTemplateSpecializationKind() == TSK_ImplicitInstantiation) {
             if (containsCoroutineKeywords(funcDecl->getBody())) {
+                // Check if this is a generic lambda closure type's operator()
+                const CXXRecordDecl *parent = dyn_cast_or_null<CXXRecordDecl>(funcDecl->getParent());
+                if (parent && parent->isLambda()) {
+                    // Collect as unmatched — will be matched to GenericLambdaInfo in extractGenericLambdaCoroutines
+                    const FunctionDecl *pattern = funcDecl->getTemplateInstantiationPattern();
+                    const FunctionTemplateDecl *tmplDecl = pattern ? pattern->getDescribedFunctionTemplate() : nullptr;
+                    unmatchedLambdaInstantiations.push_back({funcDecl, pattern, tmplDecl, parent});
+                    REWRITE_LOG() << "Found generic lambda coroutine instantiation: "
+                                  << funcDecl->getQualifiedNameAsString() << "\n";
+                    return true;
+                }
+
                 const FunctionDecl *pattern = funcDecl->getTemplateInstantiationPattern();
                 if (pattern) {
                     const FunctionTemplateDecl *tmplDecl = pattern->getDescribedFunctionTemplate();
@@ -879,45 +897,49 @@ bool CoroutineRewriter::VisitLambdaExpr(LambdaExpr *lambdaExpr) {
                 return true; // Skip this lambda coroutine
             }
 
-            CoroutineInfo coro;
-            coro.function = callOperator;
-            coro.isLambda = true;
-            coro.lambdaExpr = lambdaExpr;
+            // Generate the extracted function name from lambda location
+            std::string name = generateLambdaFunctionName(lambdaExpr);
+            bool fileScopeFlag = isFileScopeLambda(lambdaExpr);
+            const FunctionDecl *enclosing = findEnclosingFunction(lambdaExpr);
 
-            REWRITE_LOG() << "Processing lambda coroutine\n";
+            REWRITE_LOG() << "Processing lambda coroutine: " << name
+                          << (fileScopeFlag ? " (file-scope)" : " (function-scope)") << "\n";
 
-            // Check for variable name collisions - skip rewriting if found
-            if (!collectLocalVariables(callOperator->getBody(), coro.localVariables)) {
-                REWRITE_LOG() << "Skipping lambda coroutine due to variable name collisions\n";
-                return true; // Skip this lambda coroutine
+            if (lambdaExpr->isGenericLambda()) {
+                // Generic lambda — collect basic info, instantiations come from VisitFunctionDecl
+                GenericLambdaInfo info;
+                info.lambdaExpr = lambdaExpr;
+                info.extractedName = name;
+                info.isFileScopeLambda = fileScopeFlag;
+                info.enclosingFunction = enclosing;
+                genericLambdaCoroutines.push_back(info);
+
+                REWRITE_LOG() << "  Queued generic lambda for extraction: " << name << "\n";
+            } else {
+                // Non-generic lambda — build CoroutineInfo and queue for extraction
+                CoroutineInfo coro;
+                coro.function = callOperator;
+                coro.isLambda = true;
+                coro.lambdaExpr = lambdaExpr;
+                coro.extractedName = name;
+                coro.isFileScopeLambda = fileScopeFlag;
+                coro.isGenericLambda = false;
+                coro.enclosingFunction = enclosing;
+
+                // Check for variable name collisions - skip rewriting if found
+                if (!collectLocalVariables(callOperator->getBody(), coro.localVariables)) {
+                    REWRITE_LOG() << "Skipping lambda coroutine due to variable name collisions\n";
+                    return true;
+                }
+
+                // Collect lambda parameters
+                collectFunctionParameters(callOperator, coro.parameters);
+
+                lambdaCoroutines.push_back(coro);
+
+                REWRITE_LOG() << "  Queued non-generic lambda for extraction: " << name << "\n";
+                REWRITE_LOG() << "  Found " << coro.localVariables.size() << " local variables in lambda\n";
             }
-
-            // Collect lambda parameters - they need to be added to the impl struct
-            collectFunctionParameters(callOperator, coro.parameters);
-
-            // Lambda coroutines are not member functions of classes in the traditional sense
-            // collectMemberFunctionInfo is not needed for lambdas
-
-            coro.insertionPoint = findStructInsertionPoint(callOperator);
-            if (coro.insertionPoint.isInvalid()) {
-                unsigned diagID = diagnosticsEngine.getCustomDiagID(
-                    clang::DiagnosticsEngine::Warning,
-                    "Could not find insertion point for lambda _detail_coro_impl struct");
-                diagnosticsEngine.Report(lambdaExpr->getBeginLoc(), diagID);
-                coro.hasError = true;
-
-                // Output the struct code to console as fallback
-                std::string structCode = generateCoroImplStruct(coro);
-                REWRITE_LOG() << "WARNING: Could not insert lambda struct, here's what would have been inserted:\n";
-                REWRITE_LOG() << "========== STRUCT CODE ==========\n";
-                REWRITE_LOG() << structCode;
-                REWRITE_LOG() << "==================================\n";
-            }
-
-            coroutines.push_back(coro);
-
-            REWRITE_LOG() << "  Found " << coro.localVariables.size() << " local variables in lambda\n";
-            REWRITE_LOG() << "  Type: Lambda coroutine\n";
         }
 
         return true;
@@ -1087,6 +1109,12 @@ void CoroutineRewriter::performRewrites() {
 
         // Wrap original template coroutine definitions in #ifndef
         wrapTemplateDefinitionsWithIfndef();
+
+        // Extract lambda coroutines as free functions
+        extractLambdaCoroutines();
+
+        // Extract generic lambda coroutines as structs + specializations
+        extractGenericLambdaCoroutines();
     }
 
 void CoroutineRewriter::rewriteCoroutineBody(CoroutineInfo &coro) {
@@ -1868,5 +1896,620 @@ std::string CoroutineRewriter::buildTemplateForwardDeclaration(const FunctionTem
 
     result += ");\n";
     return result;
+}
+
+// ============================================================
+// Lambda coroutine extraction
+// ============================================================
+
+std::string CoroutineRewriter::generateLambdaFunctionName(const LambdaExpr *lambda) {
+    SourceLocation loc = lambda->getBeginLoc();
+    unsigned line = sourceManager.getSpellingLineNumber(loc);
+    unsigned col = sourceManager.getSpellingColumnNumber(loc);
+    return "__lambda_coro_L" + std::to_string(line) + "_C" + std::to_string(col);
+}
+
+bool CoroutineRewriter::isFileScopeLambda(const LambdaExpr *lambda) {
+    const DeclContext *ctx = lambda->getCallOperator()->getParent()->getDeclContext();
+    while (ctx) {
+        if (isa<TranslationUnitDecl>(ctx) || isa<NamespaceDecl>(ctx))
+            return true;
+        if (isa<FunctionDecl>(ctx))
+            return false;
+        ctx = ctx->getParent();
+    }
+    return true; // fallback: treat as file scope
+}
+
+const FunctionDecl *CoroutineRewriter::findEnclosingFunction(const LambdaExpr *lambda) {
+    const DeclContext *ctx = lambda->getCallOperator()->getParent()->getDeclContext();
+    while (ctx) {
+        if (const auto *funcDecl = dyn_cast<FunctionDecl>(ctx))
+            return funcDecl;
+        ctx = ctx->getParent();
+    }
+    return nullptr;
+}
+
+std::string CoroutineRewriter::buildLambdaFunctionSignature(const CoroutineInfo &coro) {
+    std::string sig = "inline ";
+
+    // Return type from the call operator
+    QualType retType = coro.function->getReturnType();
+    QualType canonicalType = retType.getCanonicalType();
+    PrintingPolicy policy(astContext->getLangOpts());
+    policy.SuppressScope = false;
+    policy.PrintCanonicalTypes = true;
+    std::string returnType = canonicalType.getAsString(policy);
+    std::string modifiedReturnType = replaceLastTemplateArgWithHandle(returnType);
+    sig += modifiedReturnType + " ";
+
+    // Function name
+    sig += coro.extractedName;
+
+    // Parameters from the call operator
+    sig += "(";
+    for (unsigned i = 0; i < coro.function->getNumParams(); ++i) {
+        if (i > 0) sig += ", ";
+        const ParmVarDecl *param = coro.function->getParamDecl(i);
+        std::string paramType = param->getType().getAsString(policy);
+        sig += paramType;
+        if (!param->getNameAsString().empty()) {
+            sig += " " + param->getNameAsString();
+        }
+    }
+    sig += ")";
+
+    return sig;
+}
+
+void CoroutineRewriter::extractLambdaCoroutines() {
+    if (lambdaCoroutines.empty()) return;
+
+    REWRITE_LOG() << "\n=== EXTRACTING LAMBDA COROUTINES ===\n";
+    REWRITE_LOG() << "Found " << lambdaCoroutines.size() << " lambda coroutine(s)\n";
+
+    for (auto &coro : lambdaCoroutines) {
+        extractSingleLambdaCoroutine(coro);
+    }
+
+    REWRITE_LOG() << "=== END LAMBDA COROUTINE EXTRACTION ===\n\n";
+}
+
+void CoroutineRewriter::extractSingleLambdaCoroutine(CoroutineInfo &coro) {
+    REWRITE_LOG() << "\n--- Extracting lambda coroutine: " << coro.extractedName << " ---\n";
+
+    const FunctionDecl *callOperator = coro.function;
+
+    // Extract the lambda body source text
+    const Stmt *bodyStmt = callOperator->getBody();
+    if (!bodyStmt) {
+        REWRITE_LOG() << "  ERROR: Lambda call operator has no body\n";
+        return;
+    }
+
+    // Handle CoroutineBodyStmt wrapper
+    if (auto *coroBody = dyn_cast<CoroutineBodyStmt>(bodyStmt)) {
+        bodyStmt = coroBody->getBody();
+    }
+    if (!bodyStmt) return;
+
+    // Get the source text of the lambda body (including braces)
+    CharSourceRange charRange = CharSourceRange::getTokenRange(bodyStmt->getSourceRange());
+    std::string bodySource = Lexer::getSourceText(charRange, sourceManager, langOptions).str();
+    unsigned baseFileOffset = sourceManager.getFileOffset(bodyStmt->getSourceRange().getBegin());
+
+    REWRITE_LOG() << "  Body source length: " << bodySource.size() << " bytes\n";
+
+    if (bodySource.empty()) {
+        REWRITE_LOG() << "  ERROR: Could not extract lambda body source text\n";
+        return;
+    }
+
+    // Two-pass body rewriting in collect-only mode (same as rewriteSingleTemplateInstantiation)
+    const CXXRecordDecl *classRecord = nullptr; // Lambdas are not member functions
+
+    // Pass 1: collect ranged-for, try-catch, coroutine statements, lambdas
+    CoroutineBodyRewriter initialRewriter(coro.localVariables, rewriter, sourceManager,
+                                          coro, *astContext, false, classRecord);
+    initialRewriter.TraverseStmt(const_cast<Stmt *>(bodyStmt));
+
+    if (coro.hasError) {
+        REWRITE_LOG() << "  Lambda coroutine has errors, skipping\n";
+        return;
+    }
+
+    // Transfer ranged-for loops, try-catch blocks, coroutine statements
+    coro.rangedForLoops = initialRewriter.getRangedForLoops();
+    coro.tryCatchBlocks = initialRewriter.getTryCatchBlocks();
+    coro.coroutineStatements = initialRewriter.getCoroutineStatements();
+
+    // Build lambda-variable mapping
+    const auto &initialLambdas = initialRewriter.getCollectedLambdas();
+    for (const auto &lambda : initialLambdas) {
+        if (lambda.varDeclLocation.isValid()) {
+            coro.lambdaVariableMapping[lambda.varDeclLocation] = lambda;
+        }
+    }
+
+    // Add ranged-for variables (same as rewriteSingleTemplateInstantiation)
+    for (const auto &rangedFor : coro.rangedForLoops) {
+        LocalVariable loopVar;
+        loopVar.name = rangedFor.loopVarName;
+        loopVar.type = rangedFor.loopVarType;
+        loopVar.isReference = (loopVar.type.find("&") != std::string::npos);
+        loopVar.referenceType = loopVar.type;
+        loopVar.isOwning = !loopVar.isReference;
+        loopVar.location = rangedFor.fullRange.getBegin();
+        loopVar.priority = sourceManager.getFileOffset(loopVar.location);
+        coro.localVariables.insert(loopVar);
+
+        LocalVariable rangeVar;
+        rangeVar.name = rangedFor.rangeVarName;
+        std::tie(rangeVar.type, rangeVar.isOwning) =
+                getTypeForAutoRefRefVariable(rangedFor.rangeExpr, *astContext);
+        rangeVar.referenceType = rangeVar.type + " &";
+        rangeVar.isReference = false;
+        rangeVar.location = rangedFor.fullRange.getBegin();
+        rangeVar.priority = sourceManager.getFileOffset(rangeVar.location) + 1;
+        coro.localVariables.insert(rangeVar);
+
+        auto addBeginAndEndVar = [&](const std::string &beginOrEnd, const std::string &name, int priority) {
+            LocalVariable beginVar;
+            beginVar.name = name;
+            beginVar.type = "std::decay_t<decltype(std::declval<" + rangeVar.referenceType + ">()." + beginOrEnd + "())>";
+            beginVar.isOwning = true;
+            beginVar.referenceType = beginVar.type + " &";
+            beginVar.isReference = false;
+            beginVar.location = rangedFor.fullRange.getBegin();
+            beginVar.priority = sourceManager.getFileOffset(beginVar.location) + priority;
+            coro.localVariables.insert(beginVar);
+        };
+        addBeginAndEndVar("begin", rangedFor.beginVarName, 2);
+        addBeginAndEndVar("end", rangedFor.endVarName, 3);
+    }
+
+    // Pass 2: full rewrite with collect-only mode
+    CoroutineBodyRewriter finalRewriter(coro.localVariables, rewriter, sourceManager,
+                                        coro, *astContext, false, classRecord);
+    finalRewriter.TraverseStmt(const_cast<Stmt *>(bodyStmt));
+
+    // Collect lambdas
+    coro.lambdasInBody = finalRewriter.getCollectedLambdas();
+
+    // Wrap with run method (this adds scope end replacements)
+    wrapBodyWithRunMethod(coro, finalRewriter);
+
+    // Set collect-only BEFORE applyReplacements to prevent Clang Rewriter modification
+    finalRewriter.setCollectOnly(true);
+    finalRewriter.applyReplacements();
+
+    // Convert SourceRange replacements to offset-based
+    StringReplacementApplicator stringApplicator;
+    for (const auto &[range, text, priority, isReplace] : finalRewriter.globalReplacements) {
+        stringApplicator.addReplacement(
+            StringReplacementApplicator::fromSourceRange(
+                range, text, priority, isReplace, sourceManager, langOptions, baseFileOffset));
+    }
+
+    // Apply to cloned source
+    std::string rewrittenSource = stringApplicator.applyTo(bodySource);
+
+    REWRITE_LOG() << "  Rewritten lambda body length: " << rewrittenSource.size() << "\n";
+
+    // Generate struct code
+    std::string structCode = generateCoroImplStruct(coro);
+
+    // Build function signature
+    std::string signature = buildLambdaFunctionSignature(coro);
+
+    // Assemble: signature + { + struct + inner body content + }
+    // rewrittenSource starts with '{', so we skip it and insert structCode after
+    std::string fullFunction = signature + " {\n" + structCode + rewrittenSource.substr(1);
+
+    REWRITE_LOG() << "  Generated lambda function:\n";
+    REWRITE_LOG() << "  Signature: " << signature << "\n";
+
+    // Prepend lambda functor structs (regular lambdas inside the lambda coroutine body)
+    std::string lambdaStructs;
+    if (!coro.lambdasInBody.empty()) {
+        std::set<std::string> insertedLambdaClasses;
+        for (const auto &lambda : coro.lambdasInBody) {
+            if (insertedLambdaClasses.insert(lambda.className).second) {
+                lambdaStructs += lambda.classDefinition + ";\n\n";
+            }
+        }
+    }
+
+    // Now insert the extracted function and replace the lambda expression
+    if (coro.isFileScopeLambda) {
+        // File-scope lambda: find the VarDecl that contains this lambda to get
+        // the full statement range (e.g., "auto fileScopeLambda = [](int x) -> ... { ... };")
+        // We need to find the beginning of the line with the variable declaration.
+        // Use the lambda's begin loc and scan backward in the source buffer to find
+        // the start of the line (or the start of the variable decl).
+
+        // For file-scope lambdas, we search backward from the lambda begin to the
+        // start of the line to capture the full "auto varname = " prefix.
+        SourceLocation lambdaBegin = coro.lambdaExpr->getBeginLoc();
+        SourceLocation lambdaEnd = coro.lambdaExpr->getEndLoc();
+        unsigned lambdaBeginOffset = sourceManager.getFileOffset(lambdaBegin);
+
+        // Find the start of the line containing the lambda
+        FileID fid = sourceManager.getFileID(lambdaBegin);
+        StringRef fileContent = sourceManager.getBufferData(fid);
+        unsigned lineStart = lambdaBeginOffset;
+        while (lineStart > 0 && fileContent[lineStart - 1] != '\n') {
+            lineStart--;
+        }
+        SourceLocation stmtBegin = sourceManager.getLocForStartOfFile(fid).getLocWithOffset(lineStart);
+
+        // Get the text of the variable declaration before the lambda
+        // e.g., "auto fileScopeLambda = "
+        std::string varDeclPrefix = fileContent.substr(lineStart, lambdaBeginOffset - lineStart).str();
+
+        // Build combined text: #ifdef block + #ifndef opener (single insertion to preserve order)
+        std::string combinedPrefix = "\n#ifdef COROUTINES_REWRITTEN_TO_STATEMACHINES\n" +
+            lambdaStructs + fullFunction + "\n" +
+            varDeclPrefix + coro.extractedName + ";\n" +
+            "#endif // COROUTINES_REWRITTEN_TO_STATEMACHINES\n\n" +
+            "#ifndef COROUTINES_REWRITTEN_TO_STATEMACHINES\n";
+
+        rewriter.InsertTextBefore(stmtBegin, combinedPrefix);
+
+        // Find end of original statement (after the semicolon following the lambda)
+        SourceLocation afterSemi = Lexer::findLocationAfterToken(lambdaEnd, tok::semi, sourceManager, langOptions, false);
+        if (afterSemi.isValid()) {
+            rewriter.InsertTextBefore(afterSemi,
+                "\n#endif // !COROUTINES_REWRITTEN_TO_STATEMACHINES\n");
+        } else {
+            rewriter.InsertTextAfterToken(lambdaEnd,
+                ";\n#endif // !COROUTINES_REWRITTEN_TO_STATEMACHINES\n");
+        }
+    } else {
+        // Function-scope lambda: insert extracted function before the enclosing function
+        SourceLocation insertLoc;
+        if (coro.enclosingFunction) {
+            insertLoc = findPreFunctionInsertionPoint(coro.enclosingFunction);
+        } else {
+            insertLoc = findInsertionPointAfterIncludes();
+        }
+
+        std::string insertText = lambdaStructs + fullFunction + "\n\n";
+        rewriter.InsertTextBefore(insertLoc, insertText);
+
+        // Replace the lambda expression with the function name
+        rewriter.ReplaceText(coro.lambdaExpr->getSourceRange(), coro.extractedName);
+
+        REWRITE_LOG() << "  Inserted extracted function before enclosing function\n";
+        REWRITE_LOG() << "  Replaced lambda expression with: " << coro.extractedName << "\n";
+    }
+
+    REWRITE_LOG() << "--- End lambda extraction: " << coro.extractedName << " ---\n";
+}
+
+std::string CoroutineRewriter::buildGenericLambdaStructDeclaration(const GenericLambdaInfo &info) {
+    const CXXMethodDecl *callOp = info.lambdaExpr->getCallOperator();
+    const FunctionTemplateDecl *tmplDecl = callOp->getDescribedFunctionTemplate();
+    if (!tmplDecl) return "";
+
+    std::string result = "struct " + info.extractedName + " {\n";
+
+    // Build template parameter list
+    result += "    template <";
+    const TemplateParameterList *params = tmplDecl->getTemplateParameters();
+    for (unsigned i = 0; i < params->size(); ++i) {
+        if (i > 0) result += ", ";
+        const NamedDecl *param = params->getParam(i);
+        if (const auto *typeParam = dyn_cast<TemplateTypeParmDecl>(param)) {
+            result += (typeParam->wasDeclaredWithTypename() ? "typename " : "class ");
+            result += typeParam->getNameAsString();
+        } else if (const auto *nonTypeParam = dyn_cast<NonTypeTemplateParmDecl>(param)) {
+            PrintingPolicy policy(astContext->getLangOpts());
+            result += nonTypeParam->getType().getAsString(policy);
+            result += " ";
+            result += nonTypeParam->getNameAsString();
+        }
+    }
+    result += ">\n";
+
+    // Return type (use the pattern's return type)
+    QualType retType = callOp->getReturnType();
+    QualType canonicalType = retType.getCanonicalType();
+    PrintingPolicy policy(astContext->getLangOpts());
+    policy.SuppressScope = false;
+    policy.PrintCanonicalTypes = true;
+    std::string returnType = canonicalType.getAsString(policy);
+    std::string modifiedReturnType = replaceLastTemplateArgWithHandle(returnType);
+
+    result += "    " + modifiedReturnType + " operator()(";
+
+    // Parameters from the pattern call operator
+    PrintingPolicy paramPolicy(astContext->getLangOpts());
+    paramPolicy.SuppressScope = false;
+    for (unsigned i = 0; i < callOp->getNumParams(); ++i) {
+        if (i > 0) result += ", ";
+        const ParmVarDecl *param = callOp->getParamDecl(i);
+        result += param->getType().getAsString(paramPolicy);
+        if (!param->getNameAsString().empty()) {
+            result += " " + param->getNameAsString();
+        }
+    }
+    result += ") const;\n";
+    result += "};\n";
+
+    return result;
+}
+
+std::string CoroutineRewriter::buildGenericLambdaSpecializationSignature(
+        const FunctionDecl *funcDecl, const std::string &structName) {
+    std::string sig = "template<>\ninline ";
+
+    // Return type
+    QualType retType = funcDecl->getReturnType();
+    QualType canonicalType = retType.getCanonicalType();
+    PrintingPolicy policy(astContext->getLangOpts());
+    policy.SuppressScope = false;
+    policy.PrintCanonicalTypes = true;
+    std::string returnType = canonicalType.getAsString(policy);
+    std::string modifiedReturnType = replaceLastTemplateArgWithHandle(returnType);
+    sig += modifiedReturnType + "\n";
+
+    // struct::operator()<SpecArgs>
+    sig += structName + "::operator()";
+
+    // Append explicit template args
+    if (const auto *args = funcDecl->getTemplateSpecializationArgs()) {
+        sig += "<";
+        std::string argsStr;
+        llvm::raw_string_ostream rawOS(argsStr);
+        for (unsigned i = 0; i < args->size(); ++i) {
+            if (i > 0) rawOS << ", ";
+            args->get(i).print(policy, rawOS, /*IncludeType=*/false);
+        }
+        sig += argsStr;
+        sig += ">";
+    }
+
+    // Parameters with resolved types
+    sig += "(";
+    for (unsigned i = 0; i < funcDecl->getNumParams(); ++i) {
+        if (i > 0) sig += ", ";
+        const ParmVarDecl *param = funcDecl->getParamDecl(i);
+        std::string paramType = param->getType().getAsString(policy);
+        sig += paramType;
+        if (!param->getNameAsString().empty()) {
+            sig += " " + param->getNameAsString();
+        }
+    }
+    sig += ") const";
+
+    return sig;
+}
+
+void CoroutineRewriter::extractGenericLambdaCoroutines() {
+    if (genericLambdaCoroutines.empty()) return;
+
+    REWRITE_LOG() << "\n=== EXTRACTING GENERIC LAMBDA COROUTINES ===\n";
+    REWRITE_LOG() << "Found " << genericLambdaCoroutines.size() << " generic lambda coroutine(s)\n";
+    REWRITE_LOG() << "Found " << unmatchedLambdaInstantiations.size() << " unmatched lambda instantiation(s)\n";
+
+    // Match unmatched lambda instantiations to their GenericLambdaInfo entries
+    for (auto &inst : unmatchedLambdaInstantiations) {
+        for (auto &info : genericLambdaCoroutines) {
+            if (info.lambdaExpr->getLambdaClass() == inst.closureType) {
+                info.instantiations.push_back({inst.instantiatedDecl, inst.patternDecl, inst.templateDecl});
+                REWRITE_LOG() << "  Matched instantiation to " << info.extractedName << ": "
+                              << inst.instantiatedDecl->getQualifiedNameAsString() << "\n";
+                break;
+            }
+        }
+    }
+
+    for (auto &info : genericLambdaCoroutines) {
+        extractSingleGenericLambda(info);
+    }
+
+    REWRITE_LOG() << "=== END GENERIC LAMBDA COROUTINE EXTRACTION ===\n\n";
+}
+
+void CoroutineRewriter::extractSingleGenericLambda(GenericLambdaInfo &info) {
+    REWRITE_LOG() << "\n--- Extracting generic lambda: " << info.extractedName << " ---\n";
+    REWRITE_LOG() << "  Has " << info.instantiations.size() << " instantiation(s)\n";
+
+    if (info.instantiations.empty()) {
+        REWRITE_LOG() << "  No instantiations found, skipping\n";
+        return;
+    }
+
+    // Build the struct declaration with declared-only template operator()
+    std::string structDecl = buildGenericLambdaStructDeclaration(info);
+    REWRITE_LOG() << "  Struct declaration:\n" << structDecl << "\n";
+
+    // Build each explicit specialization
+    std::string specializations;
+    for (const auto &inst : info.instantiations) {
+        REWRITE_LOG() << "  Processing instantiation: "
+                      << inst.instantiatedDecl->getQualifiedNameAsString() << "\n";
+
+        // Build CoroutineInfo from the instantiated AST
+        CoroutineInfo coro;
+        coro.function = inst.instantiatedDecl;
+        coro.isLambda = true;
+        coro.lambdaExpr = info.lambdaExpr;
+        coro.extractedName = info.extractedName;
+
+        if (!collectLocalVariables(inst.instantiatedDecl->getBody(), coro.localVariables,
+                                   /*useDiagEngine=*/false)) {
+            REWRITE_LOG() << "  Skipping instantiation due to variable name collisions\n";
+            continue;
+        }
+
+        collectFunctionParameters(inst.instantiatedDecl, coro.parameters);
+
+        // Get body
+        const Stmt *bodyStmt = inst.instantiatedDecl->getBody();
+        if (!bodyStmt) continue;
+        if (auto *coroBody = dyn_cast<CoroutineBodyStmt>(bodyStmt)) {
+            bodyStmt = coroBody->getBody();
+        }
+        if (!bodyStmt) continue;
+
+        // We need to get the source text from the PATTERN (template) declaration
+        // since the instantiated body doesn't have its own source text
+        const CXXMethodDecl *patternCallOp = info.lambdaExpr->getCallOperator();
+        const Stmt *patternBody = patternCallOp->getBody();
+        if (!patternBody) continue;
+        if (auto *coroBody = dyn_cast<CoroutineBodyStmt>(patternBody)) {
+            patternBody = coroBody->getBody();
+        }
+        if (!patternBody) continue;
+
+        CharSourceRange charRange = CharSourceRange::getTokenRange(patternBody->getSourceRange());
+        std::string bodySource = Lexer::getSourceText(charRange, sourceManager, langOptions).str();
+        unsigned baseFileOffset = sourceManager.getFileOffset(patternBody->getSourceRange().getBegin());
+
+        if (bodySource.empty()) {
+            REWRITE_LOG() << "  ERROR: Could not extract body source text\n";
+            continue;
+        }
+
+        // Two-pass body rewriting in collect-only mode
+        const CXXRecordDecl *classRecord = nullptr;
+
+        // Pass 1
+        CoroutineBodyRewriter initialRewriter(coro.localVariables, rewriter, sourceManager,
+                                              coro, *astContext, false, classRecord);
+        initialRewriter.TraverseStmt(const_cast<Stmt *>(bodyStmt));
+
+        if (coro.hasError) {
+            REWRITE_LOG() << "  Instantiation has errors, skipping\n";
+            continue;
+        }
+
+        coro.rangedForLoops = initialRewriter.getRangedForLoops();
+        coro.tryCatchBlocks = initialRewriter.getTryCatchBlocks();
+        coro.coroutineStatements = initialRewriter.getCoroutineStatements();
+
+        const auto &initialLambdas = initialRewriter.getCollectedLambdas();
+        for (const auto &lambda : initialLambdas) {
+            if (lambda.varDeclLocation.isValid()) {
+                coro.lambdaVariableMapping[lambda.varDeclLocation] = lambda;
+            }
+        }
+
+        // Add ranged-for variables
+        for (const auto &rangedFor : coro.rangedForLoops) {
+            LocalVariable loopVar;
+            loopVar.name = rangedFor.loopVarName;
+            loopVar.type = rangedFor.loopVarType;
+            loopVar.isReference = (loopVar.type.find("&") != std::string::npos);
+            loopVar.referenceType = loopVar.type;
+            loopVar.isOwning = !loopVar.isReference;
+            loopVar.location = rangedFor.fullRange.getBegin();
+            loopVar.priority = sourceManager.getFileOffset(loopVar.location);
+            coro.localVariables.insert(loopVar);
+
+            LocalVariable rangeVar;
+            rangeVar.name = rangedFor.rangeVarName;
+            std::tie(rangeVar.type, rangeVar.isOwning) =
+                    getTypeForAutoRefRefVariable(rangedFor.rangeExpr, *astContext);
+            rangeVar.referenceType = rangeVar.type + " &";
+            rangeVar.isReference = false;
+            rangeVar.location = rangedFor.fullRange.getBegin();
+            rangeVar.priority = sourceManager.getFileOffset(rangeVar.location) + 1;
+            coro.localVariables.insert(rangeVar);
+
+            auto addBeginAndEndVar = [&](const std::string &beginOrEnd, const std::string &name, int priority) {
+                LocalVariable beginVar;
+                beginVar.name = name;
+                beginVar.type = "std::decay_t<decltype(std::declval<" + rangeVar.referenceType + ">()." + beginOrEnd + "())>";
+                beginVar.isOwning = true;
+                beginVar.referenceType = beginVar.type + " &";
+                beginVar.isReference = false;
+                beginVar.location = rangedFor.fullRange.getBegin();
+                beginVar.priority = sourceManager.getFileOffset(beginVar.location) + priority;
+                coro.localVariables.insert(beginVar);
+            };
+            addBeginAndEndVar("begin", rangedFor.beginVarName, 2);
+            addBeginAndEndVar("end", rangedFor.endVarName, 3);
+        }
+
+        // Pass 2
+        CoroutineBodyRewriter finalRewriter(coro.localVariables, rewriter, sourceManager,
+                                            coro, *astContext, false, classRecord);
+        finalRewriter.TraverseStmt(const_cast<Stmt *>(bodyStmt));
+
+        coro.lambdasInBody = finalRewriter.getCollectedLambdas();
+        wrapBodyWithRunMethod(coro, finalRewriter);
+
+        finalRewriter.setCollectOnly(true);
+        finalRewriter.applyReplacements();
+
+        // Convert to offset-based replacements
+        StringReplacementApplicator stringApplicator;
+        for (const auto &[range, text, priority, isReplace] : finalRewriter.globalReplacements) {
+            stringApplicator.addReplacement(
+                StringReplacementApplicator::fromSourceRange(
+                    range, text, priority, isReplace, sourceManager, langOptions, baseFileOffset));
+        }
+
+        std::string rewrittenSource = stringApplicator.applyTo(bodySource);
+
+        // Generate struct code and signature
+        std::string structCode = generateCoroImplStruct(coro);
+        std::string signature = buildGenericLambdaSpecializationSignature(
+            inst.instantiatedDecl, info.extractedName);
+
+        // Assemble
+        std::string fullSpecialization = signature + " {\n" + structCode + rewrittenSource.substr(1);
+
+        // Prepend lambda functor structs
+        if (!coro.lambdasInBody.empty()) {
+            std::set<std::string> insertedLambdaClasses;
+            for (const auto &lambda : coro.lambdasInBody) {
+                if (insertedLambdaClasses.insert(lambda.className).second) {
+                    specializations += lambda.classDefinition + ";\n\n";
+                }
+            }
+        }
+
+        specializations += fullSpecialization + "\n\n";
+    }
+
+    // Now insert everything and replace the lambda expression
+    std::string allCode = structDecl + "\n" + specializations;
+
+    if (info.isFileScopeLambda) {
+        // File-scope: #ifdef/#ifndef guards
+        SourceLocation lambdaBegin = info.lambdaExpr->getBeginLoc();
+
+        rewriter.InsertTextBefore(lambdaBegin,
+            "\n#ifdef COROUTINES_REWRITTEN_TO_STATEMACHINES\n" +
+            allCode +
+            "#endif // COROUTINES_REWRITTEN_TO_STATEMACHINES\n\n" +
+            "#ifndef COROUTINES_REWRITTEN_TO_STATEMACHINES\n");
+
+        SourceLocation lambdaEnd = info.lambdaExpr->getEndLoc();
+        rewriter.InsertTextAfterToken(lambdaEnd,
+            ";\n#endif // !COROUTINES_REWRITTEN_TO_STATEMACHINES");
+    } else {
+        // Function-scope: insert before enclosing function, replace lambda
+        SourceLocation insertLoc;
+        if (info.enclosingFunction) {
+            insertLoc = findPreFunctionInsertionPoint(info.enclosingFunction);
+        } else {
+            insertLoc = findInsertionPointAfterIncludes();
+        }
+
+        rewriter.InsertTextBefore(insertLoc, allCode + "\n");
+
+        // Replace lambda expression with struct construction
+        rewriter.ReplaceText(info.lambdaExpr->getSourceRange(), info.extractedName + "{}");
+
+        REWRITE_LOG() << "  Replaced generic lambda with: " << info.extractedName << "{}\n";
+    }
+
+    REWRITE_LOG() << "--- End generic lambda extraction: " << info.extractedName << " ---\n";
 }
 

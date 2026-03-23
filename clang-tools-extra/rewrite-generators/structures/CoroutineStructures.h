@@ -124,6 +124,12 @@ struct CoroutineInfo {
     bool isLambda = false;
     const LambdaExpr *lambdaExpr = nullptr;
 
+    // Lambda extraction info (for extracting lambda coroutines as free functions)
+    std::string extractedName;                    // e.g. "__lambda_coro_L42_C16"
+    bool isFileScopeLambda = false;               // true if at translation unit scope
+    bool isGenericLambda = false;                  // true if lambda has auto params
+    const FunctionDecl *enclosingFunction = nullptr; // for function-scope lambdas
+
     // Mapping from variable declaration location to member name (for handling shadowing)
     std::map<SourceLocation, std::string> declLocationToMemberName;
 

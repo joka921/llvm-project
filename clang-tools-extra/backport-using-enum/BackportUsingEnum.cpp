@@ -52,10 +52,11 @@ class UsingEnumRewriter : public MatchFinder::MatchCallback {
     Rewriter &rewriter;
     const SourceManager &sourceManager;
     clang::DiagnosticsEngine &diagnosticsEngine;
+    const LangOptions& langOptions;
 
 public:
-    UsingEnumRewriter(Rewriter &rewr, const SourceManager &manager, DiagnosticsEngine &engine) 
-        : rewriter(rewr), sourceManager(manager), diagnosticsEngine(engine) {
+    UsingEnumRewriter(Rewriter &rewr, const SourceManager &manager, DiagnosticsEngine &engine, const LangOptions& lo)
+        : rewriter(rewr), sourceManager(manager), diagnosticsEngine(engine), langOptions(lo) {
     }
 
     // This method is called for each using enum declaration that matches the matcher.
@@ -102,8 +103,10 @@ public:
             return;
         }
 
-        info.enumName = enumDecl->getQualifiedNameAsString();
-
+        info.enumName = clang::Lexer::getSourceText(
+    clang::CharSourceRange::getTokenRange(Decl->getEnumTypeLoc().getSourceRange()),
+    sourceManager,
+    langOptions);
         // Check if the using enum declaration is inside a constexpr function
         const DeclContext *DC = Decl->getDeclContext();
         while (DC) {

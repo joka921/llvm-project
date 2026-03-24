@@ -192,7 +192,7 @@ public:
         clang::CompilerInstance &CI, llvm::StringRef InFile) override {
         // Initialize the Rewriter with the SourceManager from the CompilerInstance
         SM = &CI.getSourceManager();
-        usingEnumRewriter = std::make_unique<UsingEnumRewriter>(*Rewrite, *SM, CI.getDiagnostics());
+        usingEnumRewriter = std::make_unique<UsingEnumRewriter>(*Rewrite, *SM, CI.getDiagnostics(), CI.getLangOpts());
         // Set the rewriter's buffer to the file being processed
         Rewrite->setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
 

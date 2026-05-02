@@ -530,27 +530,46 @@ this->atFinalSuspend_ = false;                                               \
 Hdl::from_promise(pt).destroy();                                             \
 void()
 
-#define CO_RETURN_IMPL(index, finalAwaiterMem)                                  \
-  this->destroySuspendedCoro(index);                                           \
-  CO_RETURN_IMPL_IMPL(finalAwaiterMem);                                 \
-  return;                                                                      \
+#define CO_RETURN_IMPL(finalAwaiterMem)                                         \
+  CO_RETURN_IMPL_IMPL(finalAwaiterMem);                                         \
+  return;                                                                       \
   void()
-
-#define CO_RETURN_VOID(index, finalAwaiterMem)                                  \
-    if constexpr (coro_detail::has_return_void<std::decay_t<decltype(promise())>>::value) { \
-    promise().return_void();                                                     \
-    }                                                                             \
-    CO_RETURN_IMPL(index, finalAwaiterMem);                                     \
-    void()
 
 #define DESTROY_UNCONDITIONALLY(mem) this->mem.destroy(); this->__constructed.mem=false; void()
 #define DESTROY_IF_CONSTRUCTED(mem) if (this->__constructed.mem) {DESTROY_UNCONDITIONALLY(mem);} void()
 
-#define CO_RETURN_FALLOFF(index, finalAwaiterMem) CO_RETURN_VOID(index, finalAwaiterMem)
+// Variadic member destruction — destroys 0..10 named members unconditionally, in argument order
+#define CO_DESTROY_0_MEMBERS()
+#define CO_DESTROY_1_MEMBERS(m1) DESTROY_UNCONDITIONALLY(m1);
+#define CO_DESTROY_2_MEMBERS(m1,m2) DESTROY_UNCONDITIONALLY(m1); DESTROY_UNCONDITIONALLY(m2);
+#define CO_DESTROY_3_MEMBERS(m1,m2,m3) DESTROY_UNCONDITIONALLY(m1); DESTROY_UNCONDITIONALLY(m2); DESTROY_UNCONDITIONALLY(m3);
+#define CO_DESTROY_4_MEMBERS(m1,m2,m3,m4) DESTROY_UNCONDITIONALLY(m1); DESTROY_UNCONDITIONALLY(m2); DESTROY_UNCONDITIONALLY(m3); DESTROY_UNCONDITIONALLY(m4);
+#define CO_DESTROY_5_MEMBERS(m1,m2,m3,m4,m5) DESTROY_UNCONDITIONALLY(m1); DESTROY_UNCONDITIONALLY(m2); DESTROY_UNCONDITIONALLY(m3); DESTROY_UNCONDITIONALLY(m4); DESTROY_UNCONDITIONALLY(m5);
+#define CO_DESTROY_6_MEMBERS(m1,m2,m3,m4,m5,m6) DESTROY_UNCONDITIONALLY(m1); DESTROY_UNCONDITIONALLY(m2); DESTROY_UNCONDITIONALLY(m3); DESTROY_UNCONDITIONALLY(m4); DESTROY_UNCONDITIONALLY(m5); DESTROY_UNCONDITIONALLY(m6);
+#define CO_DESTROY_7_MEMBERS(m1,m2,m3,m4,m5,m6,m7) DESTROY_UNCONDITIONALLY(m1); DESTROY_UNCONDITIONALLY(m2); DESTROY_UNCONDITIONALLY(m3); DESTROY_UNCONDITIONALLY(m4); DESTROY_UNCONDITIONALLY(m5); DESTROY_UNCONDITIONALLY(m6); DESTROY_UNCONDITIONALLY(m7);
+#define CO_DESTROY_8_MEMBERS(m1,m2,m3,m4,m5,m6,m7,m8) DESTROY_UNCONDITIONALLY(m1); DESTROY_UNCONDITIONALLY(m2); DESTROY_UNCONDITIONALLY(m3); DESTROY_UNCONDITIONALLY(m4); DESTROY_UNCONDITIONALLY(m5); DESTROY_UNCONDITIONALLY(m6); DESTROY_UNCONDITIONALLY(m7); DESTROY_UNCONDITIONALLY(m8);
+#define CO_DESTROY_9_MEMBERS(m1,m2,m3,m4,m5,m6,m7,m8,m9) DESTROY_UNCONDITIONALLY(m1); DESTROY_UNCONDITIONALLY(m2); DESTROY_UNCONDITIONALLY(m3); DESTROY_UNCONDITIONALLY(m4); DESTROY_UNCONDITIONALLY(m5); DESTROY_UNCONDITIONALLY(m6); DESTROY_UNCONDITIONALLY(m7); DESTROY_UNCONDITIONALLY(m8); DESTROY_UNCONDITIONALLY(m9);
+#define CO_DESTROY_10_MEMBERS(m1,m2,m3,m4,m5,m6,m7,m8,m9,m10) DESTROY_UNCONDITIONALLY(m1); DESTROY_UNCONDITIONALLY(m2); DESTROY_UNCONDITIONALLY(m3); DESTROY_UNCONDITIONALLY(m4); DESTROY_UNCONDITIONALLY(m5); DESTROY_UNCONDITIONALLY(m6); DESTROY_UNCONDITIONALLY(m7); DESTROY_UNCONDITIONALLY(m8); DESTROY_UNCONDITIONALLY(m9); DESTROY_UNCONDITIONALLY(m10);
+#define CO_DESTROY_MEMBERS_CONCAT2(a,b) a##b
+#define CO_DESTROY_MEMBERS_CONCAT(a,b) CO_DESTROY_MEMBERS_CONCAT2(a,b)
+#define CO_DESTROY_MEMBERS_COUNT_N(_0,_1,_2,_3,_4,_5,_6,_7,_8,_9,_10,N,...) N
+#define CO_DESTROY_MEMBERS_COUNT(...) CO_DESTROY_MEMBERS_COUNT_N(dummy,##__VA_ARGS__,10,9,8,7,6,5,4,3,2,1,0)
+#define CO_DESTROY_MEMBERS(...) CO_DESTROY_MEMBERS_CONCAT(CO_DESTROY_,CO_DESTROY_MEMBERS_CONCAT(CO_DESTROY_MEMBERS_COUNT(__VA_ARGS__),_MEMBERS))(__VA_ARGS__)
 
-#define CO_RETURN_VALUE(index, finalAwaiterMem, value)                           \
+#define CO_RETURN_VOID(index, finalAwaiterMem, ...)                              \
+    if constexpr (coro_detail::has_return_void<std::decay_t<decltype(promise())>>::value) { \
+    promise().return_void();                                                      \
+    }                                                                             \
+    CO_DESTROY_MEMBERS(__VA_ARGS__)                                               \
+    CO_RETURN_IMPL(finalAwaiterMem);                                              \
+    void()
+
+#define CO_RETURN_FALLOFF(index, finalAwaiterMem, ...) CO_RETURN_VOID(index, finalAwaiterMem, ##__VA_ARGS__)
+
+#define CO_RETURN_VALUE(index, finalAwaiterMem, value, ...)                      \
     promise().return_value(value);                                               \
-    CO_RETURN_IMPL(index, finalAwaiterMem);                                       \
+    CO_DESTROY_MEMBERS(__VA_ARGS__)                                              \
+    CO_RETURN_IMPL(finalAwaiterMem);                                             \
     void()
 
 // TRY_BEGIN / TRY_END macros removed — try-catch blocks now use inline nested switches

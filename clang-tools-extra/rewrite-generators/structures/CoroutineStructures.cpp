@@ -284,11 +284,17 @@ CoroutineStatement::generateReturnReplacements(
     int priority = static_cast<int>(index);
     SourceLocation keywordEnd = Lexer::getLocForEndOfToken(keywordLoc, 0, sourceManager, LangOptions());
 
+    // Build the extra member arguments to pass to the CO_RETURN macro.
+    // These are destroyed inline by the macro, after return_void()/return_value().
+    std::string memberArgs;
+    for (const auto &varName : aliveVariables)
+        memberArgs += ", " + varName;
+
     if (!operand) {
-        // Case 1: co_return; (no operand) -> CO_RETURN_VOID(index);
+        // Case 1: co_return; (no operand) -> CO_RETURN_VOID(index, __final_awaiter, vars...);
         REWRITE_LOG() << "      DEBUG: co_return has no operand, using CO_RETURN_VOID\n";
 
-        std::string replacement = "CO_RETURN_VOID(" + std::to_string(index) + ", __final_awaiter);";
+        std::string replacement = "CO_RETURN_VOID(" + std::to_string(index) + ", __final_awaiter" + memberArgs + ");";
         SourceRange keywordRange(keywordLoc, keywordEnd);
         replacements.emplace_back(keywordRange, replacement, priority, true);
     } else {
@@ -297,31 +303,28 @@ CoroutineStatement::generateReturnReplacements(
         bool isVoidType = operandType->isVoidType();
 
         if (isVoidType) {
-            // Case 2: co_return expr; where expr is void -> expr; CO_RETURN_VOID(index, __final_awaiter);
+            // Case 2: co_return expr; (void operand) -> expr; CO_RETURN_VOID(index, __final_awaiter, vars...);
             REWRITE_LOG() << "      DEBUG: co_return operand is void type, using CO_RETURN_VOID\n";
 
-            // Replace "co_return " with nothing (just remove the keyword and space)
             SourceRange keywordRange(keywordLoc, keywordEnd);
             replacements.emplace_back(keywordRange, "", priority, true);
 
-            // Insert "; CO_RETURN_VOID(index, __final_awaiter)" after the operand
             SourceLocation operandEndLoc = Lexer::getLocForEndOfToken(operandEnd, 0, sourceManager, LangOptions());
             SourceRange insertRange(operandEndLoc, operandEndLoc);
-            std::string insertion = "; CO_RETURN_VOID(" + std::to_string(index) + ", __final_awaiter)";
+            std::string insertion = "; CO_RETURN_VOID(" + std::to_string(index) + ", __final_awaiter" + memberArgs + ")";
             replacements.emplace_back(insertRange, insertion, priority + 1000, false);
         } else {
-            // Case 3: co_return expr; where expr is non-void -> CO_RETURN_VALUE(index, __final_awaiter, (expr))
+            // Case 3: co_return expr; (non-void) -> CO_RETURN_VALUE(index, __final_awaiter, (expr), vars...)
             REWRITE_LOG() << "      DEBUG: co_return operand is value type, using CO_RETURN_VALUE\n";
 
-            // Replace "co_return" with "CO_RETURN_VALUE(index, __final_awaiter, ("
             std::string macroStart = "CO_RETURN_VALUE(" + std::to_string(index) + ", __final_awaiter, (";
             SourceRange keywordRange(keywordLoc, keywordEnd);
             replacements.emplace_back(keywordRange, macroStart, priority, true);
 
-            // Insert "))" after the operand
+            // Close the value paren, then add member args, then close the macro call
             SourceLocation operandEndLoc = Lexer::getLocForEndOfToken(operandEnd, 0, sourceManager, LangOptions());
             SourceRange parenRange(operandEndLoc, operandEndLoc);
-            replacements.emplace_back(parenRange, "))", priority + 1000, false);
+            replacements.emplace_back(parenRange, ")" + memberArgs + ")", priority + 1000, false);
         }
     }
 

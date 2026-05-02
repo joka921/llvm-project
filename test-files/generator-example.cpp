@@ -10,163 +10,6 @@
 #include "./generator.h"
 #include <vector>
 
-#define COROUTINES_REWRITTEN_TO_STATEMACHINES
-
-#ifdef COROUTINES_REWRITTEN_TO_STATEMACHINES
-template<typename T>
-inline cppcoro::generator<int, cppcoro::NoDetails, Handle> gen(T a);
-
-template<>
-inline cppcoro::generator<int, cppcoro::NoDetails, Handle> gen<int>(int a) {
-    // _coro_storage and CoroImpl assumed to be available in global namespace
-    using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
-    struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
-        // Function parameters
-        decltype(a) a;
-
-        // Constructor
-        GeneratorStateMachine(decltype(a) a)
-            : a(std::move(a)) {
-        }
-
-        // Local variables (including ranged-for loop variables)
-        _coro_storage<int &, true> x;
-
-        // Constructed flags
-        struct {
-            bool x = false;
-            bool __initial_awaiter = false;
-            bool __final_awaiter = false;
-            bool __awaiter_1 = false;
-        } __constructed;
-
-        // Awaiter storage members
-        _coro_storage<decltype(std::declval<PromiseType &>().initial_suspend()) &, true> __initial_awaiter;
-        _coro_storage<decltype(std::declval<PromiseType &>().final_suspend()) &, true> __final_awaiter;
-        _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_1;
-
-        void destroyAllConstructed() {
-            DESTROY_IF_CONSTRUCTED(__awaiter_1);
-            DESTROY_IF_CONSTRUCTED(x);
-            DESTROY_IF_CONSTRUCTED(__initial_awaiter);
-        }
-
-        void handleUnhandledException() {
-            destroyAllConstructed();
-            promise().unhandled_exception();
-            CO_RETURN_IMPL_IMPL(__final_awaiter);
-        }
-
-        // Destroy variables when coroutine is suspended at a specific state
-        void destroySuspendedCoro(size_t curState) {
-            switch (curState) {
-                case 2:
-                    break;
-                cleanup_1:
-                case 1:
-                    __awaiter_1.destroy();
-                    x.destroy();
-                    break;
-                case 0: // initial state - initial awaiter is alive
-                    __initial_awaiter.destroy();
-                    __constructed.__initial_awaiter = false;
-                    break;
-            }
-        }
-
-        void doStepImpl() {
-            switch (this->curState) {
-                case 0: break;
-                case 1: goto label_1;
-                default: return;
-            }
-            __initial_awaiter.get().ref_.await_resume();
-            DESTROY_UNCONDITIONALLY(__initial_awaiter);
-
-            CO_INIT(x, ( a + 3));
-            CO_YIELD(1, __awaiter_1, CO_GET(x));
-            CO_RETURN_FALLOFF(2, __final_awaiter);
-        }
-    };
-    return GeneratorStateMachine::ramp(a);
-}
-
-template<>
-inline cppcoro::generator<int, cppcoro::NoDetails, Handle> gen<double>(double a) {
-    // _coro_storage and CoroImpl assumed to be available in global namespace
-    using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
-    struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
-        // Function parameters
-        decltype(a) a;
-
-        // Constructor
-        GeneratorStateMachine(decltype(a) a)
-            : a(std::move(a)) {
-        }
-
-        // Local variables (including ranged-for loop variables)
-        _coro_storage<double &, true> x;
-
-        // Constructed flags
-        struct {
-            bool x = false;
-            bool __initial_awaiter = false;
-            bool __final_awaiter = false;
-            bool __awaiter_1 = false;
-        } __constructed;
-
-        // Awaiter storage members
-        _coro_storage<decltype(std::declval<PromiseType &>().initial_suspend()) &, true> __initial_awaiter;
-        _coro_storage<decltype(std::declval<PromiseType &>().final_suspend()) &, true> __final_awaiter;
-        _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_1;
-
-        void destroyAllConstructed() {
-            DESTROY_IF_CONSTRUCTED(__awaiter_1);
-            DESTROY_IF_CONSTRUCTED(x);
-            DESTROY_IF_CONSTRUCTED(__initial_awaiter);
-        }
-
-        void handleUnhandledException() {
-            destroyAllConstructed();
-            promise().unhandled_exception();
-            CO_RETURN_IMPL_IMPL(__final_awaiter);
-        }
-
-        // Destroy variables when coroutine is suspended at a specific state
-        void destroySuspendedCoro(size_t curState) {
-            switch (curState) {
-                case 2:
-                    break;
-                cleanup_1:
-                case 1:
-                    __awaiter_1.destroy();
-                    x.destroy();
-                    break;
-                case 0: // initial state - initial awaiter is alive
-                    __initial_awaiter.destroy();
-                    __constructed.__initial_awaiter = false;
-                    break;
-            }
-        }
-
-        void doStepImpl() {
-            switch (this->curState) {
-                case 0: break;
-                case 1: goto label_1;
-                default: return;
-            }
-            __initial_awaiter.get().ref_.await_resume();
-            DESTROY_UNCONDITIONALLY(__initial_awaiter);
-
-            CO_INIT(x, ( a + 3));
-            CO_YIELD(1, __awaiter_1, CO_GET(x));
-            CO_RETURN_FALLOFF(2, __final_awaiter);
-        }
-    };
-    return GeneratorStateMachine::ramp(a);
-}
-
-#endif // COROUTINES_REWRITTEN_TO_STATEMACHINES
 
 struct X {
     int i;
@@ -397,18 +240,135 @@ public:
     int value = 42;
 };
 
-#ifndef COROUTINES_REWRITTEN_TO_STATEMACHINES
-template<typename T>
-cppcoro::generator<int> gen(T a) {
-    auto x = a + 3;
-    co_yield x;
+cppcoro::generator<int, cppcoro::NoDetails, Handle> testTryCatch() {
+  // _coro_storage and CoroImpl assumed to be available in global namespace
+  // tryBlockParent: {kNoTryBlock}
+  using PromiseType = cppcoro::generator<int, cppcoro::NoDetails, Handle>::promise_type;
+  struct GeneratorStateMachine : CoroImpl<GeneratorStateMachine, PromiseType> {
+    // Local variables (including ranged-for loop variables)
+    _coro_storage<int &, true> x;
+    _coro_storage<int &, true> y;
+    _coro_storage<int &, true> i;
+    _coro_storage<int &, true> z;
+
+    // Constructed flags
+    struct {
+      bool x = false;
+      bool y = false;
+      bool i = false;
+      bool z = false;
+      bool __initial_awaiter = false;
+      bool __final_awaiter = false;
+      bool __awaiter_1 = false;
+      bool __awaiter_3 = false;
+      bool __awaiter_4 = false;
+    } __constructed;
+
+    // Awaiter storage members
+    _coro_storage<decltype(std::declval<PromiseType &>().initial_suspend()) &, true> __initial_awaiter;
+    _coro_storage<decltype(std::declval<PromiseType &>().final_suspend()) &, true> __final_awaiter;
+    _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_1;
+    _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_3;
+    _coro_storage<struct cppcoro::SuspendAlways &, true> __awaiter_4;
+
+    void destroyAllConstructed() {
+      DESTROY_IF_CONSTRUCTED(__awaiter_4);
+      DESTROY_IF_CONSTRUCTED(__awaiter_3);
+      DESTROY_IF_CONSTRUCTED(z);
+      DESTROY_IF_CONSTRUCTED(i);
+      DESTROY_IF_CONSTRUCTED(__awaiter_1);
+      DESTROY_IF_CONSTRUCTED(y);
+      DESTROY_IF_CONSTRUCTED(x);
+      DESTROY_IF_CONSTRUCTED(__initial_awaiter);
+    }
+
+    void handleUnhandledException() {
+      destroyAllConstructed();
+      promise().unhandled_exception();
+      CO_RETURN_IMPL_IMPL(__final_awaiter);
+    }
+
+    // Destroy variables when coroutine is suspended at a specific state
+    void destroySuspendedCoro(size_t curState) {
+      switch (curState) {
+        case 4:
+          __awaiter_4.destroy();
+          break;
+        cleanup_3:
+        case 3:
+          __awaiter_3.destroy();
+          z.destroy();
+          i.destroy();
+          break;
+        cleanup_1:
+        case 1:
+          __awaiter_1.destroy();
+          y.destroy();
+          x.destroy();
+          break;
+        case 0: // initial state - initial awaiter is alive
+          __initial_awaiter.destroy();
+          __constructed.__initial_awaiter = false;
+          break;
+      }
+    }
+
+    void doStepImpl() {
+      switch (this->curState) {
+        case 0: break;
+        case 1: goto resume_try_0;
+        case 3: goto resume_try_0;
+        case 4: goto label_4;
+        default: return;
+      }
+      __initial_awaiter.get().ref_.await_resume();
+      DESTROY_UNCONDITIONALLY(__initial_awaiter);
+
+      CO_INIT(x, ( 42));
+    resume_try_0:
+      try {
+        try {
+          switch (this->curState) {
+            case 1: goto label_1;
+            case 3: goto label_3;
+            default: break;
+          }
+
+          CO_INIT(y, ( CO_GET(x) + 1));
+          CO_YIELD(1, __awaiter_1, CO_GET(y));
+          CO_INIT(i, ( 15));
+          while (CO_GET(i)) {
+            CO_INIT(z, ( CO_GET(y) + 1));
+            if (CO_GET(z) > 5) {
+              CO_RETURN_VOID(2, __final_awaiter, z, i, y, x);
+            }
+            CO_YIELD(3, __awaiter_3, CO_GET(z));
+            --CO_GET(i);
+            DESTROY_UNCONDITIONALLY(z);
+          }
+          DESTROY_UNCONDITIONALLY(i);
+          DESTROY_UNCONDITIONALLY(y);
+        } catch (...) {
+          DESTROY_IF_CONSTRUCTED(__awaiter_3);
+          DESTROY_IF_CONSTRUCTED(z);
+          DESTROY_IF_CONSTRUCTED(i);
+          DESTROY_IF_CONSTRUCTED(__awaiter_1);
+          DESTROY_IF_CONSTRUCTED(y);
+          throw;
+        }
+      } catch (std::exception &e) {
+        std::cout << "Caught exception: " << e.what() << " x=" << CO_GET(x) << std::endl;
+      } catch (...) {
+        std::cout << "Caught unknown exception, x=" << CO_GET(x) << std::endl;
+      }
+      CO_YIELD(4, __awaiter_4, CO_GET(x));
+      CO_RETURN_VOID(5, __final_awaiter, x);
+    }
+  };
+  return GeneratorStateMachine::ramp();
 }
-#endif // !COROUTINES_REWRITTEN_TO_STATEMACHINES
 
 
 void use() {
-    C c;
-    auto x = gen(3);
-    auto y = gen(4.3);
-    auto z = gen(4);
+  auto x = testTryCatch();
 }

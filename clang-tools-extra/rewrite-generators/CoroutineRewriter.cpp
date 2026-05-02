@@ -625,15 +625,12 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             // Generate cases in descending order (from highest index to lowest)
             // This allows us to use fallthrough and goto for proper destruction order
 
-            // Add synthetic falloff entry (highest index, outermost scope variables)
-            CoroutineStatement falloffStmt;
-            falloffStmt.index = computeFalloffIndex(coro);
-            falloffStmt.aliveVariables = coro.outermostScopeVariables;
-
+            // Only include suspension points (YIELD/AWAIT) — co_return and falloff are
+            // handled inline by CO_RETURN macros and no longer need destroySuspendedCoro cases.
             std::vector<const CoroutineStatement*> sortedStmts;
-            sortedStmts.push_back(&falloffStmt);
             for (const auto &stmt : coro.coroutineStatements) {
-                sortedStmts.push_back(&stmt);
+                if (stmt.type != CoroutineStatement::RETURN)
+                    sortedStmts.push_back(&stmt);
             }
             std::sort(sortedStmts.begin(), sortedStmts.end(),
                      [](const CoroutineStatement* a, const CoroutineStatement* b) {
@@ -879,10 +876,12 @@ bool CoroutineRewriter::VisitLambdaExpr(LambdaExpr *lambdaExpr) {
             unsigned numCaptures = lambdaExpr->capture_size();
 
             if (numCaptures > 0) {
-                // Report error for lambda coroutines with captures
+                // Report warning for lambda coroutines with captures (unsupported feature;
+                // using Warning rather than Error so that other coroutines in the file
+                // are still rewritten — hasErrorOccurred() must stay false for that).
                 unsigned diagID = diagnosticsEngine.getCustomDiagID(
-                    clang::DiagnosticsEngine::Error,
-                    "coroutine lambdas with captures are not supported");
+                    clang::DiagnosticsEngine::Warning,
+                    "coroutine lambdas with captures are not yet supported; skipping");
                 diagnosticsEngine.Report(lambdaExpr->getBeginLoc(), diagID);
 
                 // Also report each capture location for clarity
@@ -1438,8 +1437,13 @@ void CoroutineRewriter::wrapBodyWithRunMethod(const CoroutineInfo &coro, Corouti
                 }
 
                 if (!bodyEndsWithCoReturn) {
+                    // Build member args for outermost-scope variables that need destruction at falloff
+                    std::string falloffMemberArgs;
+                    for (const auto &varName : coro.outermostScopeVariables)
+                        falloffMemberArgs += ", " + varName;
+
                     ScopeEndReplacement falloffReplacement;
-                    falloffReplacement.replacement = "CO_RETURN_FALLOFF(" + std::to_string(falloffIndex) + ", __final_awaiter);\n";
+                    falloffReplacement.replacement = "CO_RETURN_FALLOFF(" + std::to_string(falloffIndex) + ", __final_awaiter" + falloffMemberArgs + ");\n";
                     falloffReplacement.priority = std::numeric_limits<int>::max() - 1; // Just before COROUTINE_FOOTER
                     body_rewriter.scopeEndReplacements[fileOffset].push_back(falloffReplacement);
 

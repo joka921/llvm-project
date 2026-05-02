@@ -61,6 +61,11 @@ public:
             return std::make_unique<ASTConsumer>(); // no-op
         }
 
+        // Suppress all compiler warnings — this is a source-to-source
+        // transformer, not a linter. We still track errors so that
+        // hasErrorOccurred() correctly blocks rewrites on broken input.
+        CI.getDiagnostics().setIgnoreAllWarnings(true);
+
         sourceManager = &CI.getSourceManager();
         rewriter = std::make_unique<Rewriter>();
         rewriter->setSourceMgr(*sourceManager, CI.getLangOpts());

@@ -8,6 +8,7 @@
 #include "clang/Frontend/ASTConsumers.h"
 #include "clang/Rewrite/Core/Rewriter.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "Common.h"
@@ -23,6 +24,8 @@ using namespace llvm;
 
 // Command-line options (declared as extern, defined in RewriteGenerators.cpp)
 extern llvm::cl::OptionCategory MyToolCategory;
+extern llvm::cl::opt<bool> InPlace;
+extern llvm::cl::opt<std::string> OutputFile;
 
 class MyASTConsumer : public ASTConsumer {
 private:
@@ -84,22 +87,24 @@ public:
         REWRITE_LOG() << "\nSummary: Processed " << coroutines.size() << " coroutine(s)\n";
 
         SourceLocation mainFileLoc = sourceManager->getLocForStartOfFile(sourceManager->getMainFileID());
-        const std::string filePath = sourceManager->getFilename(mainFileLoc).str();
+        const std::string inputPath = sourceManager->getFilename(mainFileLoc).str();
+
+        const std::string outPath = OutputFile.empty() ? inputPath : OutputFile.getValue();
 
         if (rewriter->getRewriteBufferFor(sourceManager->getMainFileID())) {
             const RewriteBuffer &RewriteBuf = rewriter->getEditBuffer(sourceManager->getMainFileID());
 
             std::error_code EC;
-            llvm::raw_fd_ostream OS(filePath, EC, llvm::sys::fs::OF_Text);
+            llvm::raw_fd_ostream OS(outPath, EC, llvm::sys::fs::OF_Text);
             if (EC) {
                 llvm::errs() << "Error opening file for writing: " << EC.message() << "\n";
                 return;
             }
 
             RewriteBuf.write(OS);
-            REWRITE_LOG() << "Rewrote file: " << filePath << "\n";
+            REWRITE_LOG() << "Wrote output to: " << outPath << "\n";
         } else {
-            REWRITE_LOG() << "No changes needed for: " << filePath << "\n";
+            REWRITE_LOG() << "No changes needed for: " << inputPath << "\n";
         }
     }
 };
@@ -111,6 +116,28 @@ int main(int argc, const char **argv) {
         return 1;
     }
     CommonOptionsParser &OptionsParser = ExpectedParser.get();
+
+    if (InPlace && !OutputFile.empty()) {
+        llvm::errs() << "error: -i and -o are mutually exclusive\n";
+        return 1;
+    }
+    if (!InPlace && OutputFile.empty()) {
+        llvm::errs() << "error: specify -i to rewrite in-place or -o <file> to write to a new file\n";
+        return 1;
+    }
+    if (!OutputFile.empty() && OptionsParser.getSourcePathList().size() > 1) {
+        llvm::errs() << "error: -o requires exactly one input file\n";
+        return 1;
+    }
+
+    // Resolve -o relative to the real CWD now, before ClangTool::run()
+    // switches the working directory to the compilation database directory.
+    if (!OutputFile.empty()) {
+        llvm::SmallString<256> absPath(OutputFile.getValue());
+        llvm::sys::fs::make_absolute(absPath);
+        OutputFile = std::string(absPath);
+    }
+
     ClangTool Tool(OptionsParser.getCompilations(),
                    OptionsParser.getSourcePathList());
 

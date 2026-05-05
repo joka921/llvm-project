@@ -25,10 +25,12 @@ inline std::ostream& null_stream() {
     return nullStream;
 }
 
-// Logging macro for fine-grained control
-// Toggle between null_stream() and std::cout to enable/disable logging
-#define REWRITE_LOG() std::cout
-//#define REWRITE_LOG() null_stream()
+inline bool& verboseLogging() {
+    static bool enabled = false;
+    return enabled;
+}
+
+#define REWRITE_LOG() (verboseLogging() ? std::cout : null_stream())
 
 // Replacement types
 // The bool means `true` for replace, `false` for insert after the beginning

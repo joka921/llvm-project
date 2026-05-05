@@ -24,6 +24,7 @@ using namespace llvm;
 
 // Command-line options (declared as extern, defined in RewriteGenerators.cpp)
 extern llvm::cl::OptionCategory MyToolCategory;
+extern llvm::cl::opt<bool> Verbose;
 extern llvm::cl::opt<bool> InPlace;
 extern llvm::cl::opt<std::string> OutputFile;
 
@@ -116,6 +117,7 @@ int main(int argc, const char **argv) {
         return 1;
     }
     CommonOptionsParser &OptionsParser = ExpectedParser.get();
+    verboseLogging() = Verbose;
 
     if (InPlace && !OutputFile.empty()) {
         llvm::errs() << "error: -i and -o are mutually exclusive\n";

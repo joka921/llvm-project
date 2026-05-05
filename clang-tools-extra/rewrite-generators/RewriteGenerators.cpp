@@ -14,6 +14,11 @@ llvm::cl::OptionCategory MyToolCategory("coroutine-rewriter");
 cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 cl::extrahelp MoreHelp("\nRewrites C++20 coroutines to C++17 compatible state machines.\n");
 
+cl::opt<bool> Verbose("verbose",
+    cl::desc("Enable verbose logging"),
+    cl::cat(MyToolCategory));
+cl::alias VerboseShort("v", cl::desc("Alias for --verbose"), cl::aliasopt(Verbose));
+
 cl::opt<bool> InPlace("i",
     cl::desc("Rewrite the input file in-place"),
     cl::cat(MyToolCategory));

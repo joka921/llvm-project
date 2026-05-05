@@ -254,11 +254,11 @@ CoroutineStatement::generateYieldOrAwaitReplacements(
     if (!temporaries.empty()) {
         REWRITE_LOG() << "      DEBUG: Adding destruction calls for " << temporaries.size() << " temporaries\n";
 
-        std::string destructorCalls = "\n";
         // Destroy in reverse order (last created first destroyed)
-        for (auto it = temporaries.rbegin(); it != temporaries.rend(); ++it) {
-            destructorCalls += "        " + makeStateDestroyAndClearFlag(it->tempVarName) + ";\n";
-        }
+        std::vector<std::string> tempNames;
+        for (auto it = temporaries.rbegin(); it != temporaries.rend(); ++it)
+            tempNames.push_back(it->tempVarName);
+        std::string destructorCalls = "\n        " + makeDestroyUnconditionally(tempNames) + "\n";
 
         // Insert after the semicolon
         SourceRange afterSemiRange(insertionPointAfterSemicolon, insertionPointAfterSemicolon);

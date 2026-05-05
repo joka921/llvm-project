@@ -1060,9 +1060,7 @@ void CoroutineBodyRewriter::insertLoopVariableDestructors(const Stmt *stmt, bool
             std::string destructorCalls;
 
             // Generate destroy calls in reverse order (LIFO) - variables are already in reverse order from rbegin()
-            for (const auto &varName : varsToDestroy) {
-                destructorCalls += makeStateDestroyAndClearFlag(varName) + ";\n    ";
-            }
+            destructorCalls += makeDestroyUnconditionally(varsToDestroy) + "\n    ";
 
             if (!destructorCalls.empty()) {
                 SourceRange insertRange(insertLoc, insertLoc);
@@ -1496,24 +1494,22 @@ void CoroutineBodyRewriter::insertDestructorsForScope(const ScopeInfo &scope) {
         SourceLocation insertLoc = scope.scopeEnd;
         unsigned fileOffset = sourceManager.getFileOffset(insertLoc);
 
-        for (size_t i = 0; i < scopeVarsWithPriority.size(); ++i) {
-            const std::string &varName = scopeVarsWithPriority[i].first;
-            int varPriority = scopeVarsWithPriority[i].second;
+        // Collect variable names in already-sorted (LIFO) order and emit one variadic call
+        std::vector<std::string> varNames;
+        varNames.reserve(scopeVarsWithPriority.size());
+        for (const auto &[varName, _] : scopeVarsWithPriority)
+            varNames.push_back(varName);
 
-            std::string destructorCall = "    " + makeStateDestroyAndClearFlag(varName) + ";\n";
+        std::string destructorCall = "    " + makeDestroyUnconditionally(varNames) + "\n";
+        int destructorPriority = -scopeVarsWithPriority[0].second;
 
-            // Use negative priority to ensure reverse order at same location
-            int destructorPriority = -varPriority - static_cast<int>(i);
+        ScopeEndReplacement replacement;
+        replacement.replacement = destructorCall;
+        replacement.priority = destructorPriority;
+        scopeEndReplacements[fileOffset].push_back(replacement);
 
-            ScopeEndReplacement replacement;
-            replacement.replacement = destructorCall;
-            replacement.priority = destructorPriority;
-
-            scopeEndReplacements[fileOffset].push_back(replacement);
-
-            REWRITE_LOG() << "      DEBUG: Added destructor call for variable: " << varName
-                    << " with priority: " << destructorPriority << " at file offset " << fileOffset << "\n";
-        }
+        REWRITE_LOG() << "      DEBUG: Added destructor call for " << varNames.size()
+                << " variables with priority: " << destructorPriority << " at file offset " << fileOffset << "\n";
     }
 
 bool CoroutineBodyRewriter::isPartOfDeclaration(const DeclRefExpr *declRef) {

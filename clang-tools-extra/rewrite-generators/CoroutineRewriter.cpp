@@ -599,11 +599,12 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
                 [](const auto &a, const auto &b) { return a.first > b.first; });
 
             structCode += "\n    void destroyAllConstructed() {\n";
-            for (const auto &item : destroyItems) {
-                structCode += "      " + makeStateDestroyIfConstructed(item.second) + "\n";
-            }
-            // Initial awaiter is the earliest — destroy last
-            structCode += "      " + makeStateDestroyIfConstructed("__initial_awaiter") + "\n";
+            // Collect all members in reverse declaration order, initial awaiter last
+            std::vector<std::string> destroyNames;
+            for (const auto &item : destroyItems)
+                destroyNames.push_back(item.second);
+            destroyNames.push_back("__initial_awaiter");
+            structCode += "      " + makeDestroyIfConstructed(destroyNames) + "\n";
             structCode += "    }\n";
         }
 

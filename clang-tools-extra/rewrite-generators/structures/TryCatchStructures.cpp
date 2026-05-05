@@ -4,6 +4,7 @@
 
 #include "TryCatchStructures.h"
 #include "../Common.h"
+#include "../codegen/MacroCodeGenerator.h"
 
 using namespace clang;
 
@@ -81,12 +82,11 @@ TryCatchBlock::generateReplacements(
     if (tryBlockEnd.isValid()) {
         SourceRange atClose(tryBlockEnd, tryBlockEnd);
 
-        std::string cleanup = " catch (...) {\n";
+        std::string cleanup = " catch (...) {\n  ";
         // Destroy variables in reverse declaration order
-        for (auto it = variablesInTryBlock.rbegin(); it != variablesInTryBlock.rend(); ++it) {
-            cleanup += "  DESTROY_IF_CONSTRUCTED(" + *it + ");\n";
-        }
-        cleanup += "  throw;\n}\n}\n";
+        std::vector<std::string> reversed(variablesInTryBlock.rbegin(), variablesInTryBlock.rend());
+        cleanup += makeDestroyIfConstructed(reversed);
+        cleanup += "\n  throw;\n}\n}\n";
 
         int priority = 20000 + static_cast<int>(index) + 2;
         replacements.emplace_back(atClose, cleanup, priority, false);

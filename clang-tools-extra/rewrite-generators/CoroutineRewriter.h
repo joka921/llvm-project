@@ -92,6 +92,7 @@ private:
     // #ifdef / #ifndef guards for template coroutines
     void wrapTemplateDefinitionsWithIfndef();
     std::string buildTemplateForwardDeclaration(const FunctionTemplateDecl *tmplDecl);
+    std::string buildMemberTemplateElseDeclaration(const FunctionTemplateDecl *tmplDecl);
 
     // Lambda coroutine extraction
     void extractLambdaCoroutines();

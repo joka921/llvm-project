@@ -40,15 +40,18 @@ CoroutineBodyRewriter::CoroutineBodyRewriter(const std::set<LocalVariable> &vars
     // Build the mapping from variable declaration locations to member names
     // This handles shadowing by renaming variables with the same name in different scopes
 void CoroutineBodyRewriter::buildDeclLocationMapping() {
-        std::set<SourceLocation> addedDeclLocations; // Track which declarations we've already processed
+        std::set<std::pair<SourceLocation, std::string>> addedDeclLocations; // Track which declarations we've already processed
         std::map<std::string, int> variableNameCounts; // Track count of each variable name for shadowing
 
         for (const auto &var : localVariables) {
+            // Synthetic range-for vars (__range_N etc.) have no real VarDecl, so no mapping needed.
+            if (var.isSynthetic) continue;
             // Skip if we've already processed this exact variable declaration
-            if (addedDeclLocations.count(var.location) > 0) {
+            auto dedupKey = std::make_pair(var.location, var.name);
+            if (addedDeclLocations.count(dedupKey) > 0) {
                 continue;
             }
-            addedDeclLocations.insert(var.location);
+            addedDeclLocations.insert(dedupKey);
 
             // Determine the member name (with suffix for shadowed variables)
             // Lambda variables keep their original name; the functor class name is only used for the type parameter
@@ -205,19 +208,19 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                     switch (form) {
                         case BRACED_INIT:
                             prefix = makeBracedInitPrefix(effectiveName, isOwning);
-                            suffix = "})";
-                            REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_BRACED_INIT_OWNING" : "CO_BRACED_INIT") << " for variable '" << effectiveName << "'\n";
+                            suffix = isOwning ? "})" : ")";
+                            REWRITE_LOG() << "    DEBUG: Using CO_INIT (braced, " << (isOwning ? "owning" : "non-owning") << ") for variable '" << effectiveName << "'\n";
                             break;
                         case PAREN_INIT:
                             prefix = makeParenInitPrefix(effectiveName, isOwning);
-                            REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_PAREN_INIT_OWNING" : "CO_PAREN_INIT") << " for variable '" << effectiveName << "'\n";
-                            suffix = "))";
+                            suffix = isOwning ? "))" : ")";
+                            REWRITE_LOG() << "    DEBUG: Using CO_INIT (paren, " << (isOwning ? "owning" : "non-owning") << ") for variable '" << effectiveName << "'\n";
                             break;
                         case CONSTRUCT_CALL:
                         default:
                             prefix = makeParenInitPrefix(effectiveName, isOwning);
-                            REWRITE_LOG() << "    DEBUG: Using " << (isOwning ? "CO_PAREN_INIT_OWNING" : "CO_PAREN_INIT") << " for construct call variable '" << effectiveName << "'\n";
-                            suffix = "))";
+                            suffix = isOwning ? "))" : ")";
+                            REWRITE_LOG() << "    DEBUG: Using CO_INIT (construct, " << (isOwning ? "owning" : "non-owning") << ") for variable '" << effectiveName << "'\n";
                             break;
                     }
 
@@ -296,9 +299,8 @@ bool CoroutineBodyRewriter::VisitDeclStmt(DeclStmt *declStmt) {
                             declReplacements.emplace_back(closingRange, suffix, false);
                         }
                     } else {
-                        // No initialization - replace entire declaration with empty call
-                        // TODO This is not correct, we currently zero out ints unnecessarily here.
-                        std::string emptyCall = prefix + suffix;
+                        // No initialization (e.g. `int i;`) — emit CO_INIT(i) with no arguments.
+                        std::string emptyCall = "CO_INIT(" + effectiveName + ")";
                         SourceRange declRange = varDecl->getSourceRange();
                         declReplacements.emplace_back(declRange, emptyCall, true);
                     }
@@ -540,7 +542,7 @@ bool CoroutineBodyRewriter::TraverseCXXForRangeStmt(CXXForRangeStmt *forRange) {
         if (loopVar) {
             rangedFor.loopVarName = loopVar->getNameAsString();
             QualType loopVarType = loopVar->getType();
-            rangedFor.loopVarType = loopVarType.getAsString();
+            rangedFor.loopVarType = typeAsString(loopVarType, *astContext);
             REWRITE_LOG() << "    Loop variable: " << rangedFor.loopVarType << " " << rangedFor.loopVarName
                     << " at " << loopVar->getLocation().printToString(sourceManager) << "\n";
         }

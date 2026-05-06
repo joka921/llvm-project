@@ -74,21 +74,21 @@ inline std::string makeDestroyIfConstructed(const std::vector<std::string> &name
     return result;
 }
 
-// Helper function to generate CO_BRACED_INIT prefix
+// Helper function to generate CO_INIT prefix for braced initialization
 inline std::string makeBracedInitPrefix(const std::string &varName, bool isOwning) {
     if (isOwning) {
         return "CO_INIT(" + varName + ", { ";
     } else {
-        return "CO_BRACED_INIT(" + varName + ", ";
+        return "CO_INIT(" + varName + ", ";
     }
 }
 
-// Helper function to generate CO_PAREN_INIT prefix
+// Helper function to generate CO_INIT prefix for parenthesized initialization
 inline std::string makeParenInitPrefix(const std::string &varName, bool isOwning) {
     if (isOwning) {
         return "CO_INIT(" + varName + ",(";
     } else {
-        return "CO_PAREN_INIT(" + varName + ", ";
+        return "CO_INIT(" + varName + ", ";
     }
 }
 

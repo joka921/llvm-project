@@ -507,7 +507,8 @@ struct _coro_storage {
 #define CO_RESUME(index, awaiterMem) \
   label_##index:                                                       \
   CO_GET(awaiterMem).await_resume();                                   \
-  DESTROY_UNCONDITIONALLY(awaiterMem);
+  DESTROY_UNCONDITIONALLY(awaiterMem);                                 \
+  this->curState = static_cast<size_t>(-1);
 
 #define CO_YIELD(index, awaiterMem, value)                            \
     this->awaiterMem.construct(promise().yield_value(value));           \

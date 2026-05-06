@@ -90,6 +90,7 @@ struct LocalVariable {
     // Dependent type support (for template coroutines)
     bool isDependentType = false;
     bool usesAutoDeduction = false;
+    bool isSynthetic = false; // True for range-for synthetic vars (__range_N, __begin_N, __end_N)
     const VarDecl *varDecl = nullptr; // Stored for decltype generation (AST lives through rewrite)
 
     enum class AutoQualifier { None, Plain, LRef, RRef, ConstLRef };

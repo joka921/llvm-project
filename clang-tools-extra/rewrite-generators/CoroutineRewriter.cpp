@@ -353,7 +353,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         if (!coro.parameters.empty()) {
             structCode += "    // Function parameters\n";
             for (const auto &param: coro.parameters) {
-                std::string paramType = "decltype(" + param.name + ")";
+                std::string paramType = typeAsString(param.qualType, *astContext);
                 structCode += "    " + paramType + " " + param.name + ";\n";
                 REWRITE_LOG() << "    Added parameter to struct: " << paramType << " " << param.name << "\n";
             }
@@ -383,7 +383,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
                 for (const auto &param : coro.parameters) {
                     if (!first) structCode += ", ";
-                    structCode += "decltype(" + param.name + ") " + param.name;
+                    structCode += typeAsString(param.qualType, *astContext) + " " + param.name;
                     first = false;
                 }
 
@@ -413,7 +413,7 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
             structCode += "    // No local variables found in this coroutine\n";
         } else {
             structCode += "    // Local variables (including ranged-for loop variables)\n";
-            std::set<SourceLocation> addedDeclLocations; // Track which declarations we've already added
+            std::set<std::pair<SourceLocation, std::string>> addedDeclLocations; // Track which declarations we've already added
 
             // Set up decltype generator for dependent types in template coroutines
             DecltypeExpressionGenerator decltypeGen(sourceManager, *astContext,
@@ -425,18 +425,22 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
 
             for (const auto &var: coro.localVariables) {
                 // Skip if we've already added this exact variable declaration
-                if (addedDeclLocations.count(var.location) > 0) {
+                auto dedupKey = std::make_pair(var.location, var.name);
+                if (addedDeclLocations.count(dedupKey) > 0) {
                     REWRITE_LOG() << "    Skipping true duplicate variable: " << var.name
                                  << " at " << var.location.printToString(sourceManager) << "\n";
                     continue;
                 }
-                addedDeclLocations.insert(var.location);
+                addedDeclLocations.insert(dedupKey);
 
-                // Get the member name from the pre-built mapping in CoroutineInfo
+                // Get the member name from the pre-built mapping in CoroutineInfo.
+                // Synthetic range-for vars (__range_N etc.) use their name directly — they have no VarDecl entry.
                 std::string memberName = var.name; // Default to original name
-                auto it = coro.declLocationToMemberName.find(var.location);
-                if (it != coro.declLocationToMemberName.end()) {
-                    memberName = it->second;
+                if (!var.isSynthetic) {
+                    auto it = coro.declLocationToMemberName.find(var.location);
+                    if (it != coro.declLocationToMemberName.end()) {
+                        memberName = it->second;
+                    }
                 }
 
                 // For lambda variables, use the functor CLASS name as the _coro_storage type
@@ -474,14 +478,17 @@ std::string CoroutineRewriter::generateCoroImplStruct(const CoroutineInfo &coro)
         structCode += "    struct {\n";
         // Local variable flags (only if there are locals)
         if (!coro.localVariables.empty()) {
-            std::set<SourceLocation> flagDeclLocations;
+            std::set<std::pair<SourceLocation, std::string>> flagDeclLocations;
             for (const auto &var : coro.localVariables) {
-                if (flagDeclLocations.count(var.location) > 0) continue;
-                flagDeclLocations.insert(var.location);
+                auto flagKey = std::make_pair(var.location, var.name);
+                if (flagDeclLocations.count(flagKey) > 0) continue;
+                flagDeclLocations.insert(flagKey);
                 std::string flagMemberName = var.name;
-                auto flagIt = coro.declLocationToMemberName.find(var.location);
-                if (flagIt != coro.declLocationToMemberName.end()) {
-                    flagMemberName = flagIt->second;
+                if (!var.isSynthetic) {
+                    auto flagIt = coro.declLocationToMemberName.find(var.location);
+                    if (flagIt != coro.declLocationToMemberName.end()) {
+                        flagMemberName = flagIt->second;
+                    }
                 }
                 structCode += "        bool " + flagMemberName + " = false;\n";
             }
@@ -1176,31 +1183,17 @@ void CoroutineRewriter::rewriteCoroutineBody(CoroutineInfo &coro) {
                 }
             }
 
-            // Add ranged-for variables to the local variables set so they appear in the struct
+            // Add ranged-for synthetic variables (__range_N, __begin_N, __end_N) to the local variables set
+            // so they appear as members in the frame struct. The actual loop variable is already collected
+            // by the initial AST traversal pass and does not need to be re-added here.
             for (const auto &rangedFor: rangedForLoops) {
-                // Add the actual loop variable to the struct
-                LocalVariable loopVar;
-                loopVar.name = rangedFor.loopVarName;
-                loopVar.type = rangedFor.loopVarType;
-
-                // For ranged-for loop variables, we need to determine storage based on the loop variable type
-                // Since there's no explicit initializer, we analyze the type directly
-                // The conceptual initializer would be `*iterator`, which is typically an lvalue
-
-                loopVar.isReference = (loopVar.type.find("&") != std::string::npos);
-
-                loopVar.referenceType = loopVar.type;
-                loopVar.isOwning = !loopVar.isReference;
-                loopVar.location = rangedFor.fullRange.getBegin();
-                loopVar.priority = sourceManager.getFileOffset(loopVar.location); // Use file offset as priority
-                const_cast<CoroutineInfo &>(coro).localVariables.insert(loopVar);
-
                 LocalVariable rangeVar;
                 rangeVar.name = rangedFor.rangeVarName;
                 std::tie(rangeVar.type, rangeVar.isOwning) =
                         getTypeForAutoRefRefVariable(rangedFor.rangeExpr, *astContext);
                 rangeVar.referenceType = rangeVar.type + " &";
                 rangeVar.isReference = false;
+                rangeVar.isSynthetic = true;
                 rangeVar.location = rangedFor.fullRange.getBegin();
                 rangeVar.priority = sourceManager.getFileOffset(rangeVar.location) + 1; // Slightly later priority
                 const_cast<CoroutineInfo &>(coro).localVariables.insert(rangeVar);
@@ -1213,6 +1206,7 @@ void CoroutineRewriter::rewriteCoroutineBody(CoroutineInfo &coro) {
                     beginVar.isOwning = true; // Iterator types are typically not references
                     beginVar.referenceType = beginVar.type + " &";
                     beginVar.isReference = false;
+                    beginVar.isSynthetic = true;
                     beginVar.location = rangedFor.fullRange.getBegin();
                     beginVar.priority = sourceManager.getFileOffset(beginVar.location) + priority;
                     const_cast<CoroutineInfo &>(coro).localVariables.insert(beginVar);
@@ -1716,24 +1710,16 @@ void CoroutineRewriter::rewriteSingleTemplateInstantiation(const TemplateInstant
         }
     }
 
-    // Add ranged-for variables (same as rewriteCoroutineBody)
+    // Add ranged-for synthetic variables (__range_N, __begin_N, __end_N).
+    // The loop variable is already in coro.localVariables from collectLocalVariables above.
     for (const auto &rangedFor : coro.rangedForLoops) {
-        LocalVariable loopVar;
-        loopVar.name = rangedFor.loopVarName;
-        loopVar.type = rangedFor.loopVarType;
-        loopVar.isReference = (loopVar.type.find("&") != std::string::npos);
-        loopVar.referenceType = loopVar.type;
-        loopVar.isOwning = !loopVar.isReference;
-        loopVar.location = rangedFor.fullRange.getBegin();
-        loopVar.priority = sourceManager.getFileOffset(loopVar.location);
-        coro.localVariables.insert(loopVar);
-
         LocalVariable rangeVar;
         rangeVar.name = rangedFor.rangeVarName;
         std::tie(rangeVar.type, rangeVar.isOwning) =
                 getTypeForAutoRefRefVariable(rangedFor.rangeExpr, *astContext);
         rangeVar.referenceType = rangeVar.type + " &";
         rangeVar.isReference = false;
+        rangeVar.isSynthetic = true;
         rangeVar.location = rangedFor.fullRange.getBegin();
         rangeVar.priority = sourceManager.getFileOffset(rangeVar.location) + 1;
         coro.localVariables.insert(rangeVar);
@@ -1745,6 +1731,7 @@ void CoroutineRewriter::rewriteSingleTemplateInstantiation(const TemplateInstant
             beginVar.isOwning = true;
             beginVar.referenceType = beginVar.type + " &";
             beginVar.isReference = false;
+            beginVar.isSynthetic = true;
             beginVar.location = rangedFor.fullRange.getBegin();
             beginVar.priority = sourceManager.getFileOffset(beginVar.location) + priority;
             coro.localVariables.insert(beginVar);
@@ -1830,15 +1817,97 @@ void CoroutineRewriter::wrapTemplateDefinitionsWithIfndef() {
         rewriter.InsertTextBefore(range.getBegin(),
             "#ifndef COROUTINES_REWRITTEN_TO_STATEMACHINES\n");
 
-        // Insert #endif after the template definition (after the closing '}')
-        rewriter.InsertTextAfterToken(range.getEnd(),
-            "\n#endif // !COROUTINES_REWRITTEN_TO_STATEMACHINES\n");
+        // For member template coroutines, add an #else branch declaring the method with the
+        // rewritten return type. This gives the state machine out-of-line definitions
+        // (inserted after the class body inside #ifdef) a class declaration to refer to.
+        std::string elseDecl;
+        const FunctionDecl *patternDecl = tmplDecl->getTemplatedDecl();
+        if (patternDecl && isa<CXXMethodDecl>(patternDecl)) {
+            elseDecl = buildMemberTemplateElseDeclaration(tmplDecl);
+        }
 
-        REWRITE_LOG() << "  Wrapped template: "
-                      << tmplDecl->getNameAsString() << "\n";
+        std::string endText = "\n";
+        if (!elseDecl.empty()) {
+            endText += "#else\n" + elseDecl;
+        }
+        endText += "#endif // !COROUTINES_REWRITTEN_TO_STATEMACHINES\n";
+        rewriter.InsertTextAfterToken(range.getEnd(), endText);
+
+        REWRITE_LOG() << "  Wrapped template: " << tmplDecl->getNameAsString()
+                      << (elseDecl.empty() ? "" : " (with #else declaration)") << "\n";
     }
 
     REWRITE_LOG() << "=== END TEMPLATE DEFINITION WRAPPING ===\n\n";
+}
+
+std::string CoroutineRewriter::buildMemberTemplateElseDeclaration(const FunctionTemplateDecl *tmplDecl) {
+    const FunctionDecl *patternDecl = tmplDecl->getTemplatedDecl();
+    if (!patternDecl) return "";
+
+    // Only emit the #else declaration if we have a concrete instantiation to derive the
+    // rewritten return type from. Without one, the state machine block is also empty so
+    // no declaration is needed.
+    std::string returnType;
+    PrintingPolicy canonPolicy(astContext->getLangOpts());
+    canonPolicy.SuppressScope = false;
+    canonPolicy.PrintCanonicalTypes = true;
+    for (const auto &info : templateInstantiations) {
+        if (info.templateDecl == tmplDecl) {
+            QualType retType = info.instantiatedDecl->getReturnType().getCanonicalType();
+            returnType = replaceLastTemplateArgWithHandle(retType.getAsString(canonPolicy));
+            break;
+        }
+    }
+    if (returnType.empty()) return "";
+
+    std::string result;
+
+    // Template parameter list
+    result += "template <";
+    const TemplateParameterList *params = tmplDecl->getTemplateParameters();
+    for (unsigned i = 0; i < params->size(); ++i) {
+        if (i > 0) result += ", ";
+        const NamedDecl *param = params->getParam(i);
+        if (const auto *typeParam = dyn_cast<TemplateTypeParmDecl>(param)) {
+            result += (typeParam->wasDeclaredWithTypename() ? "typename " : "class ");
+            result += typeParam->getNameAsString();
+        } else if (const auto *nonTypeParam = dyn_cast<NonTypeTemplateParmDecl>(param)) {
+            PrintingPolicy policy(astContext->getLangOpts());
+            result += nonTypeParam->getType().getAsString(policy);
+            result += " ";
+            result += nonTypeParam->getNameAsString();
+        }
+    }
+    result += ">\n";
+
+    // For in-class definitions the #else text lands inside the class body, so we use the
+    // unqualified name. For out-of-line definitions it lands at file scope, so we need the
+    // qualified name.
+    const auto *methodDecl = cast<CXXMethodDecl>(patternDecl);
+    bool isInClass = isa<CXXRecordDecl>(methodDecl->getLexicalDeclContext());
+    std::string methodName = isInClass ? patternDecl->getNameAsString()
+                                       : patternDecl->getQualifiedNameAsString();
+
+    result += returnType + " " + methodName + "(";
+
+    // Parameters — use non-canonical policy to preserve template-parameter names like T
+    PrintingPolicy paramPolicy(astContext->getLangOpts());
+    paramPolicy.SuppressScope = false;
+    for (unsigned i = 0; i < patternDecl->getNumParams(); ++i) {
+        if (i > 0) result += ", ";
+        const ParmVarDecl *param = patternDecl->getParamDecl(i);
+        result += param->getType().getAsString(paramPolicy);
+        if (!param->getNameAsString().empty())
+            result += " " + param->getNameAsString();
+    }
+    result += ")";
+
+    // Preserve cv-qualifiers
+    if (methodDecl->isConst()) result += " const";
+    if (methodDecl->isVolatile()) result += " volatile";
+
+    result += ";\n";
+    return result;
 }
 
 std::string CoroutineRewriter::buildTemplateForwardDeclaration(const FunctionTemplateDecl *tmplDecl) {
@@ -2037,24 +2106,16 @@ void CoroutineRewriter::extractSingleLambdaCoroutine(CoroutineInfo &coro) {
         }
     }
 
-    // Add ranged-for variables (same as rewriteSingleTemplateInstantiation)
+    // Add ranged-for synthetic variables (__range_N, __begin_N, __end_N).
+    // The loop variable is already in coro.localVariables from collectLocalVariables above.
     for (const auto &rangedFor : coro.rangedForLoops) {
-        LocalVariable loopVar;
-        loopVar.name = rangedFor.loopVarName;
-        loopVar.type = rangedFor.loopVarType;
-        loopVar.isReference = (loopVar.type.find("&") != std::string::npos);
-        loopVar.referenceType = loopVar.type;
-        loopVar.isOwning = !loopVar.isReference;
-        loopVar.location = rangedFor.fullRange.getBegin();
-        loopVar.priority = sourceManager.getFileOffset(loopVar.location);
-        coro.localVariables.insert(loopVar);
-
         LocalVariable rangeVar;
         rangeVar.name = rangedFor.rangeVarName;
         std::tie(rangeVar.type, rangeVar.isOwning) =
                 getTypeForAutoRefRefVariable(rangedFor.rangeExpr, *astContext);
         rangeVar.referenceType = rangeVar.type + " &";
         rangeVar.isReference = false;
+        rangeVar.isSynthetic = true;
         rangeVar.location = rangedFor.fullRange.getBegin();
         rangeVar.priority = sourceManager.getFileOffset(rangeVar.location) + 1;
         coro.localVariables.insert(rangeVar);
@@ -2066,6 +2127,7 @@ void CoroutineRewriter::extractSingleLambdaCoroutine(CoroutineInfo &coro) {
             beginVar.isOwning = true;
             beginVar.referenceType = beginVar.type + " &";
             beginVar.isReference = false;
+            beginVar.isSynthetic = true;
             beginVar.location = rangedFor.fullRange.getBegin();
             beginVar.priority = sourceManager.getFileOffset(beginVar.location) + priority;
             coro.localVariables.insert(beginVar);
@@ -2403,24 +2465,16 @@ void CoroutineRewriter::extractSingleGenericLambda(GenericLambdaInfo &info) {
             }
         }
 
-        // Add ranged-for variables
+        // Add ranged-for synthetic variables (__range_N, __begin_N, __end_N).
+        // The loop variable is already in coro.localVariables from collectLocalVariables above.
         for (const auto &rangedFor : coro.rangedForLoops) {
-            LocalVariable loopVar;
-            loopVar.name = rangedFor.loopVarName;
-            loopVar.type = rangedFor.loopVarType;
-            loopVar.isReference = (loopVar.type.find("&") != std::string::npos);
-            loopVar.referenceType = loopVar.type;
-            loopVar.isOwning = !loopVar.isReference;
-            loopVar.location = rangedFor.fullRange.getBegin();
-            loopVar.priority = sourceManager.getFileOffset(loopVar.location);
-            coro.localVariables.insert(loopVar);
-
             LocalVariable rangeVar;
             rangeVar.name = rangedFor.rangeVarName;
             std::tie(rangeVar.type, rangeVar.isOwning) =
                     getTypeForAutoRefRefVariable(rangedFor.rangeExpr, *astContext);
             rangeVar.referenceType = rangeVar.type + " &";
             rangeVar.isReference = false;
+            rangeVar.isSynthetic = true;
             rangeVar.location = rangedFor.fullRange.getBegin();
             rangeVar.priority = sourceManager.getFileOffset(rangeVar.location) + 1;
             coro.localVariables.insert(rangeVar);
@@ -2432,6 +2486,7 @@ void CoroutineRewriter::extractSingleGenericLambda(GenericLambdaInfo &info) {
                 beginVar.isOwning = true;
                 beginVar.referenceType = beginVar.type + " &";
                 beginVar.isReference = false;
+                beginVar.isSynthetic = true;
                 beginVar.location = rangedFor.fullRange.getBegin();
                 beginVar.priority = sourceManager.getFileOffset(beginVar.location) + priority;
                 coro.localVariables.insert(beginVar);

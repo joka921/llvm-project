@@ -6,6 +6,8 @@
 #include <iostream>
 #include <ostream>
 #include <ranges>
+#include <sstream>
+#include <string>
 
 #include "./generator.h"
 #include <vector>
@@ -234,22 +236,29 @@ cppcoro::generator<int> testTryCatch() {
 }
 */
 
-cppcoro::generator<int> testTryCatch() {
-  int x = 42;
-  try {
-    int y = x + 1;
-    co_yield y;
-    int i = 15;
-    while (i) {
-      int z = y + 1;
-      co_yield z;
-      --i;
+struct HexPrepender {
+  std::string prefix_;
+
+  template<typename Range>
+  cppcoro::generator<std::string> toHexAndPrepend(Range range) {
+    for (auto it = range.begin(); it != end; ++it) {
+      try {
+        int value = std::stoi(std::string(*it));
+        std::ostringstream ss{};
+        ss << std::hex << value;
+        std::string s = prefix_ + ss.str();
+        co_yield s;
+      } catch (const std::exception &e) {
+        std::cout << e.what() << "\n";
+        break;
+      }
     }
-  } catch (std::exception& e) {
-    std::cout << "Caught exception: " << e.what() << " x=" << x << std::endl;
-  } catch (...) {
-    std::cout << "Caught unknown exception, x=" << x << std::endl;
   }
-  co_yield x;
-  co_return;
+};
+
+int main() {
+  HexPrepender prepender{"0x"};
+  for (const auto &el: prepender.toHexAndPrepend(std::array{"13", "17", "potato", "4"})) {
+    std::cout << el << "\n";
+  }
 }

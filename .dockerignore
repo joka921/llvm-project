@@ -1,0 +1,11 @@
+# Ignore build directories
+build/
+build
+**/build/
+**/build
+
+# Ignore all cmake-build directories (recursively)
+cmake-build*/
+cmake-build*
+**/cmake-build*/
+**/cmake-build*

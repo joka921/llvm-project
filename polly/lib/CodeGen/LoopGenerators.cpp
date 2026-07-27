@@ -90,7 +90,8 @@ Value *polly::createLoop(Value *LB, Value *UB, Value *Stride,
                          DominatorTree &DT, BasicBlock *&ExitBB,
                          ICmpInst::Predicate Predicate,
                          ScopAnnotator *Annotator, bool Parallel, bool UseGuard,
-                         bool LoopVectDisabled) {
+                         bool LoopVectDisabled,
+                         bool SkipVectorizeEnableMetadata) {
   Function *F = Builder.GetInsertBlock()->getParent();
   LLVMContext &Context = F->getContext();
 
@@ -128,7 +129,7 @@ Value *polly::createLoop(Value *LB, Value *UB, Value *Stride,
     Annotator->pushLoop(NewLoop, Parallel);
 
   // ExitBB
-  ExitBB = SplitBlock(BeforeBB, &*Builder.GetInsertPoint(), &DT, &LI);
+  ExitBB = SplitBlock(BeforeBB, Builder.GetInsertPoint(), &DT, &LI);
   ExitBB->setName("polly.loop_exit");
 
   // BeforeBB
@@ -163,17 +164,16 @@ Value *polly::createLoop(Value *LB, Value *UB, Value *Stride,
       Builder.CreateICmp(Predicate, IncrementedIV, UB, "polly.loop_cond");
 
   // Create the loop latch and annotate it as such.
-  BranchInst *B = Builder.CreateCondBr(LoopCondition, HeaderBB, ExitBB);
+  CondBrInst *B = Builder.CreateCondBr(LoopCondition, HeaderBB, ExitBB);
 
-  // Don't annotate vectorize metadata when both LoopVectDisabled and
-  // PollyVectorizeMetadata are disabled. Annotate vectorize metadata to false
-  // when LoopVectDisabled is true. Otherwise we annotate the vectorize metadata
-  // to true.
+  // Emit vectorize.enable=false only for explicit user disable
+  // (LoopVectDisabled). For dist=1 FP loops (SkipVectorizeEnableMetadata), omit
+  // the annotation and let the Loop Vectorizer decide.
   if (Annotator) {
     std::optional<bool> EnableVectorizeMetadata;
     if (LoopVectDisabled)
       EnableVectorizeMetadata = false;
-    else if (PollyVectorizeMetadata)
+    else if (PollyVectorizeMetadata && !SkipVectorizeEnableMetadata)
       EnableVectorizeMetadata = true;
     Annotator->annotateLoopLatch(B, Parallel, EnableVectorizeMetadata);
   }
@@ -200,7 +200,7 @@ Value *ParallelLoopGenerator::createParallelLoop(
   Function *SubFn;
   std::tie(IV, SubFn) = createSubFn(Stride, Struct, UsedValues, Map);
   *LoopBody = Builder.GetInsertPoint();
-  Builder.SetInsertPoint(&*BeforeLoop);
+  Builder.SetInsertPoint(BeforeLoop);
 
   // Add one as the upper bound provided by OpenMP is a < comparison
   // whereas the codegenForSequential function creates a <= comparison.

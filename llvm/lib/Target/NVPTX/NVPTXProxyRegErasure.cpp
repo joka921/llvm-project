@@ -20,21 +20,16 @@
 
 #include "NVPTX.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 
 using namespace llvm;
-
-namespace llvm {
-void initializeNVPTXProxyRegErasurePass(PassRegistry &);
-}
 
 namespace {
 
 struct NVPTXProxyRegErasure : public MachineFunctionPass {
   static char ID;
-  NVPTXProxyRegErasure() : MachineFunctionPass(ID) {
-    initializeNVPTXProxyRegErasurePass(*PassRegistry::getPassRegistry());
-  }
+  NVPTXProxyRegErasure() : MachineFunctionPass(ID) {}
 
   bool runOnMachineFunction(MachineFunction &MF) override;
 
@@ -64,12 +59,10 @@ bool NVPTXProxyRegErasure::runOnMachineFunction(MachineFunction &MF) {
   for (auto &BB : MF) {
     for (auto &MI : BB) {
       switch (MI.getOpcode()) {
-      case NVPTX::ProxyRegI1:
-      case NVPTX::ProxyRegI16:
-      case NVPTX::ProxyRegI32:
-      case NVPTX::ProxyRegI64:
-      case NVPTX::ProxyRegF32:
-      case NVPTX::ProxyRegF64: {
+      case NVPTX::ProxyRegB1:
+      case NVPTX::ProxyRegB16:
+      case NVPTX::ProxyRegB32:
+      case NVPTX::ProxyRegB64: {
         auto &InOp = *MI.uses().begin();
         auto &OutOp = *MI.defs().begin();
         assert(InOp.isReg() && "ProxyReg input should be a register.");
@@ -95,17 +88,11 @@ bool NVPTXProxyRegErasure::runOnMachineFunction(MachineFunction &MF) {
     MI->eraseFromParent();
   }
 
-  // Now go replace the registers.
-  for (auto &BB : MF) {
-    for (auto &MI : BB) {
-      for (auto &Op : MI.uses()) {
-        if (!Op.isReg())
-          continue;
-        auto it = RAUWBatch.find(Op.getReg());
-        if (it != RAUWBatch.end())
-          Op.setReg(it->second);
-      }
-    }
+  // Now go replace the registers and remove kill flags conservatively.
+  MachineRegisterInfo &MRI = MF.getRegInfo();
+  for (auto [From, To] : RAUWBatch) {
+    MRI.replaceRegWith(From, To);
+    MRI.clearKillFlags(To);
   }
 
   return true;

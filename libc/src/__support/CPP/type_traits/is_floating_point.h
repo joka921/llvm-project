@@ -30,13 +30,21 @@ public:
       __is_unqualified_any_of<T, float, double, long double
 #ifdef LIBC_TYPES_HAS_FLOAT16
                               ,
+                              // TODO: Remove this once all functions are
+                              // modified to use the emulated float128 instead
+                              // of the alias to either built-in or emulated
+                              // float128
                               float16
 #endif
 #ifdef LIBC_TYPES_HAS_FLOAT128
                               ,
                               float128
 #endif
-                              >();
+                              ,
+                              bfloat16
+
+                              ,
+                              fputil::Float128>();
 };
 template <typename T>
 LIBC_INLINE_VAR constexpr bool is_floating_point_v =

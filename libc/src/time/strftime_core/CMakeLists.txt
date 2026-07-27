@@ -5,6 +5,7 @@ add_header_library(
   DEPENDS
     libc.src.__support.CPP.string_view
     libc.hdr.types.struct_tm
+    libc.hdr.stdint_proxy
 )
 
 add_header_library(
@@ -18,10 +19,8 @@ add_header_library(
     libc.src.__support.str_to_integer
 )
 
-add_object_library(
+add_header_library(
   converter
-  SRCS
-    converter.cpp
   HDRS
     converter.h
     num_converter.h
@@ -31,21 +30,21 @@ add_object_library(
     .core_structs
     libc.src.time.time_utils
     libc.src.time.time_constants
-    libc.src.stdio.printf_core.writer
+    libc.src.__support.printf_core.writer
     libc.src.__support.CPP.string_view
     libc.src.__support.integer_to_string
+    libc.src.__support.error_or
 )
 
-add_object_library(
+add_header_library(
   strftime_main
-  SRCS
-    strftime_main.cpp
   HDRS
     strftime_main.h
   DEPENDS
     .core_structs
     .parser
     .converter
-    libc.src.stdio.printf_core.writer
+    libc.src.__support.error_or
+    libc.src.__support.printf_core.writer
     libc.hdr.types.struct_tm
 )

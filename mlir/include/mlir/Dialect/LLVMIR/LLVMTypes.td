@@ -11,6 +11,7 @@
 
 include "mlir/Dialect/LLVMIR/LLVMOpBase.td"
 include "mlir/IR/AttrTypeBase.td"
+include "mlir/IR/BuiltinTypeInterfaces.td"
 include "mlir/Interfaces/DataLayoutInterfaces.td"
 include "mlir/Interfaces/MemorySlotInterfaces.td"
 
@@ -60,6 +61,32 @@ def LLVMArrayType : LLVMType<"LLVMArray", "array", [
 }
 
 //===----------------------------------------------------------------------===//
+// LLVMByteType
+//===----------------------------------------------------------------------===//
+
+def LLVMByteType : LLVMType<"LLVMByte", "byte", [
+    DeclareTypeInterfaceMethods<DataLayoutTypeInterface,
+                                ["getTypeSizeInBits", "getABIAlignment"]>,
+    VectorElementTypeInterface]> {
+  let summary = "LLVM byte type";
+  let description = [{
+    The `!llvm.byte` type represents raw memory data in SSA registers, mirroring
+    LLVM's builtin byte type.
+    It should be used when it cannot be determined whether a value holds a
+    pointer or another type at run time, or if the value contains uninitialized
+    or poison data.
+    Unlike integer types, copying byte types preserves all poison bits and the
+    provenance of pointers.
+  }];
+
+  let parameters = (ins "unsigned":$bitWidth);
+  let assemblyFormat = [{
+    `<` $bitWidth `>`
+  }];
+  let genVerifyDecl = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // LLVMFunctionType
 //===----------------------------------------------------------------------===//
 
@@ -103,7 +130,8 @@ def LLVMFunctionType : LLVMType<"LLVMFunction", "func"> {
     bool isVarArg() const { return getVarArg(); }
 
     /// Returns a clone of this function type with the given argument
-    /// and result types.
+    /// and result types. Returns null if the resulting function type would
+    /// not verify.
     LLVMFunctionType clone(TypeRange inputs, TypeRange results) const;
 
     /// Returns the result type of the function as an ArrayRef, enabling better
@@ -259,7 +287,8 @@ def LLVMStructType : LLVMType<"LLVMStruct", "struct", [
 def LLVMPointerType : LLVMType<"LLVMPointer", "ptr", [
     DeclareTypeInterfaceMethods<DataLayoutTypeInterface, [
       "getIndexBitwidth", "areCompatible", "verifyEntries",
-      "getPreferredAlignment"]>]> {
+      "getPreferredAlignment"]>,
+    VectorElementTypeInterface]> {
   let summary = "LLVM pointer type";
   let description = [{
     The `!llvm.ptr` type is an LLVM pointer type. This type typically represents
@@ -284,70 +313,6 @@ def LLVMPointerType : LLVMType<"LLVMPointer", "ptr", [
       return $_get($_ctxt, addressSpace);
     }]>
   ];
-}
-
-//===----------------------------------------------------------------------===//
-// LLVMFixedVectorType
-//===----------------------------------------------------------------------===//
-
-def LLVMFixedVectorType : LLVMType<"LLVMFixedVector", "vec"> {
-  let summary = "LLVM fixed vector type";
-  let description = [{
-    LLVM dialect vector type that supports all element types that are supported
-    in LLVM vectors but that are not supported by the builtin MLIR vector type.
-    E.g., LLVMFixedVectorType supports LLVM pointers as element type.
-  }];
-
-  let typeName = "llvm.fixed_vec";
-
-  let parameters = (ins "Type":$elementType, "unsigned":$numElements);
-  let assemblyFormat = [{
-    `<` $numElements `x` custom<PrettyLLVMType>($elementType) `>`
-  }];
-
-  let genVerifyDecl = 1;
-
-  let builders = [
-    TypeBuilderWithInferredContext<(ins "Type":$elementType,
-                                        "unsigned":$numElements)>
-  ];
-
-  let extraClassDeclaration = [{
-    /// Checks if the given type can be used in a vector type.
-    static bool isValidElementType(Type type);
-  }];
-}
-
-//===----------------------------------------------------------------------===//
-// LLVMScalableVectorType
-//===----------------------------------------------------------------------===//
-
-def LLVMScalableVectorType : LLVMType<"LLVMScalableVector", "vec"> {
-  let summary = "LLVM scalable vector type";
-  let description = [{
-    LLVM dialect scalable vector type, represents a sequence of elements of
-    unknown length that is known to be divisible by some constant. These
-    elements can be processed as one in SIMD context.
-  }];
-
-  let typeName = "llvm.scalable_vec";
-
-  let parameters = (ins "Type":$elementType, "unsigned":$minNumElements);
-  let assemblyFormat = [{
-    `<` `?` `x` $minNumElements `x` ` ` custom<PrettyLLVMType>($elementType) `>`
-  }];
-
-  let genVerifyDecl = 1;
-
-  let builders = [
-    TypeBuilderWithInferredContext<(ins "Type":$elementType,
-                                        "unsigned":$minNumElements)>
-  ];
-
-  let extraClassDeclaration = [{
-    /// Checks if the given type can be used in a vector type.
-    static bool isValidElementType(Type type);
-  }];
 }
 
 //===----------------------------------------------------------------------===//
@@ -395,6 +360,19 @@ def LLVMX86AMXType : LLVMType<"LLVMX86AMX", "x86_amx"> {
   let description = [{
     The x86_amx type represents a value held in an AMX tile register on an x86
     machine. Can only be used in AMX intrinsics calls.
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// LLVMPPCFP128Type
+//===----------------------------------------------------------------------===//
+
+def LLVMPPCFP128Type : LLVMType<"LLVMPPCFP128", "ppc_fp128",
+    [DeclareTypeInterfaceMethods<FloatTypeInterface, ["getFloatSemantics"]>]> {
+  let summary = "128 bit FP type with IBM double-double semantics";
+  let description = [{
+    A 128 bit floating-point type with IBM double-double semantics.
+    See S_PPCDoubleDouble in APFloat.h for details.
   }];
 }
 

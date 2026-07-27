@@ -13,6 +13,8 @@ from ObjCDataFormatterTestCase import ObjCDataFormatterTestCase
 
 
 class ObjCDataFormatterNSContainer(ObjCDataFormatterTestCase):
+    SHARED_BUILD_TESTCASE = False
+
     def test_nscontainers_with_run_command(self):
         """Test formatters for  NS container classes."""
         self.appkit_tester_impl(self.nscontainers_data_formatter_commands, False)
@@ -52,6 +54,7 @@ class ObjCDataFormatterNSContainer(ObjCDataFormatterTestCase):
 
         self.expect(
             "frame variable -d run-target *nscfDictionary",
+            ordered=False,
             patterns=[
                 r"\(__NSCFDictionary\) \*nscfDictionary =",
                 'key = 0x.* @"foo"',
@@ -67,6 +70,7 @@ class ObjCDataFormatterNSContainer(ObjCDataFormatterTestCase):
 
         self.expect(
             "frame variable -d run-target *cfDictionaryRef",
+            ordered=False,
             patterns=[
                 r"\(const __CFDictionary\) \*cfDictionaryRef =",
                 'key = 0x.* @"foo"',

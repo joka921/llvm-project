@@ -184,9 +184,11 @@ int main(int argc, const char **argv) {
   if (CompressionLevel.getNumOccurrences() > 0)
     BundlerConfig.CompressionLevel = CompressionLevel;
 
-  BundlerConfig.TargetNames = TargetNames;
-  BundlerConfig.InputFileNames = InputFileNames;
-  BundlerConfig.OutputFileNames = OutputFileNames;
+  BundlerConfig.TargetNames.assign(TargetNames.begin(), TargetNames.end());
+  BundlerConfig.InputFileNames.assign(InputFileNames.begin(),
+                                      InputFileNames.end());
+  BundlerConfig.OutputFileNames.assign(OutputFileNames.begin(),
+                                       OutputFileNames.end());
 
   /// The index of the host input in the list of inputs.
   BundlerConfig.HostInputIndex = ~0u;
@@ -243,7 +245,8 @@ int main(int argc, const char **argv) {
     s.insert(s.end(), InputFileNamesDeprecatedOpt.begin(),
              InputFileNamesDeprecatedOpt.end());
   }
-  BundlerConfig.InputFileNames = InputFileNames;
+  BundlerConfig.InputFileNames.assign(InputFileNames.begin(),
+                                      InputFileNames.end());
 
   if (OutputFileNames.getNumOccurrences() != 0 &&
       OutputFileNamesDeprecatedOpt.getNumOccurrences() != 0) {
@@ -259,7 +262,8 @@ int main(int argc, const char **argv) {
     s.insert(s.end(), OutputFileNamesDeprecatedOpt.begin(),
              OutputFileNamesDeprecatedOpt.end());
   }
-  BundlerConfig.OutputFileNames = OutputFileNames;
+  BundlerConfig.OutputFileNames.assign(OutputFileNames.begin(),
+                                       OutputFileNames.end());
 
   if (ListBundleIDs) {
     if (Unbundle) {
@@ -355,6 +359,15 @@ int main(int argc, const char **argv) {
           errc::invalid_argument, "Duplicate targets are not allowed"));
     }
 
+    if (!checkOffloadBundleID(Target)) {
+      return reportError(createStringError(
+          errc::invalid_argument,
+          "Targets need to follow the format '<offload kind>-<target triple>', "
+          "where '<target triple>' follows the format "
+          "'<kind>-<arch>-<vendor>-<os>-<env>[-<target id>[:target "
+          "features]]'."));
+    }
+
     auto OffloadInfo = OffloadTargetInfo(Target, BundlerConfig);
     bool KindIsValid = OffloadInfo.isOffloadKindValid();
     bool TripleIsValid = OffloadInfo.isTripleValid();
@@ -386,7 +399,8 @@ int main(int argc, const char **argv) {
     ++Index;
   }
 
-  BundlerConfig.TargetNames = StandardizedTargetNames;
+  BundlerConfig.TargetNames.assign(StandardizedTargetNames.begin(),
+                                   StandardizedTargetNames.end());
 
   for (const auto &TargetID : TargetIDs) {
     if (auto ConflictingTID =
@@ -417,12 +431,9 @@ int main(int argc, const char **argv) {
   OffloadBundler Bundler(BundlerConfig);
 
   return doWork([&]() {
-    if (Unbundle) {
-      if (BundlerConfig.FilesType == "a")
-        return Bundler.UnbundleArchive();
-      else
-        return Bundler.UnbundleFiles();
-    } else
-      return Bundler.BundleFiles();
+    if (Unbundle)
+      return (BundlerConfig.FilesType == "a") ? Bundler.UnbundleArchive()
+                                              : Bundler.UnbundleFiles();
+    return Bundler.BundleFiles();
   });
 }

@@ -309,8 +309,6 @@ Status ABISysV_ppc64::SetReturnValueObject(lldb::StackFrameSP &frame_sp,
   Thread *thread = frame_sp->GetThread().get();
 
   bool is_signed;
-  uint32_t count;
-  bool is_complex;
 
   RegisterContext *reg_ctx = thread->GetRegisterContext().get();
 
@@ -339,38 +337,33 @@ Status ABISysV_ppc64::SetReturnValueObject(lldb::StackFrameSP &frame_sp,
           "We don't support returning longer than 64 bit "
           "integer values at present.");
     }
-  } else if (compiler_type.IsFloatingPointType(count, is_complex)) {
-    if (is_complex)
-      error = Status::FromErrorString(
-          "We don't support returning complex values at present");
-    else {
-      std::optional<uint64_t> bit_width =
-          llvm::expectedToOptional(compiler_type.GetBitSize(frame_sp.get()));
-      if (!bit_width) {
-        error = Status::FromErrorString("can't get size of type");
+  } else if (compiler_type.IsRealFloatingPointType()) {
+    std::optional<uint64_t> bit_width =
+        llvm::expectedToOptional(compiler_type.GetBitSize(frame_sp.get()));
+    if (!bit_width) {
+      error = Status::FromErrorString("can't get size of type");
+      return error;
+    }
+    if (*bit_width <= 64) {
+      DataExtractor data;
+      Status data_error;
+      size_t num_bytes = new_value_sp->GetData(data, data_error);
+      if (data_error.Fail()) {
+        error = Status::FromErrorStringWithFormat(
+            "Couldn't convert return value to raw data: %s",
+            data_error.AsCString());
         return error;
       }
-      if (*bit_width <= 64) {
-        DataExtractor data;
-        Status data_error;
-        size_t num_bytes = new_value_sp->GetData(data, data_error);
-        if (data_error.Fail()) {
-          error = Status::FromErrorStringWithFormat(
-              "Couldn't convert return value to raw data: %s",
-              data_error.AsCString());
-          return error;
-        }
 
-        unsigned char buffer[16];
-        ByteOrder byte_order = data.GetByteOrder();
+      unsigned char buffer[16];
+      ByteOrder byte_order = data.GetByteOrder();
 
-        data.CopyByteOrderedData(0, num_bytes, buffer, 16, byte_order);
-        set_it_simple = true;
-      } else {
-        // FIXME - don't know how to do 80 bit long doubles yet.
-        error = Status::FromErrorString(
-            "We don't support returning float values > 64 bits at present");
-      }
+      data.CopyByteOrderedData(0, num_bytes, buffer, 16, byte_order);
+      set_it_simple = true;
+    } else {
+      // FIXME - don't know how to do 80 bit long doubles yet.
+      error = Status::FromErrorString(
+          "We don't support returning float values > 64 bits at present");
     }
   }
 
@@ -973,16 +966,16 @@ UnwindPlanSP ABISysV_ppc64::CreateFunctionEntryUnwindPlan() {
     pc_reg_num = ppc64_dwarf::dwarf_pc_ppc64;
   }
 
-  UnwindPlan::RowSP row(new UnwindPlan::Row);
+  UnwindPlan::Row row;
 
   // Our Call Frame Address is the stack pointer value
-  row->GetCFAValue().SetIsRegisterPlusOffset(sp_reg_num, 0);
+  row.GetCFAValue().SetIsRegisterPlusOffset(sp_reg_num, 0);
 
   // The previous PC is in the LR. All other registers are the same.
-  row->SetRegisterLocationToRegister(pc_reg_num, lr_reg_num, true);
+  row.SetRegisterLocationToRegister(pc_reg_num, lr_reg_num, true);
 
   auto plan_sp = std::make_shared<UnwindPlan>(eRegisterKindDWARF);
-  plan_sp->AppendRow(row);
+  plan_sp->AppendRow(std::move(row));
   plan_sp->SetSourceName("ppc64 at-func-entry default");
   plan_sp->SetSourcedFromCompiler(eLazyBoolNo);
   return plan_sp;
@@ -1003,17 +996,17 @@ UnwindPlanSP ABISysV_ppc64::CreateDefaultUnwindPlan() {
     cr_reg_num = ppc64_dwarf::dwarf_cr_ppc64;
   }
 
-  UnwindPlan::RowSP row(new UnwindPlan::Row);
+  UnwindPlan::Row row;
   const int32_t ptr_size = 8;
-  row->SetUnspecifiedRegistersAreUndefined(true);
-  row->GetCFAValue().SetIsRegisterDereferenced(sp_reg_num);
+  row.SetUnspecifiedRegistersAreUndefined(true);
+  row.GetCFAValue().SetIsRegisterDereferenced(sp_reg_num);
 
-  row->SetRegisterLocationToAtCFAPlusOffset(pc_reg_num, ptr_size * 2, true);
-  row->SetRegisterLocationToIsCFAPlusOffset(sp_reg_num, 0, true);
-  row->SetRegisterLocationToAtCFAPlusOffset(cr_reg_num, ptr_size, true);
+  row.SetRegisterLocationToAtCFAPlusOffset(pc_reg_num, ptr_size * 2, true);
+  row.SetRegisterLocationToIsCFAPlusOffset(sp_reg_num, 0, true);
+  row.SetRegisterLocationToAtCFAPlusOffset(cr_reg_num, ptr_size, true);
 
   auto plan_sp = std::make_shared<UnwindPlan>(eRegisterKindDWARF);
-  plan_sp->AppendRow(row);
+  plan_sp->AppendRow(std::move(row));
   plan_sp->SetSourceName("ppc64 default unwind plan");
   plan_sp->SetSourcedFromCompiler(eLazyBoolNo);
   plan_sp->SetUnwindPlanValidAtAllInstructions(eLazyBoolNo);

@@ -10,6 +10,7 @@
 
 #include "llvm/Config/llvm-config.h" // for LLVM_ON_UNIX
 #include "llvm/ExecutionEngine/Orc/Shared/OrcRTBridge.h"
+#include "llvm/Support/MSVCErrorWorkarounds.h"
 #include "llvm/Support/WindowsError.h"
 
 #if defined(LLVM_ON_UNIX) && !defined(__ANDROID__)
@@ -27,7 +28,7 @@
 namespace llvm {
 namespace orc {
 
-MemoryMapper::~MemoryMapper() {}
+MemoryMapper::~MemoryMapper() = default;
 
 InProcessMemoryMapper::InProcessMemoryMapper(size_t PageSize)
     : PageSize(PageSize) {}
@@ -58,7 +59,8 @@ void InProcessMemoryMapper::reserve(size_t NumBytes,
       ExecutorAddrRange(ExecutorAddr::fromPtr(MB.base()), MB.allocatedSize()));
 }
 
-char *InProcessMemoryMapper::prepare(ExecutorAddr Addr, size_t ContentSize) {
+char *InProcessMemoryMapper::prepare(jitlink::LinkGraph &G, ExecutorAddr Addr,
+                                     size_t ContentSize) {
   return Addr.toPtr<char *>();
 }
 
@@ -314,7 +316,8 @@ void SharedMemoryMapper::reserve(size_t NumBytes,
 #endif
 }
 
-char *SharedMemoryMapper::prepare(ExecutorAddr Addr, size_t ContentSize) {
+char *SharedMemoryMapper::prepare(jitlink::LinkGraph &G, ExecutorAddr Addr,
+                                  size_t ContentSize) {
   auto R = Reservations.upper_bound(Addr);
   assert(R != Reservations.begin() && "Attempt to prepare unreserved range");
   R--;

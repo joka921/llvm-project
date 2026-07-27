@@ -2,6 +2,7 @@
 // RUN:   -config="{CheckOptions: {\
 // RUN:   misc-const-correctness.TransformValues: true,\
 // RUN:   misc-const-correctness.WarnPointersAsValues: false, \
+// RUN:   misc-const-correctness.WarnPointersAsPointers: false, \
 // RUN:   misc-const-correctness.TransformPointersAsValues: false} \
 // RUN:   }" -- -fno-delayed-template-parsing
 
@@ -12,12 +13,6 @@ namespace foo {
 int scoped;
 float np_scoped = 1; // namespace variables are like globals
 } // namespace foo
-
-// Lambdas should be ignored, because they do not follow the normal variable
-// semantic (e.g. the type is only known to the compiler).
-void lambdas() {
-  auto Lambda = [](int i) { return i < 0; };
-}
 
 void some_function(double, wchar_t);
 

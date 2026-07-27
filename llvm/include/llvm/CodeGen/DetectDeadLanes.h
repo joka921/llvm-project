@@ -29,6 +29,7 @@
 #define LLVM_CODEGEN_DETECTDEADLANES_H
 
 #include "llvm/ADT/BitVector.h"
+#include "llvm/CodeGen/MachinePassManager.h"
 #include "llvm/MC/LaneBitmask.h"
 #include <deque>
 
@@ -49,11 +50,11 @@ public:
     LaneBitmask DefinedLanes;
   };
 
-  DeadLaneDetector(const MachineRegisterInfo *MRI,
-                   const TargetRegisterInfo *TRI);
+  LLVM_ABI DeadLaneDetector(const MachineRegisterInfo *MRI,
+                            const TargetRegisterInfo *TRI);
 
   /// Update the \p DefinedLanes and the \p UsedLanes for all virtual registers.
-  void computeSubRegisterLaneBitInfo();
+  LLVM_ABI void computeSubRegisterLaneBitInfo();
 
   const VRegInfo &getVRegInfo(unsigned RegIdx) const {
     return VRegInfos[RegIdx];
@@ -84,13 +85,15 @@ public:
   /// Given a mask \p DefinedLanes of lanes defined at operand \p OpNum
   /// of COPY-like instruction, determine which lanes are defined at the output
   /// operand \p Def.
-  LaneBitmask transferDefinedLanes(const MachineOperand &Def, unsigned OpNum,
-                                   LaneBitmask DefinedLanes) const;
+  LLVM_ABI LaneBitmask transferDefinedLanes(const MachineOperand &Def,
+                                            unsigned OpNum,
+                                            LaneBitmask DefinedLanes) const;
 
   /// Given a mask \p UsedLanes used from the output of instruction \p MI
   /// determine which lanes are used from operand \p MO of this instruction.
-  LaneBitmask transferUsedLanes(const MachineInstr &MI, LaneBitmask UsedLanes,
-                                const MachineOperand &MO) const;
+  LLVM_ABI LaneBitmask transferUsedLanes(const MachineInstr &MI,
+                                         LaneBitmask UsedLanes,
+                                         const MachineOperand &MO) const;
 
 private:
   LaneBitmask determineInitialDefinedLanes(Register Reg);
@@ -113,6 +116,12 @@ private:
   /// This bitvector is set for each vreg index where the vreg is defined
   /// by an instruction where lowersToCopies()==true.
   BitVector DefinedByCopy;
+};
+
+class DetectDeadLanesPass : public RequiredPassInfoMixin<DetectDeadLanesPass> {
+public:
+  LLVM_ABI PreservedAnalyses run(MachineFunction &MF,
+                                 MachineFunctionAnalysisManager &MFAM);
 };
 
 } // end namespace llvm

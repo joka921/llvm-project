@@ -12,53 +12,35 @@
 #include "SPIRV.h"
 #include "SPIRVStructurizerWrapper.h"
 #include "SPIRVSubtarget.h"
-#include "SPIRVTargetMachine.h"
 #include "SPIRVUtils.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/LoopInfo.h"
-#include "llvm/CodeGen/IntrinsicLowering.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsSPIRV.h"
-#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/InitializePasses.h"
-#include "llvm/PassRegistry.h"
 #include "llvm/Transforms/Utils.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/LoopSimplify.h"
 #include "llvm/Transforms/Utils/LowerMemIntrinsics.h"
-#include <queue>
+#include <optional>
 #include <stack>
-#include <unordered_set>
 
 using namespace llvm;
 using namespace SPIRV;
 
-namespace llvm {
-
-void initializeSPIRVStructurizerPass(PassRegistry &);
-
-namespace {
-
-using BlockSet = std::unordered_set<BasicBlock *>;
+using BlockSet = SmallPtrSet<BasicBlock *, 0>;
 using Edge = std::pair<BasicBlock *, BasicBlock *>;
-
-// Helper function to do a partial order visit from the block |Start|, calling
-// |Op| on each visited node.
-void partialOrderVisit(BasicBlock &Start,
-                       std::function<bool(BasicBlock *)> Op) {
-  PartialOrderingVisitor V(*Start.getParent());
-  V.partialOrderVisit(Start, Op);
-}
 
 // Returns the exact convergence region in the tree defined by `Node` for which
 // `BB` is the header, nullptr otherwise.
-const ConvergenceRegion *getRegionForHeader(const ConvergenceRegion *Node,
-                                            BasicBlock *BB) {
+static const ConvergenceRegion *
+getRegionForHeader(const ConvergenceRegion *Node, BasicBlock *BB) {
   if (Node->Entry == BB)
     return Node;
 
@@ -72,8 +54,8 @@ const ConvergenceRegion *getRegionForHeader(const ConvergenceRegion *Node,
 
 // Returns the single BasicBlock exiting the convergence region `CR`,
 // nullptr if no such exit exists.
-BasicBlock *getExitFor(const ConvergenceRegion *CR) {
-  std::unordered_set<BasicBlock *> ExitTargets;
+static BasicBlock *getExitFor(const ConvergenceRegion *CR) {
+  SmallPtrSet<BasicBlock *, 0> ExitTargets;
   for (BasicBlock *Exit : CR->Exits) {
     for (BasicBlock *Successor : successors(Exit)) {
       if (CR->Blocks.count(Successor) == 0)
@@ -90,7 +72,7 @@ BasicBlock *getExitFor(const ConvergenceRegion *CR) {
 
 // Returns the merge block designated by I if I is a merge instruction, nullptr
 // otherwise.
-BasicBlock *getDesignatedMergeBlock(Instruction *I) {
+static BasicBlock *getDesignatedMergeBlock(Instruction *I) {
   IntrinsicInst *II = dyn_cast_or_null<IntrinsicInst>(I);
   if (II == nullptr)
     return nullptr;
@@ -105,7 +87,7 @@ BasicBlock *getDesignatedMergeBlock(Instruction *I) {
 
 // Returns the continue block designated by I if I is an OpLoopMerge, nullptr
 // otherwise.
-BasicBlock *getDesignatedContinueBlock(Instruction *I) {
+static BasicBlock *getDesignatedContinueBlock(Instruction *I) {
   IntrinsicInst *II = dyn_cast_or_null<IntrinsicInst>(I);
   if (II == nullptr)
     return nullptr;
@@ -119,7 +101,7 @@ BasicBlock *getDesignatedContinueBlock(Instruction *I) {
 
 // Returns true if Header has one merge instruction which designated Merge as
 // merge block.
-bool isDefinedAsSelectionMergeBy(BasicBlock &Header, BasicBlock &Merge) {
+static bool isDefinedAsSelectionMergeBy(BasicBlock &Header, BasicBlock &Merge) {
   for (auto &I : Header) {
     BasicBlock *MB = getDesignatedMergeBlock(&I);
     if (MB == &Merge)
@@ -129,7 +111,7 @@ bool isDefinedAsSelectionMergeBy(BasicBlock &Header, BasicBlock &Merge) {
 }
 
 // Returns true if the BB has one OpLoopMerge instruction.
-bool hasLoopMergeInstruction(BasicBlock &BB) {
+static bool hasLoopMergeInstruction(BasicBlock &BB) {
   for (auto &I : BB)
     if (getDesignatedContinueBlock(&I))
       return true;
@@ -138,13 +120,13 @@ bool hasLoopMergeInstruction(BasicBlock &BB) {
 
 // Returns true is I is an OpSelectionMerge or OpLoopMerge instruction, false
 // otherwise.
-bool isMergeInstruction(Instruction *I) {
+static bool isMergeInstruction(Instruction *I) {
   return getDesignatedMergeBlock(I) != nullptr;
 }
 
 // Returns all blocks in F having at least one OpLoopMerge or OpSelectionMerge
 // instruction.
-SmallPtrSet<BasicBlock *, 2> getHeaderBlocks(Function &F) {
+static SmallPtrSet<BasicBlock *, 2> getHeaderBlocks(Function &F) {
   SmallPtrSet<BasicBlock *, 2> Output;
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
@@ -157,7 +139,7 @@ SmallPtrSet<BasicBlock *, 2> getHeaderBlocks(Function &F) {
 
 // Returns all basic blocks in |F| referenced by at least 1
 // OpSelectionMerge/OpLoopMerge instruction.
-SmallPtrSet<BasicBlock *, 2> getMergeBlocks(Function &F) {
+static SmallPtrSet<BasicBlock *, 2> getMergeBlocks(Function &F) {
   SmallPtrSet<BasicBlock *, 2> Output;
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
@@ -172,7 +154,7 @@ SmallPtrSet<BasicBlock *, 2> getMergeBlocks(Function &F) {
 // Return all the merge instructions contained in BB.
 // Note: the SPIR-V spec doesn't allow a single BB to contain more than 1 merge
 // instruction, but this can happen while we structurize the CFG.
-std::vector<Instruction *> getMergeInstructions(BasicBlock &BB) {
+static std::vector<Instruction *> getMergeInstructions(BasicBlock &BB) {
   std::vector<Instruction *> Output;
   for (Instruction &I : BB)
     if (isMergeInstruction(&I))
@@ -182,7 +164,7 @@ std::vector<Instruction *> getMergeInstructions(BasicBlock &BB) {
 
 // Returns all basic blocks in |F| referenced as continue target by at least 1
 // OpLoopMerge instruction.
-SmallPtrSet<BasicBlock *, 2> getContinueBlocks(Function &F) {
+static SmallPtrSet<BasicBlock *, 2> getContinueBlocks(Function &F) {
   SmallPtrSet<BasicBlock *, 2> Output;
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
@@ -196,7 +178,7 @@ SmallPtrSet<BasicBlock *, 2> getContinueBlocks(Function &F) {
 
 // Do a preorder traversal of the CFG starting from the BB |Start|.
 // point. Calls |op| on each basic block encountered during the traversal.
-void visit(BasicBlock &Start, std::function<bool(BasicBlock *)> op) {
+static void visit(BasicBlock &Start, std::function<bool(BasicBlock *)> op) {
   std::stack<BasicBlock *> ToVisit;
   SmallPtrSet<BasicBlock *, 8> Seen;
 
@@ -221,19 +203,15 @@ void visit(BasicBlock &Start, std::function<bool(BasicBlock *)> op) {
 // Replaces the conditional and unconditional branch targets of |BB| by
 // |NewTarget| if the target was |OldTarget|. This function also makes sure the
 // associated merge instruction gets updated accordingly.
-void replaceIfBranchTargets(BasicBlock *BB, BasicBlock *OldTarget,
-                            BasicBlock *NewTarget) {
-  auto *BI = cast<BranchInst>(BB->getTerminator());
+static void replaceIfBranchTargets(BasicBlock *BB, BasicBlock *OldTarget,
+                                   BasicBlock *NewTarget) {
+  auto *BI = cast<CondBrInst>(BB->getTerminator());
 
   // 1. Replace all matching successors.
   for (size_t i = 0; i < BI->getNumSuccessors(); i++) {
     if (BI->getSuccessor(i) == OldTarget)
       BI->setSuccessor(i, NewTarget);
   }
-
-  // Branch was unconditional, no fixup required.
-  if (BI->isUnconditional())
-    return;
 
   // Branch had 2 successors, maybe now both are the same?
   if (BI->getSuccessor(0) != BI->getSuccessor(1))
@@ -268,13 +246,18 @@ void replaceIfBranchTargets(BasicBlock *BB, BasicBlock *OldTarget,
 // was |OldTarget|. This function also fixes the associated merge instruction.
 // Note: this function does not simplify branching instructions, it only updates
 // targets. See also: simplifyBranches.
-void replaceBranchTargets(BasicBlock *BB, BasicBlock *OldTarget,
-                          BasicBlock *NewTarget) {
+static void replaceBranchTargets(BasicBlock *BB, BasicBlock *OldTarget,
+                                 BasicBlock *NewTarget) {
   auto *T = BB->getTerminator();
   if (isa<ReturnInst>(T))
     return;
+  if (auto *BI = dyn_cast<UncondBrInst>(T)) {
+    if (BI->getSuccessor() == OldTarget)
+      BI->setSuccessor(NewTarget);
+    return;
+  }
 
-  if (isa<BranchInst>(T))
+  if (isa<CondBrInst>(T))
     return replaceIfBranchTargets(BB, OldTarget, NewTarget);
 
   if (auto *SI = dyn_cast<SwitchInst>(T)) {
@@ -288,11 +271,12 @@ void replaceBranchTargets(BasicBlock *BB, BasicBlock *OldTarget,
   assert(false && "Unhandled terminator type.");
 }
 
-} // anonymous namespace
-
+namespace {
 // Given a reducible CFG, produces a structurized CFG in the SPIR-V sense,
 // adding merge instructions when required.
-class SPIRVStructurizer : public FunctionPass {
+class SPIRVStructurizerImpl {
+  LoopInfo &LI;
+  ConvergenceRegionInfo &RegionInfo;
 
   struct DivergentConstruct;
   // Represents a list of condition/loops/switch constructs.
@@ -319,24 +303,29 @@ class SPIRVStructurizer : public FunctionPass {
   // the boundary of multiple constructs.
   struct Splitter {
     Function &F;
-    LoopInfo &LI;
     DomTreeBuilder::BBDomTree DT;
     DomTreeBuilder::BBPostDomTree PDT;
+    std::optional<PartialOrderingVisitor> POV;
 
-    Splitter(Function &F, LoopInfo &LI) : F(F), LI(LI) { invalidate(); }
+    Splitter(Function &F) : F(F) { invalidate(); }
 
     void invalidate() {
       PDT.recalculate(F);
-      DT.recalculate(F);
+      POV.emplace(F);
+    }
+
+    const DomTreeBuilder::BBDomTree &getDT() const {
+      return POV->getDominatorTree();
     }
 
     // Returns the list of blocks that belong to a SPIR-V loop construct,
     // including the continue construct.
     std::vector<BasicBlock *> getLoopConstructBlocks(BasicBlock *Header,
                                                      BasicBlock *Merge) {
+      const DomTreeBuilder::BBDomTree &DT = getDT();
       assert(DT.dominates(Header, Merge));
       std::vector<BasicBlock *> Output;
-      partialOrderVisit(*Header, [&](BasicBlock *BB) {
+      POV->partialOrderVisit(*Header, [&](BasicBlock *BB) {
         if (BB == Merge)
           return false;
         if (DT.dominates(Merge, BB) || !DT.dominates(Header, BB))
@@ -350,6 +339,7 @@ class SPIRVStructurizer : public FunctionPass {
     // Returns the list of blocks that belong to a SPIR-V selection construct.
     std::vector<BasicBlock *>
     getSelectionConstructBlocks(DivergentConstruct *Node) {
+      const DomTreeBuilder::BBDomTree &DT = getDT();
       assert(DT.dominates(Node->Header, Node->Merge));
       BlockSet OutsideBlocks;
       OutsideBlocks.insert(Node->Merge);
@@ -362,7 +352,7 @@ class SPIRVStructurizer : public FunctionPass {
       }
 
       std::vector<BasicBlock *> Output;
-      partialOrderVisit(*Node->Header, [&](BasicBlock *BB) {
+      POV->partialOrderVisit(*Node->Header, [&](BasicBlock *BB) {
         if (OutsideBlocks.count(BB) != 0)
           return false;
         if (DT.dominates(Node->Merge, BB) || !DT.dominates(Node->Header, BB))
@@ -376,10 +366,11 @@ class SPIRVStructurizer : public FunctionPass {
     // Returns the list of blocks that belong to a SPIR-V switch construct.
     std::vector<BasicBlock *> getSwitchConstructBlocks(BasicBlock *Header,
                                                        BasicBlock *Merge) {
+      const DomTreeBuilder::BBDomTree &DT = getDT();
       assert(DT.dominates(Header, Merge));
 
       std::vector<BasicBlock *> Output;
-      partialOrderVisit(*Header, [&](BasicBlock *BB) {
+      POV->partialOrderVisit(*Header, [&](BasicBlock *BB) {
         // the blocks structurally dominated by a switch header,
         if (!DT.dominates(Header, BB))
           return false;
@@ -396,10 +387,11 @@ class SPIRVStructurizer : public FunctionPass {
     // Returns the list of blocks that belong to a SPIR-V case construct.
     std::vector<BasicBlock *> getCaseConstructBlocks(BasicBlock *Target,
                                                      BasicBlock *Merge) {
+      const DomTreeBuilder::BBDomTree &DT = getDT();
       assert(DT.dominates(Target, Merge));
 
       std::vector<BasicBlock *> Output;
-      partialOrderVisit(*Target, [&](BasicBlock *BB) {
+      POV->partialOrderVisit(*Target, [&](BasicBlock *BB) {
         // the blocks structurally dominated by an OpSwitch Target or Default
         // block
         if (!DT.dominates(Target, BB))
@@ -438,7 +430,7 @@ class SPIRVStructurizer : public FunctionPass {
     // clang-format on
     std::vector<Edge>
     createAliasBlocksForComplexEdges(std::vector<Edge> Edges) {
-      std::unordered_set<BasicBlock *> Seen;
+      SmallPtrSet<BasicBlock *, 0> Seen;
       std::vector<Edge> Output;
       Output.reserve(Edges.size());
 
@@ -461,13 +453,6 @@ class SPIRVStructurizer : public FunctionPass {
       return Output;
     }
 
-    AllocaInst *CreateVariable(Function &F, Type *Type,
-                               BasicBlock::iterator Position) {
-      const DataLayout &DL = F.getDataLayout();
-      return new AllocaInst(Type, DL.getAllocaAddrSpace(), nullptr, "reg",
-                            Position);
-    }
-
     // Given a construct defined by |Header|, and a list of exiting edges
     // |Edges|, creates a new single exit node, fixing up those edges.
     BasicBlock *createSingleExitNode(BasicBlock *Header,
@@ -476,14 +461,14 @@ class SPIRVStructurizer : public FunctionPass {
       std::vector<Edge> FixedEdges = createAliasBlocksForComplexEdges(Edges);
 
       std::vector<BasicBlock *> Dsts;
-      std::unordered_map<BasicBlock *, ConstantInt *> DstToIndex;
+      DenseMap<BasicBlock *, ConstantInt *> DstToIndex;
       auto NewExit = BasicBlock::Create(F.getContext(),
                                         Header->getName() + ".new.exit", &F);
       IRBuilder<> ExitBuilder(NewExit);
       for (auto &[Src, Dst] : FixedEdges) {
         if (DstToIndex.count(Dst) != 0)
           continue;
-        DstToIndex.emplace(Dst, ExitBuilder.getInt32(DstToIndex.size()));
+        DstToIndex.try_emplace(Dst, ExitBuilder.getInt32(DstToIndex.size()));
         Dsts.push_back(Dst);
       }
 
@@ -495,8 +480,7 @@ class SPIRVStructurizer : public FunctionPass {
         return NewExit;
       }
 
-      AllocaInst *Variable = CreateVariable(F, ExitBuilder.getInt32Ty(),
-                                            F.begin()->getFirstInsertionPt());
+      AllocaInst *Variable = createVariable(F, ExitBuilder.getInt32Ty());
       for (auto &[Src, Dst] : FixedEdges) {
         IRBuilder<> B2(Src);
         B2.SetInsertPoint(Src->getFirstInsertionPt());
@@ -504,8 +488,7 @@ class SPIRVStructurizer : public FunctionPass {
         replaceBranchTargets(Src, Dst, NewExit);
       }
 
-      llvm::Value *Load =
-          ExitBuilder.CreateLoad(ExitBuilder.getInt32Ty(), Variable);
+      Value *Load = ExitBuilder.CreateLoad(ExitBuilder.getInt32Ty(), Variable);
 
       // If we can avoid an OpSwitch, generate an OpBranch. Reason is some
       // OpBranch are allowed to exist without a new OpSelectionMerge if one of
@@ -518,42 +501,11 @@ class SPIRVStructurizer : public FunctionPass {
       }
 
       SwitchInst *Sw = ExitBuilder.CreateSwitch(Load, Dsts[0], Dsts.size() - 1);
-      for (auto It = Dsts.begin() + 1; It != Dsts.end(); ++It) {
-        Sw->addCase(DstToIndex[*It], *It);
-      }
+      for (BasicBlock *BB : drop_begin(Dsts))
+        Sw->addCase(DstToIndex[BB], BB);
       return NewExit;
     }
   };
-
-  /// Create a value in BB set to the value associated with the branch the block
-  /// terminator will take.
-  Value *createExitVariable(
-      BasicBlock *BB,
-      const DenseMap<BasicBlock *, ConstantInt *> &TargetToValue) {
-    auto *T = BB->getTerminator();
-    if (isa<ReturnInst>(T))
-      return nullptr;
-
-    IRBuilder<> Builder(BB);
-    Builder.SetInsertPoint(T);
-
-    if (auto *BI = dyn_cast<BranchInst>(T)) {
-
-      BasicBlock *LHSTarget = BI->getSuccessor(0);
-      BasicBlock *RHSTarget =
-          BI->isConditional() ? BI->getSuccessor(1) : nullptr;
-
-      Value *LHS = TargetToValue.lookup(LHSTarget);
-      Value *RHS = TargetToValue.lookup(RHSTarget);
-
-      if (LHS == nullptr || RHS == nullptr)
-        return LHS == nullptr ? RHS : LHS;
-      return Builder.CreateSelect(BI->getCondition(), LHS, RHS);
-    }
-
-    // TODO: add support for switch cases.
-    llvm_unreachable("Unhandled terminator type.");
-  }
 
   // Creates a new basic block in F with a single OpUnreachable instruction.
   BasicBlock *CreateUnreachable(Function &F) {
@@ -565,11 +517,7 @@ class SPIRVStructurizer : public FunctionPass {
 
   // Add OpLoopMerge instruction on cycles.
   bool addMergeForLoops(Function &F) {
-    LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-    auto *TopLevelRegion =
-        getAnalysis<SPIRVConvergenceRegionAnalysisWrapperPass>()
-            .getRegionInfo()
-            .getTopLevelRegion();
+    auto *TopLevelRegion = RegionInfo.getTopLevelRegion();
 
     bool Modified = false;
     for (auto &BB : F) {
@@ -594,11 +542,7 @@ class SPIRVStructurizer : public FunctionPass {
       // do however is to make is legal on the SPIR-V point of view, hence
       // adding an unreachable merge block.
       if (Merge == nullptr) {
-        BranchInst *Br = cast<BranchInst>(BB.getTerminator());
-        assert(Br &&
-               "This assumes the branch is not a switch. Maybe that's wrong?");
-        assert(cast<BranchInst>(BB.getTerminator())->isUnconditional());
-
+        UncondBrInst *Br = cast<UncondBrInst>(BB.getTerminator());
         Merge = CreateUnreachable(F);
         Builder.SetInsertPoint(Br);
         Builder.CreateCondBr(Builder.getFalse(), Merge, Br->getSuccessor(0));
@@ -611,8 +555,11 @@ class SPIRVStructurizer : public FunctionPass {
       auto MergeAddress = BlockAddress::get(Merge->getParent(), Merge);
       auto ContinueAddress = BlockAddress::get(Continue->getParent(), Continue);
       SmallVector<Value *, 2> Args = {MergeAddress, ContinueAddress};
-
-      Builder.CreateIntrinsic(Intrinsic::spv_loop_merge, {}, {Args});
+      SmallVector<unsigned, 1> LoopControlImms =
+          getSpirvLoopControlOperandsFromLoopMetadata(L);
+      for (unsigned Imm : LoopControlImms)
+        Args.emplace_back(ConstantInt::get(Builder.getInt32Ty(), Imm));
+      Builder.CreateIntrinsic(Intrinsic::spv_loop_merge, {Args});
       Modified = true;
     }
 
@@ -657,7 +604,7 @@ class SPIRVStructurizer : public FunctionPass {
   // than another when its target merge block post-dominates the other target's
   // merge block. (This ordering should match the nesting ordering of the source
   // HLSL).
-  bool sortSelectionMerge(Function &F, BasicBlock &Block) {
+  bool sortSelectionMerge(PartialOrderingVisitor &Visitor, BasicBlock &Block) {
     std::vector<Instruction *> MergeInstructions;
     for (Instruction &I : Block)
       if (isMergeInstruction(&I))
@@ -668,15 +615,14 @@ class SPIRVStructurizer : public FunctionPass {
 
     Instruction *InsertionPoint = *MergeInstructions.begin();
 
-    PartialOrderingVisitor Visitor(F);
-    std::sort(MergeInstructions.begin(), MergeInstructions.end(),
-              [&Visitor](Instruction *Left, Instruction *Right) {
-                if (Left == Right)
-                  return false;
-                BasicBlock *RightMerge = getDesignatedMergeBlock(Right);
-                BasicBlock *LeftMerge = getDesignatedMergeBlock(Left);
-                return !Visitor.compare(RightMerge, LeftMerge);
-              });
+    llvm::sort(MergeInstructions,
+               [&Visitor](Instruction *Left, Instruction *Right) {
+                 if (Left == Right)
+                   return false;
+                 BasicBlock *RightMerge = getDesignatedMergeBlock(Right);
+                 BasicBlock *LeftMerge = getDesignatedMergeBlock(Left);
+                 return !Visitor.compare(RightMerge, LeftMerge);
+               });
 
     for (Instruction *I : MergeInstructions) {
       I->moveBefore(InsertionPoint->getIterator());
@@ -691,8 +637,9 @@ class SPIRVStructurizer : public FunctionPass {
   // the one designated by A.
   bool sortSelectionMergeHeaders(Function &F) {
     bool Modified = false;
+    PartialOrderingVisitor Visitor(F);
     for (BasicBlock &BB : F) {
-      Modified |= sortSelectionMerge(F, BB);
+      Modified |= sortSelectionMerge(Visitor, BB);
     }
     return Modified;
   }
@@ -722,11 +669,11 @@ class SPIRVStructurizer : public FunctionPass {
         if (getDesignatedContinueBlock(MergeInstructions[0]) == nullptr) {
           BasicBlock *Unreachable = CreateUnreachable(F);
 
-          BranchInst *BI = cast<BranchInst>(Header->getTerminator());
+          Instruction *Term = Header->getTerminator();
           IRBuilder<> Builder(Header);
-          Builder.SetInsertPoint(BI);
+          Builder.SetInsertPoint(Term);
           Builder.CreateCondBr(Builder.getTrue(), NewBlock, Unreachable);
-          BI->eraseFromParent();
+          Term->eraseFromParent();
         }
 
         Header = NewBlock;
@@ -927,8 +874,7 @@ class SPIRVStructurizer : public FunctionPass {
   }
 
   bool splitCriticalEdges(Function &F) {
-    LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-    Splitter S(F, LI);
+    Splitter S(F);
 
     DivergentConstruct Root;
     BlockSet Visited;
@@ -987,6 +933,16 @@ class SPIRVStructurizer : public FunctionPass {
       auto It = SI->case_begin();
       while (It != SI->case_end()) {
         BasicBlock *Target = It->getCaseSuccessor();
+
+        // Don't Split. Just remove cases branching to the default destination
+        // to prevent spurious extra successors thus preserving single-exit
+        // convergence regions (i.e. if a merged exit is default & a case).
+        if (Target == SI->getDefaultDest()) {
+          Modified = true;
+          It = SI->removeCase(It);
+          continue;
+        }
+
         if (Seen.count(Target) == 0) {
           Seen.insert(Target);
           ++It;
@@ -1122,13 +1078,10 @@ class SPIRVStructurizer : public FunctionPass {
   }
 
 public:
-  static char ID;
+  SPIRVStructurizerImpl(LoopInfo &LI, ConvergenceRegionInfo &RegionInfo)
+      : LI(LI), RegionInfo(RegionInfo) {}
 
-  SPIRVStructurizer() : FunctionPass(ID) {
-    initializeSPIRVStructurizerPass(*PassRegistry::getPassRegistry());
-  };
-
-  virtual bool runOnFunction(Function &F) override {
+  bool run(Function &F) {
     bool Modified = false;
 
     // In LLVM, Switches are allowed to have several cases branching to the same
@@ -1194,6 +1147,40 @@ public:
     return Modified;
   }
 
+  void createOpSelectMerge(IRBuilder<> *Builder, BlockAddress *MergeAddress) {
+    Instruction *BBTerminatorInst = Builder->GetInsertBlock()->getTerminator();
+
+    MDNode *MDNode = BBTerminatorInst->getMetadata("hlsl.controlflow.hint");
+
+    ConstantInt *BranchHint = ConstantInt::get(Builder->getInt32Ty(), 0);
+
+    if (MDNode) {
+      assert(MDNode->getNumOperands() == 2 &&
+             "invalid metadata hlsl.controlflow.hint");
+      BranchHint = mdconst::extract<ConstantInt>(MDNode->getOperand(1));
+    }
+
+    SmallVector<Value *, 2> Args = {MergeAddress, BranchHint};
+
+    Builder->CreateIntrinsic(Intrinsic::spv_selection_merge,
+                             {MergeAddress->getType()}, Args);
+  }
+};
+
+class SPIRVStructurizer : public FunctionPass {
+public:
+  static char ID;
+
+  SPIRVStructurizer() : FunctionPass(ID) {}
+
+  bool runOnFunction(Function &F) override {
+    LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+    ConvergenceRegionInfo &RegionInfo =
+        getAnalysis<SPIRVConvergenceRegionAnalysisWrapperPass>()
+            .getRegionInfo();
+    return SPIRVStructurizerImpl(LI, RegionInfo).run(F);
+  }
+
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<LoopInfoWrapperPass>();
@@ -1202,29 +1189,8 @@ public:
     AU.addPreserved<SPIRVConvergenceRegionAnalysisWrapperPass>();
     FunctionPass::getAnalysisUsage(AU);
   }
-
-  void createOpSelectMerge(IRBuilder<> *Builder, BlockAddress *MergeAddress) {
-    Instruction *BBTerminatorInst = Builder->GetInsertBlock()->getTerminator();
-
-    MDNode *MDNode = BBTerminatorInst->getMetadata("hlsl.controlflow.hint");
-
-    ConstantInt *BranchHint = llvm::ConstantInt::get(Builder->getInt32Ty(), 0);
-
-    if (MDNode) {
-      assert(MDNode->getNumOperands() == 2 &&
-             "invalid metadata hlsl.controlflow.hint");
-      BranchHint = mdconst::extract<ConstantInt>(MDNode->getOperand(1));
-
-      assert(BranchHint && "invalid metadata value for hlsl.controlflow.hint");
-    }
-
-    llvm::SmallVector<llvm::Value *, 2> Args = {MergeAddress, BranchHint};
-
-    Builder->CreateIntrinsic(Intrinsic::spv_selection_merge,
-                             {MergeAddress->getType()}, {Args});
-  }
 };
-} // namespace llvm
+} // anonymous namespace
 
 char SPIRVStructurizer::ID = 0;
 
@@ -1243,14 +1209,11 @@ FunctionPass *llvm::createSPIRVStructurizerPass() {
 }
 
 PreservedAnalyses SPIRVStructurizerWrapper::run(Function &F,
-                                                FunctionAnalysisManager &AF) {
-
-  auto FPM = legacy::FunctionPassManager(F.getParent());
-  FPM.add(createSPIRVStructurizerPass());
-
-  if (!FPM.run(F))
-    return PreservedAnalyses::all();
-  PreservedAnalyses PA;
-  PA.preserveSet<CFGAnalyses>();
-  return PA;
+                                                FunctionAnalysisManager &AM) {
+  LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
+  ConvergenceRegionInfo &RegionInfo =
+      AM.getResult<SPIRVConvergenceRegionAnalysis>(F);
+  return SPIRVStructurizerImpl(LI, RegionInfo).run(F)
+             ? PreservedAnalyses::none()
+             : PreservedAnalyses::all();
 }

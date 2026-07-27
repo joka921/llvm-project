@@ -18,14 +18,14 @@
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachinePassManager.h"
 #include "llvm/CodeGen/MachineSSAContext.h"
+#include "llvm/Support/Compiler.h"
 
 namespace llvm {
 
-using MachineCycleInfo = GenericCycleInfo<MachineSSAContext>;
-using MachineCycle = MachineCycleInfo::CycleT;
+class MachineCycleInfo : public GenericCycleInfo<MachineSSAContext> {};
 
 /// Legacy analysis pass which computes a \ref MachineCycleInfo.
-class MachineCycleInfoWrapperPass : public MachineFunctionPass {
+class LLVM_ABI MachineCycleInfoWrapperPass : public MachineFunctionPass {
   MachineFunction *F = nullptr;
   MachineCycleInfo CI;
 
@@ -43,29 +43,33 @@ public:
   void print(raw_ostream &OS, const Module *M = nullptr) const override;
 };
 
-// TODO: add this function to GenericCycle template after implementing IR
-//       version.
-bool isCycleInvariant(const MachineCycle *Cycle, MachineInstr &I);
+// TODO: add this function to the GenericCycleInfo template after implementing
+//       the IR version.
+LLVM_ABI bool isCycleInvariant(const MachineCycleInfo &CI, CycleRef Cycle,
+                               MachineInstr &I);
 
 class MachineCycleAnalysis : public AnalysisInfoMixin<MachineCycleAnalysis> {
   friend AnalysisInfoMixin<MachineCycleAnalysis>;
-  static AnalysisKey Key;
+  LLVM_ABI static AnalysisKey Key;
 
 public:
   using Result = MachineCycleInfo;
 
-  Result run(MachineFunction &MF, MachineFunctionAnalysisManager &MFAM);
+  LLVM_ABI Result run(MachineFunction &MF,
+                      MachineFunctionAnalysisManager &MFAM);
+
+  LLVM_ABI bool invalidate(MachineFunction &, const PreservedAnalyses &PA,
+                           MachineFunctionAnalysisManager::Invalidator &);
 };
 
 class MachineCycleInfoPrinterPass
-    : public PassInfoMixin<MachineCycleInfoPrinterPass> {
+    : public RequiredPassInfoMixin<MachineCycleInfoPrinterPass> {
   raw_ostream &OS;
 
 public:
   explicit MachineCycleInfoPrinterPass(raw_ostream &OS) : OS(OS) {}
-  PreservedAnalyses run(MachineFunction &MF,
-                        MachineFunctionAnalysisManager &MFAM);
-  static bool isRequired() { return true; }
+  LLVM_ABI PreservedAnalyses run(MachineFunction &MF,
+                                 MachineFunctionAnalysisManager &MFAM);
 };
 
 } // end namespace llvm

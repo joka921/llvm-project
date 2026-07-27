@@ -236,7 +236,7 @@ public:
     auto ty = getBoxTy().getEleTy();
     if (fir::isa_ref_type(ty))
       return ty;
-    return fir::ReferenceType::get(ty);
+    return fir::ReferenceType::get(ty, fir::isa_volatile_type(getBoxTy()));
   }
 
   /// Get the scalar type related to the described entity
@@ -279,6 +279,8 @@ public:
   bool isUnlimitedPolymorphic() const {
     return fir::isUnlimitedPolymorphicType(getBoxTy());
   }
+
+  unsigned corank() const { return fir::getBoxCorank(getBoxTy()); }
 };
 
 /// An entity described by a fir.box value that cannot be read into
@@ -462,11 +464,6 @@ getTypeParams(mlir::Location loc, FirOpBuilder &builder, ArrayLoadOp load);
 /// fir::MutableBoxValue, this will generate code to read the extents.
 llvm::SmallVector<mlir::Value>
 getExtents(mlir::Location loc, FirOpBuilder &builder, const ExtendedValue &box);
-
-/// Get exactly one extent for any array-like extended value, \p exv. If \p exv
-/// is not an array or has rank less then \p dim, the result will be a nullptr.
-mlir::Value getExtentAtDimension(mlir::Location loc, FirOpBuilder &builder,
-                                 const ExtendedValue &exv, unsigned dim);
 
 } // namespace factory
 

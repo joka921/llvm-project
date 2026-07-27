@@ -32,6 +32,7 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/CodeGen/RegisterClassInfo.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
@@ -52,9 +53,7 @@ class AArch64CondBrTuning : public MachineFunctionPass {
 
 public:
   static char ID;
-  AArch64CondBrTuning() : MachineFunctionPass(ID) {
-    initializeAArch64CondBrTuningPass(*PassRegistry::getPassRegistry());
-  }
+  AArch64CondBrTuning() : MachineFunctionPass(ID) {}
   void getAnalysisUsage(AnalysisUsage &AU) const override;
   bool runOnMachineFunction(MachineFunction &MF) override;
   StringRef getPassName() const override { return AARCH64_CONDBR_TUNING_NAME; }
@@ -75,6 +74,7 @@ INITIALIZE_PASS(AArch64CondBrTuning, "aarch64-cond-br-tuning",
 
 void AArch64CondBrTuning::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesCFG();
+  AU.addPreserved<MachineRegisterClassInfoWrapperPass>();
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
@@ -102,6 +102,12 @@ MachineInstr *AArch64CondBrTuning::convertToFlagSetting(MachineInstr &MI,
 
   MachineInstrBuilder MIB = BuildMI(*MI.getParent(), MI, MI.getDebugLoc(),
                                     TII->get(NewOpc), NewDestReg);
+
+  // If the MI has a debug instruction number, preserve that in the new Machine
+  // Instruction that is created.
+  if (MI.peekDebugInstrNum() != 0)
+    MIB->setDebugInstrNum(MI.peekDebugInstrNum());
+
   for (const MachineOperand &MO : llvm::drop_begin(MI.operands()))
     MIB.add(MO);
 

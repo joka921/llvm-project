@@ -11,25 +11,26 @@
 //===----------------------------------------------------------------------===//
 
 #include "CSKYMCAsmInfo.h"
+#include "MCTargetDesc/CSKYMCAsmInfo.h"
+#include "llvm/ADT/Enum.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCStreamer.h"
 
 using namespace llvm;
 
-const MCAsmInfo::VariantKindDesc variantKindDescs[] = {
-    {MCSymbolRefExpr::VK_GOT, "GOT"},
-    {MCSymbolRefExpr::VK_GOTOFF, "GOTOFF"},
-    {MCSymbolRefExpr::VK_PLT, "PLT"},
-    {MCSymbolRefExpr::VK_TLSGD, "TLSGD"},
-    {MCSymbolRefExpr::VK_TLSLD, "TLSLD"},
-    {MCSymbolRefExpr::VK_TLSLDM, "TLSLDM"},
-    {MCSymbolRefExpr::VK_TPOFF, "TPOFF"},
+constexpr EnumStringDef<MCAsmInfo::AtSpecifierKind> AtSpecifierDefs[] = {
+    {{"GOT"}, CSKY::S_GOT},       {{"GOTOFF"}, CSKY::S_GOTOFF},
+    {{"PLT"}, CSKY::S_PLT},       {{"TLSGD"}, CSKY::S_TLSGD},
+    {{"TLSLDM"}, CSKY::S_TLSLDM}, {{"TPOFF"}, CSKY::S_TPOFF},
 };
+constexpr auto atSpecifiers = BUILD_ENUM_STRINGS(AtSpecifierDefs);
 
 void CSKYMCAsmInfo::anchor() {}
 
-CSKYMCAsmInfo::CSKYMCAsmInfo(const Triple &TargetTriple) {
+CSKYMCAsmInfo::CSKYMCAsmInfo(const Triple &TargetTriple,
+                             const MCTargetOptions &Options)
+    : MCAsmInfoELF(Options) {
   AlignmentIsInBytes = false;
   SupportsDebugInformation = true;
   CommentString = "#";
@@ -39,5 +40,46 @@ CSKYMCAsmInfo::CSKYMCAsmInfo(const Triple &TargetTriple) {
 
   ExceptionsType = ExceptionHandling::DwarfCFI;
 
-  initializeVariantKinds(variantKindDescs);
+  initializeAtSpecifiers(atSpecifiers);
+}
+
+static StringRef getVariantKindName(uint8_t Kind) {
+  using namespace CSKY;
+  switch (Kind) {
+  default:
+    llvm_unreachable("Invalid ELF symbol kind");
+  case S_None:
+  case S_ADDR:
+    return "";
+  case S_ADDR_HI16:
+    return "@HI16";
+  case S_ADDR_LO16:
+    return "@LO16";
+  case S_GOT_IMM18_BY4:
+  case S_GOT:
+    return "@GOT";
+  case S_GOTPC:
+    return "@GOTPC";
+  case S_GOTOFF:
+    return "@GOTOFF";
+  case S_PLT_IMM18_BY4:
+  case S_PLT:
+    return "@PLT";
+  case S_TLSLE:
+    return "@TPOFF";
+  case S_TLSIE:
+    return "@GOTTPOFF";
+  case S_TLSGD:
+    return "@TLSGD32";
+  case S_TLSLDO:
+    return "@TLSLDO32";
+  case S_TLSLDM:
+    return "@TLSLDM32";
+  }
+}
+
+void CSKYMCAsmInfo::printSpecifierExpr(raw_ostream &OS,
+                                       const MCSpecifierExpr &Expr) const {
+  printExpr(OS, *Expr.getSubExpr());
+  OS << getVariantKindName(Expr.getSpecifier());
 }

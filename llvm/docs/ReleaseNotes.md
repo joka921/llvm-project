@@ -1,8 +1,10 @@
 <!-- This document is written in Markdown and uses extra directives provided by
 MyST (https://myst-parser.readthedocs.io/en/latest/). -->
 
-LLVM {{env.config.release}} Release Notes
-=========================================
+<!-- If you want to modify sections/contents permanently, you should modify both
+ReleaseNotes.md and ReleaseNotesTemplate.txt. -->
+
+# LLVM {{env.config.release}} Release Notes
 
 ```{contents}
 ```
@@ -14,8 +16,7 @@ LLVM {{env.config.release}} Release Notes
 ```
 ````
 
-Introduction
-============
+## Introduction
 
 This document contains the release notes for the LLVM Compiler Infrastructure,
 release {{env.config.release}}.  Here we describe the status of LLVM, including
@@ -33,8 +34,7 @@ LLVM web page, this document applies to the *next* release, not the current
 one.  To see the release notes for a specific release, please see the
 [releases page](https://llvm.org/releases/).
 
-Non-comprehensive list of changes in this release
-=================================================
+## Non-comprehensive list of changes in this release
 
 <!-- For small 1-3 sentence descriptions, just add an entry at the end of
 this list. If your description won't fit comfortably in one bullet
@@ -47,153 +47,98 @@ for adding a new subsection. -->
 <!-- If you would like to document a larger change, then you can add a
 subsection about it right here. You can copy the following boilerplate:
 
-Special New Feature
--------------------
+### Special New Feature
 
 Makes programs 10x faster by doing Special New Thing.
 -->
 
-Changes to the LLVM IR
-----------------------
+### Changes to the LLVM IR
 
-* The `nocapture` attribute has been replaced by `captures(none)`.
-* The constant expression variants of the following instructions have been
-  removed:
+### Changes to LLVM infrastructure
 
-  * `mul`
+### Changes to building LLVM
 
-Changes to LLVM infrastructure
-------------------------------
+### Changes to TableGen
 
-* Removed support for target intrinsics being defined in the target directories
-  themselves (i.e., the `TargetIntrinsicInfo` class).
+* `!cond` operator short-circuits at the first `true` condition.  Subsequent
+  `condition : value` pairs, along with their corresponding side effects,
+  are left unresolved.
 
-Changes to building LLVM
-------------------------
+### Changes to Interprocedural Optimizations
 
-Changes to TableGen
--------------------
+### Changes to Vectorizers
 
-Changes to Interprocedural Optimizations
-----------------------------------------
+### Changes to the AArch64 Backend
 
-Changes to the AArch64 Backend
-------------------------------
+### Changes to the AMDGPU Backend
 
-Changes to the AMDGPU Backend
------------------------------
+* Replaced `xnack` and `sramecc` target features with `amdgpu.xnack`
+  and `amdgpu.sramecc` module flags.
 
-Changes to the ARM Backend
---------------------------
+### Changes to the ARM Backend
 
-Changes to the AVR Backend
---------------------------
+### Changes to the AVR Backend
 
-Changes to the DirectX Backend
-------------------------------
+### Changes to the DirectX Backend
 
-Changes to the Hexagon Backend
-------------------------------
+### Changes to the Hexagon Backend
 
-Changes to the LoongArch Backend
---------------------------------
+### Changes to the LoongArch Backend
 
-Changes to the MIPS Backend
----------------------------
+### Changes to the MIPS Backend
 
-Changes to the PowerPC Backend
-------------------------------
+### Changes to the PowerPC Backend
 
-Changes to the RISC-V Backend
------------------------------
+### Changes to the RISC-V Backend
 
-* Adds experimental assembler support for the Qualcomm uC 'Xqcilia` (Large Immediate Arithmetic)
-  extension.
-* Adds experimental assembler support for the Qualcomm uC 'Xqcibm` (Bit Manipulation)
-  extension.
-* Adds experimental assembler and code generation support for the Qualcomm
-  'Xqccmp' extension, which is a frame-pointer convention compatible version of
-  Zcmp.
-* Added non-quadratic ``log-vrgather`` cost model for ``vrgather.vv`` instruction
+### Changes to the WebAssembly Backend
 
-Changes to the WebAssembly Backend
-----------------------------------
+### Changes to the Windows Target
 
-Changes to the Windows Target
------------------------------
+### Changes to the X86 Backend
 
-* `fp128` is now passed indirectly, meaning it uses the same calling convention
-  as `i128`.
+### Changes to the OCaml bindings
 
-Changes to the X86 Backend
---------------------------
+### Changes to the Python bindings
 
-Changes to the OCaml bindings
------------------------------
+### Changes to the C API
 
-Changes to the Python bindings
-------------------------------
+### Changes to the CodeGen infrastructure
 
-Changes to the C API
---------------------
+### Changes to the Metadata Info
 
-* The following functions for creating constant expressions have been removed,
-  because the underlying constant expressions are no longer supported. Instead,
-  an instruction should be created using the `LLVMBuildXYZ` APIs, which will
-  constant fold the operands if possible and create an instruction otherwise:
+### Changes to the Debug Info
 
-  * `LLVMConstMul`
-  * `LLVMConstNUWMul`
-  * `LLVMConstNSWMul`
+### Changes to the LLVM tools
 
-Changes to the CodeGen infrastructure
--------------------------------------
+* llvm-mca no longer defaults -mcpu to "native"
 
-Changes to the Metadata Info
----------------------------------
+### Changes to LLDB
 
-Changes to the Debug Info
----------------------------------
+#### Windows
 
-Changes to the LLVM tools
----------------------------------
+* Python 3.11 or later is now recommended for building LLDB 23 on Windows. From LLDB 24, Python 3.11 or later will be required.
+* Messages from `OutputDebugString[A|W]` are now shown inline when using LLDB
+  from the command-line and in the output window when using lldb-dap.
+* LLDB now uses `lldb-server.exe` to launch and manage the program being debugged,
+  instead of running it within LLDB's own process. To revert to the previous behavior, set the environment variable `LLDB_USE_LLDB_SERVER=0`.
+* Support for PDB symbol servers has been added. By default, no symbol servers are used.
+  You can control this either through the [`_NT_SYMBOL_PATH`](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/symbol-path)
+  environment variable or by setting `plugin.symbol-locator.symstore.urls`
+  (see [`plugin.symbol-locator.symstore`](https://lldb.llvm.org/use/settings.html#symstore) for more info).
+* LLDB no longer depends on the Python private API on Windows. Users are now free to
+  use any Python version they want, as long as it is 3.8 or later and LLDB can find it
+  (i.e. it is on their `PATH`).
 
-* llvm-objcopy now supports the `--update-section` flag for intermediate Mach-O object files.
-* llvm-strip now supports continuing to process files on encountering an error.
+### Changes to BOLT
 
-Changes to LLDB
----------------------------------
+### Changes to Sanitizers
 
-* When building LLDB with Python support, the minimum version of Python is now
-  3.8.
-* LLDB now supports hardware watchpoints for AArch64 Windows targets. Windows
-  does not provide API to query the number of supported hardware watchpoints.
-  Therefore current implementation allows only 1 watchpoint, as tested with
-  Windows 11 on the Microsoft SQ2 and Snapdragon Elite X platforms.
-* LLDB now steps through C++ thunks. This fixes an issue where previously, it
-  wouldn't step into multiple inheritance virtual functions.
+### Other Changes
 
-### Changes to lldb-dap
+## External Open Source Projects Using LLVM {{env.config.release}}
 
-* Breakpoints can now be set for specific columns within a line.
-* Function return value is now displayed on step-out.
-
-Changes to BOLT
----------------------------------
-
-Changes to Sanitizers
----------------------
-
-Other Changes
--------------
-
-External Open Source Projects Using LLVM {{env.config.release}}
-===============================================================
-
-* A project...
-
-Additional Information
-======================
+## Additional Information
 
 A wide variety of additional information is available on the
 [LLVM web page](https://llvm.org/), in particular in the

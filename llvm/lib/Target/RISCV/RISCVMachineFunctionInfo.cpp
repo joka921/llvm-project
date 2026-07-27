@@ -29,6 +29,9 @@ MachineFunctionInfo *RISCVMachineFunctionInfo::clone(
 
 RISCVMachineFunctionInfo::RISCVMachineFunctionInfo(const Function &F,
                                                    const RISCVSubtarget *STI) {
+  if (const auto *CFB = mdconst::extract_or_null<ConstantInt>(
+          F.getParent()->getModuleFlag("cf-protection-branch")))
+    CFProtectionBranch = CFB->getZExtValue() != 0;
 
   // The default stack probe size is 4096 if the function has no
   // stack-probe-size attribute. This is a safe default because it is the
@@ -67,12 +70,17 @@ RISCVMachineFunctionInfo::getInterruptStackKind(
 
   StringRef InterruptVal =
       MF.getFunction().getFnAttribute("interrupt").getValueAsString();
-  if (InterruptVal == "qci-nest")
-    return InterruptStackKind::QCINest;
-  if (InterruptVal == "qci-nonest")
-    return InterruptStackKind::QCINoNest;
 
-  return InterruptStackKind::None;
+  return StringSwitch<RISCVMachineFunctionInfo::InterruptStackKind>(
+             InterruptVal)
+      .Case("qci-nest", InterruptStackKind::QCINest)
+      .Case("qci-nonest", InterruptStackKind::QCINoNest)
+      .Case("SiFive-CLIC-preemptible",
+            InterruptStackKind::SiFiveCLICPreemptible)
+      .Case("SiFive-CLIC-stack-swap", InterruptStackKind::SiFiveCLICStackSwap)
+      .Case("SiFive-CLIC-preemptible-stack-swap",
+            InterruptStackKind::SiFiveCLICPreemptibleStackSwap)
+      .Default(InterruptStackKind::None);
 }
 
 void yaml::RISCVMachineFunctionInfo::mappingImpl(yaml::IO &YamlIO) {
@@ -87,6 +95,10 @@ RISCVMachineFunctionInfo::getPushPopKind(const MachineFunction &MF) const {
   if (VarArgsSaveSize != 0)
     return PushPopKind::None;
 
+  // SiFive interrupts are not compatible with push/pop.
+  if (useSiFiveInterrupt(MF))
+    return PushPopKind::None;
+
   // Zcmp is not compatible with the frame pointer convention.
   if (MF.getSubtarget<RISCVSubtarget>().hasStdExtZcmp() &&
       !MF.getTarget().Options.DisableFramePointerElim(MF))
@@ -98,6 +110,29 @@ RISCVMachineFunctionInfo::getPushPopKind(const MachineFunction &MF) const {
     return PushPopKind::VendorXqccmp;
 
   return PushPopKind::None;
+}
+
+bool RISCVMachineFunctionInfo::hasImplicitFPUpdates(
+    const MachineFunction &MF) const {
+  switch (getInterruptStackKind(MF)) {
+  case InterruptStackKind::QCINest:
+  case InterruptStackKind::QCINoNest:
+    // QC.C.MIENTER and QC.C.MIENTER.NEST both update FP on function entry.
+    return true;
+  default:
+    break;
+  }
+
+  switch (getPushPopKind(MF)) {
+  case PushPopKind::VendorXqccmp:
+    // When using Xqccmp, we will use `QC.CM.PUSHFP` when Frame Pointers are
+    // enabled, which will update FP.
+    return true;
+  default:
+    break;
+  }
+
+  return false;
 }
 
 void RISCVMachineFunctionInfo::initializeBaseYamlFields(

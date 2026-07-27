@@ -84,8 +84,7 @@ OperatingSystemPython::OperatingSystemPython(lldb_private::Process *process,
   if (!m_interpreter)
     return;
 
-  std::string os_plugin_class_name(
-      python_module_path.GetFilename().AsCString(""));
+  std::string os_plugin_class_name(python_module_path.GetFilename());
   if (os_plugin_class_name.empty())
     return;
 
@@ -116,8 +115,9 @@ OperatingSystemPython::OperatingSystemPython(lldb_private::Process *process,
     return;
 
   ExecutionContext exe_ctx(process);
+  ScriptedMetadata scripted_metadata(os_plugin_class_name, nullptr);
   auto obj_or_err = operating_system_interface->CreatePluginObject(
-      os_plugin_class_name, exe_ctx, nullptr);
+      scripted_metadata, exe_ctx, nullptr);
 
   if (!obj_or_err) {
     llvm::consumeError(obj_or_err.takeError());
@@ -259,8 +259,8 @@ ThreadSP OperatingSystemPython::CreateThreadFromThreadInfo(
   if (!thread_sp) {
     if (did_create_ptr)
       *did_create_ptr = true;
-    thread_sp = std::make_shared<ThreadMemory>(*m_process, tid, name, queue,
-                                               reg_data_addr);
+    thread_sp = std::make_shared<ThreadMemoryProvidingNameAndQueue>(
+        *m_process, tid, name, queue, reg_data_addr);
   }
 
   if (core_number < core_thread_list.GetSize(false)) {

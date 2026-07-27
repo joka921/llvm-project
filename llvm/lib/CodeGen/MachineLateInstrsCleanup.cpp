@@ -22,6 +22,7 @@
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineOperand.h"
+#include "llvm/CodeGen/RegisterClassInfo.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
@@ -48,9 +49,9 @@ class MachineLateInstrsCleanup {
       return MI && MI->isIdenticalTo(*ArgMI);
     }
   };
-
+  typedef SmallDenseMap<Register, TinyPtrVector<MachineInstr *>> Reg2MIVecMap;
   std::vector<Reg2MIMap> RegDefs;
-  std::vector<Reg2MIMap> RegKills;
+  std::vector<Reg2MIVecMap> RegKills;
 
   // Walk through the instructions in MBB and remove any redundant
   // instructions.
@@ -58,7 +59,7 @@ class MachineLateInstrsCleanup {
 
   void removeRedundantDef(MachineInstr *MI);
   void clearKillsForDef(Register Reg, MachineBasicBlock *MBB,
-                        BitVector &VisitedPreds);
+                        BitVector &VisitedPreds, MachineInstr *ToRemoveMI);
 
 public:
   bool run(MachineFunction &MF);
@@ -68,21 +69,18 @@ class MachineLateInstrsCleanupLegacy : public MachineFunctionPass {
 public:
   static char ID; // Pass identification, replacement for typeid
 
-  MachineLateInstrsCleanupLegacy() : MachineFunctionPass(ID) {
-    initializeMachineLateInstrsCleanupLegacyPass(
-        *PassRegistry::getPassRegistry());
-  }
+  MachineLateInstrsCleanupLegacy() : MachineFunctionPass(ID) {}
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
+    AU.addPreserved<MachineRegisterClassInfoWrapperPass>();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
 
   bool runOnMachineFunction(MachineFunction &MF) override;
 
   MachineFunctionProperties getRequiredProperties() const override {
-    return MachineFunctionProperties().set(
-        MachineFunctionProperties::Property::NoVRegs);
+    return MachineFunctionProperties().setNoVRegs();
   }
 };
 
@@ -135,19 +133,25 @@ bool MachineLateInstrsCleanup::run(MachineFunction &MF) {
 // definition.
 void MachineLateInstrsCleanup::clearKillsForDef(Register Reg,
                                                 MachineBasicBlock *MBB,
-                                                BitVector &VisitedPreds) {
+                                                BitVector &VisitedPreds,
+                                                MachineInstr *ToRemoveMI) {
   VisitedPreds.set(MBB->getNumber());
 
-  // Kill flag in MBB
-  if (MachineInstr *KillMI = RegKills[MBB->getNumber()].lookup(Reg)) {
-    KillMI->clearRegisterKills(Reg, TRI);
-    return;
-  }
+  // Clear kill flag(s) in MBB, that have been seen after the preceding
+  // definition. If Reg or one of its subregs was killed, it would actually
+  // be ok to stop after removing that (and any other) kill-flag, but it
+  // doesn't seem noticeably faster while it would be a bit more complicated.
+  Reg2MIVecMap &MBBKills = RegKills[MBB->getNumber()];
+  if (auto Kills = MBBKills.find(Reg); Kills != MBBKills.end())
+    for (auto *KillMI : Kills->second)
+      KillMI->clearRegisterKills(Reg, TRI);
 
-  // Def in MBB (missing kill flag)
-  if (MachineInstr *DefMI = RegDefs[MBB->getNumber()].lookup(Reg))
-    if (DefMI->getParent() == MBB)
-      return;
+  // Definition in current MBB: done.
+  Reg2MIMap &MBBDefs = RegDefs[MBB->getNumber()];
+  MachineInstr *DefMI = MBBDefs[Reg];
+  assert(DefMI->isIdenticalTo(*ToRemoveMI) && "Previous def not identical?");
+  if (DefMI->getParent() == MBB)
+    return;
 
   // If an earlier def is not in MBB, continue in predecessors.
   if (!MBB->isLiveIn(Reg))
@@ -155,13 +159,13 @@ void MachineLateInstrsCleanup::clearKillsForDef(Register Reg,
   assert(!MBB->pred_empty() && "Predecessor def not found!");
   for (MachineBasicBlock *Pred : MBB->predecessors())
     if (!VisitedPreds.test(Pred->getNumber()))
-      clearKillsForDef(Reg, Pred, VisitedPreds);
+      clearKillsForDef(Reg, Pred, VisitedPreds, ToRemoveMI);
 }
 
 void MachineLateInstrsCleanup::removeRedundantDef(MachineInstr *MI) {
   Register Reg = MI->getOperand(0).getReg();
   BitVector VisitedPreds(MI->getMF()->getNumBlockIDs());
-  clearKillsForDef(Reg, MI->getParent(), VisitedPreds);
+  clearKillsForDef(Reg, MI->getParent(), VisitedPreds, MI);
   MI->eraseFromParent();
   ++NumRemoved;
 }
@@ -197,7 +201,7 @@ static bool isCandidate(const MachineInstr *MI, Register &DefedReg,
 bool MachineLateInstrsCleanup::processBlock(MachineBasicBlock *MBB) {
   bool Changed = false;
   Reg2MIMap &MBBDefs = RegDefs[MBB->getNumber()];
-  Reg2MIMap &MBBKills = RegKills[MBB->getNumber()];
+  Reg2MIVecMap &MBBKills = RegKills[MBB->getNumber()];
 
   // Find reusable definitions in the predecessor(s).
   if (!MBB->pred_empty() && !MBB->isEHPad() &&
@@ -241,15 +245,17 @@ bool MachineLateInstrsCleanup::processBlock(MachineBasicBlock *MBB) {
     }
 
     // Clear any entries in map that MI clobbers.
-    for (auto DefI : llvm::make_early_inc_range(MBBDefs)) {
-      Register Reg = DefI.first;
+    MBBDefs.remove_if([&](const auto &Entry) {
+      Register Reg = Entry.first;
       if (MI.modifiesRegister(Reg, TRI)) {
-        MBBDefs.erase(Reg);
         MBBKills.erase(Reg);
-      } else if (MI.findRegisterUseOperandIdx(Reg, TRI, true /*isKill*/) != -1)
-        // Keep track of register kills.
-        MBBKills[Reg] = &MI;
-    }
+        return true;
+      }
+      if (MI.findRegisterUseOperandIdx(Reg, TRI, true /*isKill*/) != -1)
+        // Keep track of all instructions that fully or partially kills Reg.
+        MBBKills[Reg].push_back(&MI);
+      return false;
+    });
 
     // Record this MI for potential later reuse.
     if (IsCandidate) {

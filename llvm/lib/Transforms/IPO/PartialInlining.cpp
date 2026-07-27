@@ -29,6 +29,7 @@
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/CycleInfo.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Dominators.h"
@@ -109,7 +110,7 @@ static cl::opt<float> MinRegionSizeRatio(
              "outline candidate and original function"));
 // Used to tune the minimum number of execution counts needed in the predecessor
 // block to the cold edge. ie. confidence interval.
-static cl::opt<unsigned>
+cl::opt<unsigned>
     MinBlockCounterExecution("min-block-execution", cl::init(100), cl::Hidden,
                              cl::desc("Minimum block executions to consider "
                                       "its BranchProbabilityInfo valid"));
@@ -348,8 +349,10 @@ PartialInlinerImpl::computeOutliningColdRegionsInfo(
   BasicBlock *EntryBlock = &F.front();
 
   DominatorTree DT(F);
+  CycleInfo CI;
+  CI.compute(F);
   LoopInfo LI(DT);
-  BranchProbabilityInfo BPI(F, LI);
+  BranchProbabilityInfo BPI(F, CI);
   std::unique_ptr<BlockFrequencyInfo> ScopedBFI;
   BlockFrequencyInfo *BFI;
   if (!GetBFI) {
@@ -490,8 +493,7 @@ PartialInlinerImpl::computeOutliningColdRegionsInfo(
       // candidate for outlining.  In the future, we may want to look
       // at inner regions because the outer region may have live-exit
       // variables.
-      for (auto *BB : DominateVector)
-        VisitedSet.insert(BB);
+      VisitedSet.insert_range(DominateVector);
 
       // ReturnBlock here means the block after the outline call
       BasicBlock *ReturnBlock = ExitBlock->getSingleSuccessor();
@@ -514,8 +516,8 @@ PartialInlinerImpl::computeOutliningColdRegionsInfo(
 std::unique_ptr<FunctionOutliningInfo>
 PartialInlinerImpl::computeOutliningInfo(Function &F) const {
   BasicBlock *EntryBlock = &F.front();
-  BranchInst *BR = dyn_cast<BranchInst>(EntryBlock->getTerminator());
-  if (!BR || BR->isUnconditional())
+  CondBrInst *BR = dyn_cast<CondBrInst>(EntryBlock->getTerminator());
+  if (!BR)
     return std::unique_ptr<FunctionOutliningInfo>();
 
   // Returns true if Succ is BB's successor
@@ -593,9 +595,7 @@ PartialInlinerImpl::computeOutliningInfo(Function &F) const {
   // {ReturnBlock, NonReturnBlock}
   assert(OutliningInfo->Entries[0] == &F.front() &&
          "Function Entry must be the first in Entries vector");
-  DenseSet<BasicBlock *> Entries;
-  for (BasicBlock *E : OutliningInfo->Entries)
-    Entries.insert(E);
+  DenseSet<BasicBlock *> Entries(llvm::from_range, OutliningInfo->Entries);
 
   // Returns true of BB has Predecessor which is not
   // in Entries set.
@@ -664,10 +664,8 @@ static bool hasProfileData(const Function &F, const FunctionOutliningInfo &OI) {
     return true;
   // Now check if any of the entry block has MD_prof data:
   for (auto *E : OI.Entries) {
-    BranchInst *BR = dyn_cast<BranchInst>(E->getTerminator());
-    if (!BR || BR->isUnconditional())
-      continue;
-    if (hasBranchWeightMD(*BR))
+    CondBrInst *BR = dyn_cast<CondBrInst>(E->getTerminator());
+    if (BR && hasBranchWeightMD(*BR))
       return true;
   }
   return false;
@@ -804,7 +802,7 @@ PartialInlinerImpl::computeBBInlineCost(BasicBlock *BB,
   InstructionCost InlineCost = 0;
   const DataLayout &DL = BB->getDataLayout();
   int InstrCost = InlineConstants::getInstrCost();
-  for (Instruction &I : BB->instructionsWithoutDebug()) {
+  for (Instruction &I : *BB) {
     // Skip free instructions.
     switch (I.getOpcode()) {
     case Instruction::BitCast:
@@ -908,8 +906,10 @@ void PartialInlinerImpl::computeCallsiteToProfCountMap(
       // For the old pass manager:
       if (!GetBFI) {
         DominatorTree DT(*Caller);
+        CycleInfo CI;
+        CI.compute(*Caller);
         LoopInfo LI(DT);
-        BranchProbabilityInfo BPI(*Caller, LI);
+        BranchProbabilityInfo BPI(*Caller, CI);
         TempBFI.reset(new BlockFrequencyInfo(*Caller, BPI, LI));
         CurrentCallerBFI = TempBFI.get();
       } else {
@@ -919,9 +919,6 @@ void PartialInlinerImpl::computeCallsiteToProfCountMap(
   };
 
   for (User *User : Users) {
-    // Don't bother with BlockAddress used by CallBr for asm goto.
-    if (isa<BlockAddress>(User))
-      continue;
     CallBase *CB = getSupportedCallBase(User);
     Function *Caller = CB->getCaller();
     if (CurrentCaller != Caller) {
@@ -1096,8 +1093,10 @@ bool PartialInlinerImpl::FunctionCloner::doMultiRegionFunctionOutlining() {
   DT.recalculate(*ClonedFunc);
 
   // Manually calculate a BlockFrequencyInfo and BranchProbabilityInfo.
+  CycleInfo CI;
+  CI.compute(*ClonedFunc);
   LoopInfo LI(DT);
-  BranchProbabilityInfo BPI(*ClonedFunc, LI);
+  BranchProbabilityInfo BPI(*ClonedFunc, CI);
   ClonedFuncBFI.reset(new BlockFrequencyInfo(*ClonedFunc, BPI, LI));
 
   // Cache and recycle the CodeExtractor analysis to avoid O(n^2) compile-time.
@@ -1112,7 +1111,10 @@ bool PartialInlinerImpl::FunctionCloner::doMultiRegionFunctionOutlining() {
     CodeExtractor CE(RegionInfo.Region, &DT, /*AggregateArgs*/ false,
                      ClonedFuncBFI.get(), &BPI,
                      LookupAC(*RegionInfo.EntryBlock->getParent()),
-                     /* AllowVarargs */ false);
+                     /* AllowVarargs */ false, /* AllowAlloca */ false,
+                     /* AllocaBlock */ nullptr, /* DeallocationBlocks */ {},
+                     /* Suffix */ "", /* ArgsInZeroAddressSpace */ false,
+                     /* VoidReturnWithSingleOutput */ false);
 
     CE.findInputsOutputs(Inputs, Outputs, Sinks);
 
@@ -1168,8 +1170,10 @@ PartialInlinerImpl::FunctionCloner::doSingleRegionFunctionOutlining() {
   DT.recalculate(*ClonedFunc);
 
   // Manually calculate a BlockFrequencyInfo and BranchProbabilityInfo.
+  CycleInfo CI;
+  CI.compute(*ClonedFunc);
   LoopInfo LI(DT);
-  BranchProbabilityInfo BPI(*ClonedFunc, LI);
+  BranchProbabilityInfo BPI(*ClonedFunc, CI);
   ClonedFuncBFI.reset(new BlockFrequencyInfo(*ClonedFunc, BPI, LI));
 
   // Gather up the blocks that we're going to extract.
@@ -1193,7 +1197,10 @@ PartialInlinerImpl::FunctionCloner::doSingleRegionFunctionOutlining() {
   Function *OutlinedFunc =
       CodeExtractor(ToExtract, &DT, /*AggregateArgs*/ false,
                     ClonedFuncBFI.get(), &BPI, LookupAC(*ClonedFunc),
-                    /* AllowVarargs */ true)
+                    /* AllowVarargs */ true, /* AllowAlloca */ false,
+                    /* AllocaBlock */ nullptr, /* DeallocationBlocks */ {},
+                    /* Suffix */ "", /* ArgsInZeroAddressSpace */ false,
+                    /* VoidReturnWithSingleOutput */ false)
           .extractCodeRegion(CEAC);
 
   if (OutlinedFunc) {
@@ -1323,7 +1330,7 @@ bool PartialInlinerImpl::tryPartialInline(FunctionCloner &Cloner) {
     RelativeToEntryFreq = BranchProbability(0, 1);
 
   BlockFrequency WeightedRcost =
-      BlockFrequency(*NonWeightedRcost.getValue()) * RelativeToEntryFreq;
+      BlockFrequency(NonWeightedRcost.getValue()) * RelativeToEntryFreq;
 
   // The call sequence(s) to the outlined function(s) are larger than the sum of
   // the original outlined region size(s), it does not increase the chances of
@@ -1357,15 +1364,10 @@ bool PartialInlinerImpl::tryPartialInline(FunctionCloner &Cloner) {
   if (CalleeEntryCount)
     computeCallsiteToProfCountMap(Cloner.ClonedFunc, CallSiteToProfCountMap);
 
-  uint64_t CalleeEntryCountV =
-      (CalleeEntryCount ? CalleeEntryCount->getCount() : 0);
+  uint64_t CalleeEntryCountV = (CalleeEntryCount ? *CalleeEntryCount : 0);
 
   bool AnyInline = false;
   for (User *User : Users) {
-    // Don't bother with BlockAddress used by CallBr for asm goto.
-    if (isa<BlockAddress>(User))
-      continue;
-
     CallBase *CB = getSupportedCallBase(User);
 
     if (isLimitReached())
@@ -1384,7 +1386,8 @@ bool PartialInlinerImpl::tryPartialInline(FunctionCloner &Cloner) {
     InlineFunctionInfo IFI(GetAssumptionCache, &PSI);
     // We can only forward varargs when we outlined a single region, else we
     // bail on vararg functions.
-    if (!InlineFunction(*CB, IFI, /*MergeAttributes=*/false, nullptr, true,
+    if (!InlineFunction(*CB, IFI, /*MergeAttributes=*/false, nullptr,
+                        /*InsertLifetime=*/true, /*TrackInlineHistory=*/true,
                         (Cloner.ClonedOI ? Cloner.OutlinedFunctions.back().first
                                          : nullptr))
              .isSuccess())
@@ -1413,8 +1416,7 @@ bool PartialInlinerImpl::tryPartialInline(FunctionCloner &Cloner) {
   if (AnyInline) {
     Cloner.IsFunctionInlined = true;
     if (CalleeEntryCount)
-      Cloner.OrigFunc->setEntryCount(Function::ProfileCount(
-          CalleeEntryCountV, CalleeEntryCount->getType()));
+      Cloner.OrigFunc->setEntryCount(CalleeEntryCountV);
     OptimizationRemarkEmitter OrigFuncORE(Cloner.OrigFunc);
     OrigFuncORE.emit([&]() {
       return OptimizationRemark(DEBUG_TYPE, "PartiallyInlined", Cloner.OrigFunc)

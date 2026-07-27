@@ -38,6 +38,9 @@ FPType = ByteSizes([
    ("bfloat", 2),
    ("float",  4),
    ("double", 8)])
+
+FP128LoadType = ByteSizes([
+   ("fp128", 16)])
 # fmt: on
 
 
@@ -177,6 +180,8 @@ FP_ATOMICRMW_OPS = [
     "fsub",
     "fmax",
     "fmin",
+    "fmaximum",
+    "fminimum",
 ]
 
 
@@ -189,19 +194,29 @@ def relpath():
     return fp
 
 
+def generate_unused_res_test(featname, ordering, op, alignval):
+    if featname != "lsfe" or op == "fsub" or alignval == 1:
+        return False
+    if ordering not in [AtomicOrder.monotonic, AtomicOrder.release]:
+        return False
+    return True
+
+
 def align(val, aligned: bool) -> int:
     return val if aligned else 1
 
 
-def all_atomicrmw(f, datatype, atomicrmw_ops):
+def all_atomicrmw(f, datatype, atomicrmw_ops, featname):
+    instr = "atomicrmw"
+    generate_unused = False
+    tests = []
     for op in atomicrmw_ops:
         for aligned in Aligned:
             for ty, val in datatype:
                 alignval = align(val, aligned)
                 for ordering in ATOMICRMW_ORDERS:
                     name = f"atomicrmw_{op}_{ty}_{aligned}_{ordering}"
-                    instr = "atomicrmw"
-                    f.write(
+                    tests.append(
                         textwrap.dedent(
                             f"""
                         define dso_local {ty} @{name}(ptr %ptr, {ty} %value) {{
@@ -211,13 +226,36 @@ def all_atomicrmw(f, datatype, atomicrmw_ops):
                     """
                         )
                     )
+                    if generate_unused_res_test(featname, ordering, op, alignval):
+                        generate_unused = True
+                        name = f"atomicrmw_{op}_{ty}_{aligned}_{ordering}_unused"
+                        tests.append(
+                            textwrap.dedent(
+                                f"""
+                           define dso_local void @{name}(ptr %ptr, {ty} %value) {{
+                               %r = {instr} {op} ptr %ptr, {ty} %value {ordering}, align {alignval}
+                               ret void
+                           }}
+                        """
+                            )
+                        )
+
+    if generate_unused:
+        f.write(
+            "\n; NOTE: '_unused' tests are added to ensure we do not lower to "
+            "ST[F]ADD when the destination register is WZR/XZR.\n"
+            "; See discussion on https://github.com/llvm/llvm-project/pull/131174\n"
+        )
+
+    for test in tests:
+        f.write(test)
 
 
-def all_load(f):
-    for aligned in Aligned:
-        for ty, val in Type:
+def emit_load_tests(f, datatypes, alignments, orderings):
+    for aligned in alignments:
+        for ty, val in datatypes:
             alignval = align(val, aligned)
-            for ordering in ATOMIC_LOAD_ORDERS:
+            for ordering in orderings:
                 for const in [False, True]:
                     name = f"load_atomic_{ty}_{aligned}_{ordering}"
                     instr = "load atomic"
@@ -234,6 +272,12 @@ def all_load(f):
                     """
                         )
                     )
+
+
+def all_load(f, feature):
+    emit_load_tests(f, Type, Aligned, ATOMIC_LOAD_ORDERS)
+    if feature in [Feature.lse2, Feature.rcpc3, Feature.lse2_lse128]:
+        emit_load_tests(f, FP128LoadType, [Aligned.aligned], [AtomicOrder.seq_cst])
 
 
 def all_store(f):
@@ -340,7 +384,7 @@ def write_lit_tests(feature, datatypes, ops):
             with open(f"{triple}-atomicrmw-{feat.name}.ll", "w") as f:
                 filter_args = r'--filter-out "\b(sp)\b" --filter "^\s*(ld[^r]|st[^r]|swp|cas|bl|add|and|eor|orn|orr|sub|mvn|sxt|cmp|ccmp|csel|dmb)"'
                 header(f, triple, [feat], filter_args)
-                all_atomicrmw(f, datatypes, ops)
+                all_atomicrmw(f, datatypes, ops, feat.name)
 
             # Floating point atomics only supported for atomicrmw currently
             if feature.test_scope() == "atomicrmw":
@@ -354,7 +398,7 @@ def write_lit_tests(feature, datatypes, ops):
             with open(f"{triple}-atomic-load-{feat.name}.ll", "w") as f:
                 filter_args = r'--filter-out "\b(sp)\b" --filter "^\s*(ld|st[^r]|swp|cas|bl|add|and|eor|orn|orr|sub|mvn|sxt|cmp|ccmp|csel|dmb)"'
                 header(f, triple, [feat], filter_args)
-                all_load(f)
+                all_load(f, feat)
 
             with open(f"{triple}-atomic-store-{feat.name}.ll", "w") as f:
                 filter_args = r'--filter-out "\b(sp)\b" --filter "^\s*(ld[^r]|st|swp|cas|bl|add|and|eor|orn|orr|sub|mvn|sxt|cmp|ccmp|csel|dmb)"'

@@ -1,3 +1,6 @@
+.. If you want to modify sections/contents permanently, you should modify both
+   ReleaseNotes.rst and ReleaseNotesTemplate.txt.
+
 ====================================================
 Extra Clang Tools |release| |ReleaseNotesTitle|
 ====================================================
@@ -43,6 +46,9 @@ infrastructure are described first, followed by tool-specific sections.
 Major New Features
 ------------------
 
+Potentially Breaking Changes
+----------------------------
+
 Improvements to clangd
 ----------------------
 
@@ -57,9 +63,6 @@ Semantic Highlighting
 
 Compile flags
 ^^^^^^^^^^^^^
-
-- Added `BuiltinHeaders` config key which controls whether clangd's built-in
-  headers are used or ones extracted from the driver.
 
 Hover
 ^^^^^
@@ -94,11 +97,11 @@ Improvements to clang-tidy
 New checks
 ^^^^^^^^^^
 
-- New :doc:`bugprone-unintended-char-ostream-output
-  <clang-tidy/checks/bugprone/unintended-char-ostream-output>` check.
+- New :doc:`performance-expensive-value-or
+  <clang-tidy/checks/performance/expensive-value-or>` check.
 
-  Finds unintended character output from ``unsigned char`` and ``signed char`` to an
-  ``ostream``.
+  Finds calls to ``value_or`` (and alternative spellings ``valueOr``,
+  ``ValueOr``) on optional types where the return type is expensive to copy.
 
 New check aliases
 ^^^^^^^^^^^^^^^^^
@@ -106,52 +109,17 @@ New check aliases
 Changes in existing checks
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-- Improved :doc:`bugprone-string-constructor
-  <clang-tidy/checks/bugprone/string-constructor>` check to find suspicious
-  calls of ``std::string`` constructor with char pointer, start position and
-  length parameters.
-
-- Improved :doc:`bugprone-unchecked-optional-access
-  <clang-tidy/checks/bugprone/unchecked-optional-access>` fixing false
-  positives from smart pointer accessors repeated in checking ``has_value``
-  and accessing ``value``. The option `IgnoreSmartPointerDereference` should
-  no longer be needed and will be removed. Also fixing false positive from
-  const reference accessors to objects containing optional member.
-
-- Improved :doc:`bugprone-unsafe-functions
-  <clang-tidy/checks/bugprone/unsafe-functions>` check to allow specifying
-  additional C++ member functions to match.
-
-- Improved :doc:`misc-const-correctness
-  <clang-tidy/checks/misc/const-correctness>` check by adding the option
-  `AllowedTypes`, that excludes specified types from const-correctness
-  checking and fixing false positives when modifying variant by ``operator[]``
-  with template in parameters.
-
 - Improved :doc:`misc-redundant-expression
-  <clang-tidy/checks/misc/redundant-expression>` check by providing additional
-  examples and fixing some macro related false positives.
-  
-- Improved :doc:`modernize-use-ranges
-  <clang-tidy/checks/modernize/use-ranges>` check by updating suppress 
-  warnings logic for ``nullptr`` in ``std::find``.
+  <clang-tidy/checks/misc/redundant-expression>` by fixing false positives in
+  nested expressions involving different macros or a mix of macro and
+  non-macro operands.
 
-- Improved :doc:`misc-use-internal-linkage
-  <clang-tidy/checks/misc/use-internal-linkage>` check by fix false positives
-  for function or variable in header file which contains macro expansion.
-
-- Improved :doc:`performance/unnecessary-value-param
-  <clang-tidy/checks/performance/unnecessary-value-param>` check performance by
-  tolerating fix-it breaking compilation when functions is used as pointers
-  to avoid matching usage of functions within the current compilation unit.
-
-- Improved :doc:`performance-move-const-arg
-  <clang-tidy/checks/performance/move-const-arg>` check by fixing false negatives
-  on ternary operators calling ``std::move``.
-
-- Improved :doc:`misc-unused-using-decls
-  <clang-tidy/checks/misc/unused-using-decls>` check by fixing false positives
-  on ``operator""`` with template parameters.
+- Improved :doc:`readability-named-parameter
+  <clang-tidy/checks/readability/named-parameter>` check by ignoring
+  standard tag types (e.g. ``std::in_place_t``, ``std::allocator_arg_t``,
+  ``std::nothrow_t``, iterator tags, lock tags, etc.) that are used
+  exclusively for overload resolution. Added the :option:`IgnoredTypes`
+  option to allow customizing the set of ignored types.
 
 Removed checks
 ^^^^^^^^^^^^^^
@@ -162,17 +130,11 @@ Miscellaneous
 Improvements to include-fixer
 -----------------------------
 
-The improvements are...
-
 Improvements to clang-include-fixer
 -----------------------------------
 
-The improvements are...
-
 Improvements to modularize
 --------------------------
-
-The improvements are...
 
 Improvements to pp-trace
 ------------------------

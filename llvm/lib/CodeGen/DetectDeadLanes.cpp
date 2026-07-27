@@ -28,6 +28,7 @@
 #include "llvm/CodeGen/DetectDeadLanes.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/RegisterClassInfo.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
@@ -94,15 +95,7 @@ static bool isCrossCopy(const MachineRegisterInfo &MRI,
   }
   }
 
-  unsigned PreA, PreB; // Unused.
-  if (SrcSubIdx && DstSubIdx)
-    return !TRI.getCommonSuperRegClass(SrcRC, SrcSubIdx, DstRC, DstSubIdx, PreA,
-                                       PreB);
-  if (SrcSubIdx)
-    return !TRI.getMatchingSuperRegClass(SrcRC, DstRC, SrcSubIdx);
-  if (DstSubIdx)
-    return !TRI.getMatchingSuperRegClass(DstRC, SrcRC, DstSubIdx);
-  return !TRI.getCommonSubClass(SrcRC, DstRC);
+  return !TRI.findCommonRegClass(SrcRC, SrcSubIdx, DstRC, DstSubIdx);
 }
 
 void DeadLaneDetector::addUsedLanesOnOperand(const MachineOperand &MO,
@@ -373,19 +366,9 @@ LaneBitmask DeadLaneDetector::determineInitialUsedLanes(Register Reg) {
 
 namespace {
 
-class DetectDeadLanes : public MachineFunctionPass {
+class DetectDeadLanes {
 public:
-  bool runOnMachineFunction(MachineFunction &MF) override;
-
-  static char ID;
-  DetectDeadLanes() : MachineFunctionPass(ID) {}
-
-  StringRef getPassName() const override { return "Detect Dead Lanes"; }
-
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.setPreservesCFG();
-    MachineFunctionPass::getAnalysisUsage(AU);
-  }
+  bool run(MachineFunction &MF);
 
 private:
   /// update the operand status.
@@ -407,12 +390,30 @@ private:
   const TargetRegisterInfo *TRI = nullptr;
 };
 
+struct DetectDeadLanesLegacy : public MachineFunctionPass {
+  static char ID;
+  DetectDeadLanesLegacy() : MachineFunctionPass(ID) {}
+
+  StringRef getPassName() const override { return "Detect Dead Lanes"; }
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.setPreservesCFG();
+    AU.addPreserved<MachineRegisterClassInfoWrapperPass>();
+    MachineFunctionPass::getAnalysisUsage(AU);
+  }
+
+  bool runOnMachineFunction(MachineFunction &MF) override {
+    return DetectDeadLanes().run(MF);
+  }
+};
+
 } // end anonymous namespace
 
-char DetectDeadLanes::ID = 0;
-char &llvm::DetectDeadLanesID = DetectDeadLanes::ID;
+char DetectDeadLanesLegacy::ID = 0;
+char &llvm::DetectDeadLanesID = DetectDeadLanesLegacy::ID;
 
-INITIALIZE_PASS(DetectDeadLanes, DEBUG_TYPE, "Detect Dead Lanes", false, false)
+INITIALIZE_PASS(DetectDeadLanesLegacy, DEBUG_TYPE, "Detect Dead Lanes", false,
+                false)
 
 bool DetectDeadLanes::isUndefRegAtInput(
     const MachineOperand &MO, const DeadLaneDetector::VRegInfo &RegInfo) const {
@@ -537,7 +538,17 @@ DetectDeadLanes::modifySubRegisterOperandStatus(const DeadLaneDetector &DLD,
   return std::make_pair(Changed, Again);
 }
 
-bool DetectDeadLanes::runOnMachineFunction(MachineFunction &MF) {
+PreservedAnalyses
+DetectDeadLanesPass::run(MachineFunction &MF,
+                         MachineFunctionAnalysisManager &MFAM) {
+  if (!DetectDeadLanes().run(MF))
+    return PreservedAnalyses::all();
+  auto PA = getMachineFunctionPassPreservedAnalyses();
+  PA.preserveSet<CFGAnalyses>();
+  return PA;
+}
+
+bool DetectDeadLanes::run(MachineFunction &MF) {
   // Don't bother if we won't track subregister liveness later.  This pass is
   // required for correctness if subregister liveness is enabled because the
   // register coalescer cannot deal with hidden dead defs. However without

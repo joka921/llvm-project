@@ -358,16 +358,18 @@ public:
   void clearRelocations();
 
   /// Add a new relocation at the given /p Offset.
-  void addRelocation(uint64_t Offset, MCSymbol *Symbol, uint64_t Type,
+  void addRelocation(uint64_t Offset, MCSymbol *Symbol, uint32_t Type,
                      uint64_t Addend, uint64_t Value = 0) {
     assert(Offset < getSize() && "offset not within section bounds");
     Relocations.emplace(Relocation{Offset, Symbol, Type, Addend, Value});
   }
 
   /// Add a dynamic relocation at the given /p Offset.
-  void addDynamicRelocation(uint64_t Offset, MCSymbol *Symbol, uint64_t Type,
-                            uint64_t Addend, uint64_t Value = 0) {
-    addDynamicRelocation(Relocation{Offset, Symbol, Type, Addend, Value});
+  void addDynamicRelocation(uint64_t Offset, MCSymbol *Symbol, uint32_t Type,
+                            uint64_t Addend, uint64_t Value = 0,
+                            bool IsRELR = false) {
+    addDynamicRelocation(
+        Relocation{Offset, Symbol, Type, Addend, Value, IsRELR});
   }
 
   void addDynamicRelocation(const Relocation &Reloc) {
@@ -478,7 +480,7 @@ public:
 
   /// Flush all pending relocations to patch original contents of sections
   /// that were not emitted via MCStreamer.
-  void flushPendingRelocations(raw_pwrite_stream &OS,
+  void flushPendingRelocations(raw_fd_ostream &OS,
                                SymbolResolverFuncTy Resolver);
 
   /// Change contents of the section. Unless the section has a valid SectionID,
@@ -521,11 +523,6 @@ inline uint8_t *copyByteArray(const uint8_t *Data, uint64_t Size) {
   auto *Array = new uint8_t[Size];
   memcpy(Array, Data, Size);
   return Array;
-}
-
-inline uint8_t *copyByteArray(StringRef Buffer) {
-  return copyByteArray(reinterpret_cast<const uint8_t *>(Buffer.data()),
-                       Buffer.size());
 }
 
 inline uint8_t *copyByteArray(ArrayRef<char> Buffer) {

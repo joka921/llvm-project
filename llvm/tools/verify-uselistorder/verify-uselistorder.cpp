@@ -68,14 +68,12 @@ static cl::opt<unsigned>
                 cl::desc("Number of times to shuffle and verify use-lists"),
                 cl::init(1), cl::cat(Cat));
 
-extern cl::opt<cl::boolOrDefault> PreserveInputDbgFormat;
-
 namespace {
 
 struct TempFile {
   std::string Filename;
   FileRemover Remover;
-  bool init(const std::string &Ext);
+  bool init(const std::string &Ext, bool IsText = false);
   bool writeBitcode(const Module &M) const;
   bool writeAssembly(const Module &M) const;
   std::unique_ptr<Module> readBitcode(LLVMContext &Context) const;
@@ -108,10 +106,12 @@ struct ValueMapping {
 
 } // end namespace
 
-bool TempFile::init(const std::string &Ext) {
+bool TempFile::init(const std::string &Ext, bool IsText) {
   SmallVector<char, 64> Vector;
   LLVM_DEBUG(dbgs() << " - create-temp-file\n");
-  if (auto EC = sys::fs::createTemporaryFile("uselistorder", Ext, Vector)) {
+  if (auto EC = sys::fs::createTemporaryFile("uselistorder", Ext, Vector,
+                                             IsText ? sys::fs::OF_Text
+                                                    : sys::fs::OF_None)) {
     errs() << "verify-uselistorder: error: " << EC.message() << "\n";
     return true;
   }
@@ -247,6 +247,9 @@ ValueMapping::ValueMapping(const Module &M) {
 }
 
 void ValueMapping::map(const Value *V) {
+  if (!V->hasUseList())
+    return;
+
   if (IDs.lookup(V))
     return;
 
@@ -366,7 +369,7 @@ static void verifyAfterRoundTrip(const Module &M,
 
 static void verifyBitcodeUseListOrder(const Module &M) {
   TempFile F;
-  if (F.init("bc"))
+  if (F.init("bc", /*IsText=*/false))
     report_fatal_error("failed to initialize bitcode file");
 
   if (F.writeBitcode(M))
@@ -378,7 +381,7 @@ static void verifyBitcodeUseListOrder(const Module &M) {
 
 static void verifyAssemblyUseListOrder(const Module &M) {
   TempFile F;
-  if (F.init("ll"))
+  if (F.init("ll", /*IsText=*/true))
     report_fatal_error("failed to initialize assembly file");
 
   if (F.writeAssembly(M))
@@ -397,6 +400,9 @@ static void verifyUseListOrder(const Module &M) {
 
 static void shuffleValueUseLists(Value *V, std::minstd_rand0 &Gen,
                                  DenseSet<Value *> &Seen) {
+  if (!V->hasUseList())
+    return;
+
   if (!Seen.insert(V).second)
     return;
 
@@ -424,7 +430,7 @@ static void shuffleValueUseLists(Value *V, std::minstd_rand0 &Gen,
                         << ", U = ";
                  U.getUser()->dump());
     }
-  } while (std::is_sorted(V->use_begin(), V->use_end(), compareUses));
+  } while (llvm::is_sorted(V->uses(), compareUses));
 
   LLVM_DEBUG(dbgs() << " => shuffle\n");
   V->sortUseList(compareUses);
@@ -439,6 +445,9 @@ static void shuffleValueUseLists(Value *V, std::minstd_rand0 &Gen,
 }
 
 static void reverseValueUseLists(Value *V, DenseSet<Value *> &Seen) {
+  if (!V->hasUseList())
+    return;
+
   if (!Seen.insert(V).second)
     return;
 
@@ -539,7 +548,6 @@ static void reverseUseLists(Module &M) {
 }
 
 int main(int argc, char **argv) {
-  PreserveInputDbgFormat = cl::boolOrDefault::BOU_TRUE;
   InitLLVM X(argc, argv);
 
   // Enable debug stream buffering.

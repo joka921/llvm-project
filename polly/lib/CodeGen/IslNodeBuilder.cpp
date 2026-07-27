@@ -28,7 +28,6 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SetVector.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -74,6 +73,9 @@
 
 using namespace llvm;
 using namespace polly;
+
+// Declared in LoopGenerators.cpp
+extern llvm::cl::opt<bool> PollyVectorizeMetadata;
 
 #define DEBUG_TYPE "polly-codegen"
 
@@ -234,7 +236,8 @@ static void findReferencesInStmt(ScopStmt *Stmt, SetVector<Value *> &Values,
   LoopInfo *LI = Stmt->getParent()->getLI();
 
   BasicBlock *BB = Stmt->getBasicBlock();
-  Loop *Scope = LI->getLoopFor(BB);
+  // TODO: Should BB ever be null?
+  Loop *Scope = BB ? LI->getLoopFor(BB) : nullptr;
   for (Instruction *Inst : Stmt->getInstructions())
     findReferencesInInst(Inst, Stmt, Scope, GlobalMap, Values, SCEVs);
 
@@ -325,8 +328,7 @@ void IslNodeBuilder::getReferencesInSubtree(const isl::ast_node &For,
   SubtreeReferences References = {
       LI, SE, S, ValueMap, Values, SCEVs, getBlockGenerator(), nullptr};
 
-  for (const auto &I : IDToValue)
-    Values.insert(I.second);
+  Values.insert_range(llvm::make_second_range(IDToValue));
 
   // NOTE: this is populated in IslNodeBuilder::addParameters
   for (const auto &I : OutsideLoopIterations)
@@ -434,6 +436,34 @@ static bool IsLoopVectorizerDisabled(isl::ast_node_for Node) {
   return false;
 }
 
+/// Returns true if the loop has a dist=1 dependence involving FP operations
+/// (array-carried RAW/WAW or scalar FP reduction). In that case we omit the
+/// vectorize.enable annotation and let the Loop Vectorizer decide.
+static bool hasLoopCarriedDependence(isl::ast_node_for For, const Scop &S) {
+  isl::pw_aff PwaDist = IslAstInfo::getMinimalDependenceDistance(For);
+  if (PwaDist.is_null())
+    return false;
+
+  isl::set Dist = isl::manage(isl_pw_aff_domain(PwaDist.copy()));
+  isl::pw_aff PwaOne = isl::pw_aff(Dist, isl::val::one(S.getIslCtx()));
+  if (isl_pw_aff_is_equal(PwaDist.get(), PwaOne.get()) != isl_bool_true)
+    return false;
+
+  // dist=1: suppress forced vectorization if the body has FP operations.
+  for (isl::set StmtSet :
+       IslAstInfo::getSchedule(For).domain().get_set_list()) {
+    auto *Stmt = static_cast<ScopStmt *>(StmtSet.get_tuple_id().get_user());
+    for (Instruction *Inst : Stmt->getInstructions()) {
+      if (Inst->getType()->isFloatingPointTy() ||
+          (Inst->getNumOperands() > 0 &&
+           Inst->getOperand(0)->getType()->isFloatingPointTy()))
+        return true;
+    }
+  }
+
+  return false;
+}
+
 void IslNodeBuilder::createForSequential(isl::ast_node_for For,
                                          bool MarkParallel) {
   Value *ValueLB, *ValueUB, *ValueInc;
@@ -478,9 +508,22 @@ void IslNodeBuilder::createForSequential(isl::ast_node_for For,
   // omit the GuardBB in front of the loop.
   bool UseGuardBB = !GenSE->isKnownPredicate(Predicate, GenSE->getSCEV(ValueLB),
                                              GenSE->getSCEV(ValueUB));
+
+  // FIXME: This is a workaround for
+  // https://github.com/llvm/llvm-project/issues/198726.
+  // llvm.loop.vectorize.enable=true has an additional property beyond
+  // requesting vectorization — it implicitly allows FP operation reordering.
+  // This is a limitation of the metadata format: there is no way to separate
+  // the request for vectorization from the request for reassociating FP ops.
+  // Once LoopVectorize is fixed to not reorder FP ops without explicit
+  // permission, this workaround can be removed.
+  // For now, skip vectorize.enable for dist=1 FP loops to avoid correctness
+  // failures from FP reassociation.
+  bool SkipVectorizeEnableMetadata = hasLoopCarriedDependence(For, S);
+
   IV = createLoop(ValueLB, ValueUB, ValueInc, Builder, *GenLI, *GenDT,
                   ExitBlock, Predicate, &Annotator, MarkParallel, UseGuardBB,
-                  LoopVectorizerDisabled);
+                  LoopVectorizerDisabled, SkipVectorizeEnableMetadata);
   IDToValue[IteratorID.get()] = IV;
 
   create(Body.release());
@@ -489,7 +532,7 @@ void IslNodeBuilder::createForSequential(isl::ast_node_for For,
 
   IDToValue.erase(IDToValue.find(IteratorID.get()));
 
-  Builder.SetInsertPoint(&ExitBlock->front());
+  Builder.SetInsertPoint(ExitBlock, ExitBlock->begin());
 
   SequentialLoops++;
 }
@@ -506,10 +549,10 @@ void IslNodeBuilder::createForParallel(__isl_take isl_ast_node *For) {
   // The preamble of parallel code interacts different than normal code with
   // e.g., scalar initialization. Therefore, we ensure the parallel code is
   // separated from the last basic block.
-  BasicBlock *ParBB = SplitBlock(Builder.GetInsertBlock(),
-                                 &*Builder.GetInsertPoint(), &DT, &LI);
+  BasicBlock *ParBB =
+      SplitBlock(Builder.GetInsertBlock(), Builder.GetInsertPoint(), &DT, &LI);
   ParBB->setName("polly.parallel.for");
-  Builder.SetInsertPoint(&ParBB->front());
+  Builder.SetInsertPoint(ParBB, ParBB->begin());
 
   Body = isl_ast_node_for_get_body(For);
   Init = isl_ast_node_for_get_init(For);
@@ -587,6 +630,8 @@ void IslNodeBuilder::createForParallel(__isl_take isl_ast_node *For) {
   ScalarEvolution *CallerSE = GenSE;
   ValueMapT CallerGlobals = ValueMap;
   IslExprBuilder::IDToValueTy IDToValueCopy = IDToValue;
+  MapVector<const Loop *, const SCEV *> OutsideLoopIterationsCopy =
+      OutsideLoopIterations;
 
   // Get the analyses for the subfunction. ParallelLoopGenerator already create
   // DominatorTree and LoopInfo for us.
@@ -613,20 +658,16 @@ void IslNodeBuilder::createForParallel(__isl_take isl_ast_node *For) {
   BlockGen.switchGeneratedFunc(SubFn, GenDT, GenLI, GenSE);
   RegionGen.switchGeneratedFunc(SubFn, GenDT, GenLI, GenSE);
   ExprBuilder.switchGeneratedFunc(SubFn, GenDT, GenLI, GenSE);
-  Builder.SetInsertPoint(&*LoopBody);
+  Builder.SetInsertPoint(LoopBody);
 
   // Update the ValueMap to use instructions in the subfunction. Note that
   // "GlobalMap" used in BlockGenerator/IslExprBuilder is a reference to this
   // ValueMap.
-  for (auto &[OldVal, NewVal] : ValueMap) {
-    NewVal = NewValues.lookup(NewVal);
-
-    // Clean-up any value that getReferencesInSubtree thinks we do not need.
-    // DenseMap::erase only writes a tombstone (and destroys OldVal/NewVal), so
-    // does not invalidate our iterator.
-    if (!NewVal)
-      ValueMap.erase(OldVal);
-  }
+  ValueMap.remove_if([&](auto &P) {
+    P.second = NewValues.lookup(P.second);
+    // Clean up any value that getReferencesInSubtree thinks we do not need.
+    return !P.second;
+  });
 
   // This is for NewVals that do not appear in ValueMap (such as SCoP-invariant
   // values whose original value can be reused as long as we are in the same
@@ -647,6 +688,19 @@ void IslNodeBuilder::createForParallel(__isl_take isl_ast_node *For) {
     assert(NewVal);
   }
   IDToValue[IteratorID] = IV;
+
+  // Also update OutsideLoopIterations to use values from the subfunction.
+  // SCEVExpander may fold identity operations (e.g. x+0 -> x), returning the
+  // original loop PHI instead of a new instruction. We need to remap these
+  // values through NewValues so GenSE (now SubSE) doesn't operate on values
+  // from the caller function.
+  for (auto &[L, S] : OutsideLoopIterations) {
+    if (auto *U = dyn_cast<SCEVUnknown>(S)) {
+      Value *NewVal = NewValues.lookup(U->getValue());
+      assert(NewVal && "must have a new value");
+      OutsideLoopIterations[L] = GenSE->getUnknown(NewVal);
+    }
+  }
 
 #ifndef NDEBUG
   // Check whether the maps now exclusively refer to SubFn values.
@@ -680,13 +734,11 @@ void IslNodeBuilder::createForParallel(__isl_take isl_ast_node *For) {
   GenSE = CallerSE;
   IDToValue = std::move(IDToValueCopy);
   ValueMap = std::move(CallerGlobals);
+  OutsideLoopIterations = std::move(OutsideLoopIterationsCopy);
   ExprBuilder.switchGeneratedFunc(CallerFn, CallerDT, CallerLI, CallerSE);
   RegionGen.switchGeneratedFunc(CallerFn, CallerDT, CallerLI, CallerSE);
   BlockGen.switchGeneratedFunc(CallerFn, CallerDT, CallerLI, CallerSE);
-  Builder.SetInsertPoint(&*AfterLoop);
-
-  for (const Loop *L : Loops)
-    OutsideLoopIterations.erase(L);
+  Builder.SetInsertPoint(AfterLoop);
 
   isl_ast_node_free(For);
   isl_ast_expr_free(Iterator);
@@ -712,9 +764,9 @@ void IslNodeBuilder::createIf(__isl_take isl_ast_node *If) {
   LLVMContext &Context = F->getContext();
 
   BasicBlock *CondBB = SplitBlock(Builder.GetInsertBlock(),
-                                  &*Builder.GetInsertPoint(), GenDT, GenLI);
+                                  Builder.GetInsertPoint(), GenDT, GenLI);
   CondBB->setName("polly.cond");
-  BasicBlock *MergeBB = SplitBlock(CondBB, &CondBB->front(), GenDT, GenLI);
+  BasicBlock *MergeBB = SplitBlock(CondBB, CondBB->begin(), GenDT, GenLI);
   MergeBB->setName("polly.merge");
   BasicBlock *ThenBB = BasicBlock::Create(Context, "polly.then", F);
   BasicBlock *ElseBB = BasicBlock::Create(Context, "polly.else", F);
@@ -738,16 +790,16 @@ void IslNodeBuilder::createIf(__isl_take isl_ast_node *If) {
   Builder.CreateBr(MergeBB);
   Builder.SetInsertPoint(ElseBB);
   Builder.CreateBr(MergeBB);
-  Builder.SetInsertPoint(&ThenBB->front());
+  Builder.SetInsertPoint(ThenBB, ThenBB->begin());
 
   create(isl_ast_node_if_get_then(If));
 
-  Builder.SetInsertPoint(&ElseBB->front());
+  Builder.SetInsertPoint(ElseBB, ElseBB->begin());
 
   if (isl_ast_node_if_has_else(If))
     create(isl_ast_node_if_get_else(If));
 
-  Builder.SetInsertPoint(&MergeBB->front());
+  Builder.SetInsertPoint(MergeBB, MergeBB->begin());
 
   isl_ast_node_free(If);
 
@@ -794,9 +846,17 @@ IslNodeBuilder::createNewAccesses(ScopStmt *Stmt,
                                      Stmt->getParent()->getContext().release());
       SchedDom = isl_set_intersect_params(
           SchedDom, Stmt->getParent()->getContext().release());
-      assert(isl_set_is_subset(SchedDom, AccDom) &&
+      // Restrict to defined behavior context to match DeLICM's contract:
+      // new read accesses are only required to cover the defined-behavior
+      // subset of the domain.
+      auto *DefinedBehavior =
+          Stmt->getParent()->getBestKnownDefinedBehaviorContext().release();
+      SchedDom =
+          isl_set_intersect_params(SchedDom, isl_set_copy(DefinedBehavior));
+      Dom = isl_set_intersect_params(Dom, DefinedBehavior);
+      assert(isl_set_is_subset(SchedDom, AccDom) != isl_bool_false &&
              "Access relation not defined on full schedule domain");
-      assert(isl_set_is_subset(Dom, AccDom) &&
+      assert(isl_set_is_subset(Dom, AccDom) != isl_bool_false &&
              "Access relation not defined on full domain");
       isl_set_free(AccDom);
       isl_set_free(SchedDom);
@@ -808,8 +868,6 @@ IslNodeBuilder::createNewAccesses(ScopStmt *Stmt,
 
     // isl cannot generate an index expression for access-nothing accesses.
     isl::set AccDomain = PWAccRel.domain();
-    isl::set Context = S.getContext();
-    AccDomain = AccDomain.intersect_params(Context);
     if (AccDomain.is_empty())
       continue;
 
@@ -896,7 +954,7 @@ void IslNodeBuilder::createUser(__isl_take isl_ast_node *User) {
   Id = isl_ast_expr_get_id(StmtExpr);
   isl_ast_expr_free(StmtExpr);
 
-  LTS.insert(OutsideLoopIterations.begin(), OutsideLoopIterations.end());
+  LTS.insert_range(OutsideLoopIterations);
 
   Stmt = (ScopStmt *)isl_id_get_user(Id);
   auto *NewAccesses = createNewAccesses(Stmt, User);
@@ -925,6 +983,30 @@ void IslNodeBuilder::createBlock(__isl_take isl_ast_node *Block) {
 
   isl_ast_node_free(Block);
   isl_ast_node_list_free(List);
+}
+
+void IslNodeBuilder::generateBeginScopTrace() {
+  if (!TraceStmts)
+    return;
+
+  // Sequence of strings to print.
+  SmallVector<llvm::Value *, 8> Values;
+  Values.push_back(RuntimeDebugBuilder::getPrintableString(Builder, "Scop: "));
+
+  auto Params = S.getParamSpace();
+  for (int i : rangeIslSize(0, Params.dim(isl::dim::param))) {
+    if (i != 0)
+      Values.push_back(RuntimeDebugBuilder::getPrintableString(Builder, " "));
+
+    isl::id PId = Params.get_dim_id(isl::dim::param, i);
+    Values.push_back(
+        RuntimeDebugBuilder::getPrintableString(Builder, PId.get_name()));
+    Values.push_back(RuntimeDebugBuilder::getPrintableString(Builder, "="));
+    Values.push_back(IDToValue.lookup(PId.get()));
+  }
+
+  Values.push_back(RuntimeDebugBuilder::getPrintableString(Builder, "\n"));
+  RuntimeDebugBuilder::createCPUPrinter(Builder, ArrayRef<Value *>(Values));
 }
 
 void IslNodeBuilder::create(__isl_take isl_ast_node *Node) {
@@ -1015,7 +1097,7 @@ bool IslNodeBuilder::materializeValue(__isl_take isl_id *Id) {
   return true;
 }
 
-bool IslNodeBuilder::materializeParameters(__isl_take isl_set *Set) {
+bool IslNodeBuilder::materializeParameters(__isl_keep isl_set *Set) {
   for (unsigned i = 0, e = isl_set_dim(Set, isl_dim_param); i < e; ++i) {
     if (!isl_set_involves_dims(Set, isl_dim_param, i, 1))
       continue;
@@ -1035,14 +1117,14 @@ bool IslNodeBuilder::materializeParameters() {
   return true;
 }
 
-Value *IslNodeBuilder::preloadUnconditionally(__isl_take isl_set *AccessRange,
-                                              isl_ast_build *Build,
+Value *IslNodeBuilder::preloadUnconditionally(isl::set AccessRange,
+                                              isl::ast_build Build,
                                               Instruction *AccInst) {
-  isl_pw_multi_aff *PWAccRel = isl_pw_multi_aff_from_set(AccessRange);
-  isl_ast_expr *Access =
-      isl_ast_build_access_from_pw_multi_aff(Build, PWAccRel);
-  auto *Address = isl_ast_expr_address_of(Access);
-  auto *AddressValue = ExprBuilder.create(Address);
+  isl::pw_multi_aff PWAccRel = isl::pw_multi_aff::from_set(AccessRange);
+  PWAccRel = PWAccRel.gist_params(S.getContext());
+  isl::ast_expr Access = Build.access_from(PWAccRel);
+  isl::ast_expr Address = Access.address_of();
+  Value *AddressValue = ExprBuilder.create(Address.release());
   Value *PreloadVal;
 
   // Correct the type as the SAI might have a different type than the user
@@ -1055,54 +1137,34 @@ Value *IslNodeBuilder::preloadUnconditionally(__isl_take isl_set *AccessRange,
   if (LoadInst *PreloadInst = dyn_cast<LoadInst>(PreloadVal))
     PreloadInst->setAlignment(cast<LoadInst>(AccInst)->getAlign());
 
-  // TODO: This is only a hot fix for SCoP sequences that use the same load
-  //       instruction contained and hoisted by one of the SCoPs.
-  if (SE.isSCEVable(Ty))
-    SE.forgetValue(AccInst);
-
   return PreloadVal;
 }
 
 Value *IslNodeBuilder::preloadInvariantLoad(const MemoryAccess &MA,
-                                            __isl_take isl_set *Domain) {
-  isl_set *AccessRange = isl_map_range(MA.getAddressFunction().release());
-  AccessRange = isl_set_gist_params(AccessRange, S.getContext().release());
+                                            isl::set Domain) {
+  isl::set AccessRange = MA.getAddressFunction().range();
 
-  if (!materializeParameters(AccessRange)) {
-    isl_set_free(AccessRange);
-    isl_set_free(Domain);
+  if (!materializeParameters(AccessRange.get()))
     return nullptr;
-  }
 
-  auto *Build =
-      isl_ast_build_from_context(isl_set_universe(S.getParamSpace().release()));
-  isl_set *Universe = isl_set_universe(isl_set_get_space(Domain));
-  bool AlwaysExecuted = isl_set_is_equal(Domain, Universe);
-  isl_set_free(Universe);
+  isl::ast_build Build =
+      isl::ast_build::from_context(isl::set::universe(S.getParamSpace()));
+  isl::set Universe = isl::set::universe(Domain.get_space());
+  bool AlwaysExecuted = Domain.is_equal(Universe);
 
   Instruction *AccInst = MA.getAccessInstruction();
   Type *AccInstTy = AccInst->getType();
 
-  Value *PreloadVal = nullptr;
-  if (AlwaysExecuted) {
-    PreloadVal = preloadUnconditionally(AccessRange, Build, AccInst);
-    isl_ast_build_free(Build);
-    isl_set_free(Domain);
-    return PreloadVal;
-  }
+  if (AlwaysExecuted)
+    return preloadUnconditionally(AccessRange, Build, AccInst);
 
-  if (!materializeParameters(Domain)) {
-    isl_ast_build_free(Build);
-    isl_set_free(AccessRange);
-    isl_set_free(Domain);
+  if (!materializeParameters(Domain.get()))
     return nullptr;
-  }
 
-  isl_ast_expr *DomainCond = isl_ast_build_expr_from_set(Build, Domain);
-  Domain = nullptr;
+  isl::ast_expr DomainCond = Build.expr_from(Domain);
 
   ExprBuilder.setTrackOverflow(true);
-  Value *Cond = ExprBuilder.createBool(DomainCond);
+  Value *Cond = ExprBuilder.createBool(DomainCond.release());
   Value *OverflowHappened = Builder.CreateNot(ExprBuilder.getOverflowState(),
                                               "polly.preload.cond.overflown");
   Cond = Builder.CreateAnd(Cond, OverflowHappened, "polly.preload.cond.result");
@@ -1112,10 +1174,10 @@ Value *IslNodeBuilder::preloadInvariantLoad(const MemoryAccess &MA,
     Cond = Builder.CreateIsNotNull(Cond);
 
   BasicBlock *CondBB = SplitBlock(Builder.GetInsertBlock(),
-                                  &*Builder.GetInsertPoint(), GenDT, GenLI);
+                                  Builder.GetInsertPoint(), GenDT, GenLI);
   CondBB->setName("polly.preload.cond");
 
-  BasicBlock *MergeBB = SplitBlock(CondBB, &CondBB->front(), GenDT, GenLI);
+  BasicBlock *MergeBB = SplitBlock(CondBB, CondBB->begin(), GenDT, GenLI);
   MergeBB->setName("polly.preload.merge");
 
   Function *F = Builder.GetInsertBlock()->getParent();
@@ -1127,19 +1189,19 @@ Value *IslNodeBuilder::preloadInvariantLoad(const MemoryAccess &MA,
     L->addBasicBlockToLoop(ExecBB, *GenLI);
 
   auto *CondBBTerminator = CondBB->getTerminator();
-  Builder.SetInsertPoint(CondBBTerminator);
+  Builder.SetInsertPoint(CondBB, CondBBTerminator->getIterator());
   Builder.CreateCondBr(Cond, ExecBB, MergeBB);
   CondBBTerminator->eraseFromParent();
 
   Builder.SetInsertPoint(ExecBB);
   Builder.CreateBr(MergeBB);
 
-  Builder.SetInsertPoint(ExecBB->getTerminator());
+  Builder.SetInsertPoint(ExecBB, ExecBB->getTerminator()->getIterator());
   Value *PreAccInst = preloadUnconditionally(AccessRange, Build, AccInst);
-  Builder.SetInsertPoint(MergeBB->getTerminator());
+  Builder.SetInsertPoint(MergeBB, MergeBB->getTerminator()->getIterator());
   auto *MergePHI = Builder.CreatePHI(
       AccInstTy, 2, "polly.preload." + AccInst->getName() + ".merge");
-  PreloadVal = MergePHI;
+  Value *PreloadVal = MergePHI;
 
   if (!PreAccInst) {
     PreloadVal = nullptr;
@@ -1149,7 +1211,6 @@ Value *IslNodeBuilder::preloadInvariantLoad(const MemoryAccess &MA,
   MergePHI->addIncoming(PreAccInst, ExecBB);
   MergePHI->addIncoming(Constant::getNullValue(AccInstTy), CondBB);
 
-  isl_ast_build_free(Build);
   return PreloadVal;
 }
 
@@ -1216,7 +1277,7 @@ bool IslNodeBuilder::preloadInvariantEquivClass(
   Instruction *AccInst = MA->getAccessInstruction();
   Type *AccInstTy = AccInst->getType();
 
-  Value *PreloadVal = preloadInvariantLoad(*MA, ExecutionCtx.copy());
+  Value *PreloadVal = preloadInvariantLoad(*MA, ExecutionCtx);
   if (!PreloadVal)
     return false;
 
@@ -1316,7 +1377,9 @@ void IslNodeBuilder::allocateNewArrays(BBPair StartExitBlocks) {
       unsigned Size = SAI->getElemSizeInBytes();
 
       // Insert the malloc call at polly.start
-      Builder.SetInsertPoint(std::get<0>(StartExitBlocks)->getTerminator());
+      BasicBlock *StartBlock = std::get<0>(StartExitBlocks);
+      Builder.SetInsertPoint(StartBlock,
+                             StartBlock->getTerminator()->getIterator());
       auto *CreatedArray = Builder.CreateMalloc(
           IntPtrTy, SAI->getElementType(),
           ConstantInt::get(Type::getInt64Ty(Ctx), Size),
@@ -1326,7 +1389,9 @@ void IslNodeBuilder::allocateNewArrays(BBPair StartExitBlocks) {
       SAI->setBasePtr(CreatedArray);
 
       // Insert the free call at polly.exiting
-      Builder.SetInsertPoint(std::get<1>(StartExitBlocks)->getTerminator());
+      BasicBlock *ExitingBlock = std::get<1>(StartExitBlocks);
+      Builder.SetInsertPoint(ExitingBlock,
+                             ExitingBlock->getTerminator()->getIterator());
       Builder.CreateFree(CreatedArray);
     } else {
       auto InstIt = Builder.GetInsertBlock()
@@ -1350,9 +1415,9 @@ bool IslNodeBuilder::preloadInvariantLoads() {
     return true;
 
   BasicBlock *PreLoadBB = SplitBlock(Builder.GetInsertBlock(),
-                                     &*Builder.GetInsertPoint(), GenDT, GenLI);
+                                     Builder.GetInsertPoint(), GenDT, GenLI);
   PreLoadBB->setName("polly.preload.begin");
-  Builder.SetInsertPoint(&PreLoadBB->front());
+  Builder.SetInsertPoint(PreLoadBB, PreLoadBB->begin());
 
   for (auto &IAClass : InvariantEquivClasses)
     if (!preloadInvariantEquivClass(IAClass))
@@ -1398,7 +1463,7 @@ Value *IslNodeBuilder::generateSCEV(const SCEV *Expr) {
   /// insert location remains valid.
   assert(Builder.GetInsertBlock()->end() != Builder.GetInsertPoint() &&
          "Insert location points after last valid instruction");
-  Instruction *InsertLocation = &*Builder.GetInsertPoint();
+  BasicBlock::iterator InsertLocation = Builder.GetInsertPoint();
 
   return expandCodeFor(S, SE, Builder.GetInsertBlock()->getParent(), *GenSE, DL,
                        "polly", Expr, Expr->getType(), InsertLocation,

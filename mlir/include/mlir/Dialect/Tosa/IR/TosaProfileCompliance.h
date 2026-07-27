@@ -23,25 +23,40 @@ using namespace mlir::tosa;
 // Type Compilance Definition
 //===----------------------------------------------------------------------===//
 
-typedef struct {
+struct TypeInfo {
+  TypeInfo(mlir::TypeID typeID, uint32_t bitWidth)
+      : typeID(typeID), bitWidth(bitWidth), valueTypeID(mlir::TypeID()),
+        scaleTypeID(mlir::TypeID()), blockShape(std::nullopt) {}
+
+  TypeInfo(mlir::TypeID typeID, uint32_t bitWidth, mlir::TypeID valueTypeID,
+           mlir::TypeID scaleTypeID, tosa::BlockShape blockShape)
+      : typeID(typeID), bitWidth(bitWidth), valueTypeID(valueTypeID),
+        scaleTypeID(scaleTypeID), blockShape(blockShape) {}
+
   mlir::TypeID typeID;
   uint32_t bitWidth;
-} TypeInfo;
+  mlir::TypeID valueTypeID;
+  mlir::TypeID scaleTypeID;
+  std::optional<tosa::BlockShape> blockShape;
+};
 
 enum CheckCondition {
+  invalid,
   // Valid when any of the profile (extension) requirement is meet.
   anyOf,
   // Valid when all of the profile (extension) requirement are meet.
-  allOf,
-  invalid
+  allOf
 };
+
+using VersionedTypeInfo =
+    std::pair<SmallVector<TypeInfo>, SpecificationVersion>;
 
 template <typename T>
 struct OpComplianceInfo {
   // Certain operations require multiple modes enabled.
   // e.g. cast bf16 to fp8e4m3 requires EXT-BF16 and EXT-FP8E4M3.
   SmallVector<T> mode;
-  SmallVector<SmallVector<TypeInfo>> operandTypeInfoSet;
+  SmallVector<VersionedTypeInfo> operandTypeInfoSet;
   CheckCondition condition = CheckCondition::anyOf;
 };
 
@@ -67,7 +82,13 @@ public:
 
 private:
   TypeInfo convertTypeToInfo(Type type) {
-    return {type.getTypeID(), type.getIntOrFloatBitWidth()};
+    if (auto blockScaledTy = dyn_cast<tosa::BlockScaledType>(type)) {
+      Type valueTy = blockScaledTy.getValueType();
+      Type scaleTy = blockScaledTy.getScaleType();
+      return {type.getTypeID(), tosa::getBitWidth(valueTy), valueTy.getTypeID(),
+              scaleTy.getTypeID(), blockScaledTy.getBlockShape()};
+    }
+    return {type.getTypeID(), tosa::getBitWidth(type)};
   }
 
   TypeInfo convertValueToInfo(Value value) {
@@ -76,20 +97,22 @@ private:
 
   LogicalResult populatationDispatch(Operation *op);
 
-  void populateProfileInfo(ValueRange operands, Value output);
+  // Add input operands and output results to the profile type info list
+  LogicalResult populateProfileInfo(ValueRange operands, ValueRange results);
 
   // Base
   template <typename T>
-  void populateProfileInfo(T op) {
-    op->emitOpError() << "profile requirement for this op has not been defined";
+  LogicalResult populateProfileInfo(T op) {
+    return op->emitOpError()
+           << "profile requirement for this op has not been defined";
   }
   // For conv2d, conv3d, transpose_conv2d, and depthwise_conv2d.
   template <typename T>
-  void populateProfileInfoConv(T op);
+  LogicalResult populateProfileInfoConv(T op);
 
-  // For pad, reshape, slice, tile, and transpose.
+  // For reshape, slice, tile, and transpose.
   template <typename T>
-  void populateProfileInfoDataLayout(T op);
+  LogicalResult populateProfileInfoDataLayout(T op);
 
 private:
   SmallVector<TypeInfo> tyInfo;
@@ -115,6 +138,7 @@ public:
   // environment.
   LogicalResult checkProfile(Operation *op, const tosa::TargetEnv &targetEnv);
   LogicalResult checkExtension(Operation *op, const tosa::TargetEnv &targetEnv);
+  LogicalResult checkInvalid(Operation *op);
 
   template <typename T>
   LogicalResult checkProfileOrExtension(
@@ -122,34 +146,16 @@ public:
       const SmallVector<ArrayRef<T>> &specDefinedProfileSet);
 
   bool isSameTypeInfo(TypeInfo a, TypeInfo b) {
-    return a.typeID == b.typeID && a.bitWidth == b.bitWidth;
+    return a.typeID == b.typeID && a.bitWidth == b.bitWidth &&
+           a.valueTypeID == b.valueTypeID && a.scaleTypeID == b.scaleTypeID &&
+           a.blockShape == b.blockShape;
   }
 
   // Find the required profiles or extensions from the compliance info according
   // to the operand type combination.
   template <typename T>
-  SmallVector<T> findMatchedProfile(Operation *op,
-                                    SmallVector<OpComplianceInfo<T>> compInfo,
-                                    CheckCondition &condition);
-
-  SmallVector<Profile> getCooperativeProfiles(Extension ext) {
-    switch (ext) {
-    case Extension::int16:
-    case Extension::int4:
-      return {Profile::pro_int};
-    case Extension::bf16:
-    case Extension::fp8e4m3:
-    case Extension::fp8e5m2:
-    case Extension::fft:
-      return {Profile::pro_fp};
-    case Extension::variable:
-    case Extension::controlflow:
-      return {Profile::pro_fp, Profile::pro_int};
-    case Extension::none:
-      return {};
-    };
-    llvm_unreachable("bad Extension type");
-  }
+  SmallVector<OpComplianceInfo<T>>
+  findMatchedEntries(Operation *op, SmallVector<OpComplianceInfo<T>> compInfo);
 
   // Debug utilites.
   template <typename T>
@@ -159,7 +165,13 @@ public:
   SmallVector<StringRef>
   stringifyProfile(const SmallVector<ArrayRef<T>> &profileSet);
 
+  static llvm::SmallString<32> stringifyTypeInfo(const TypeInfo &typeInfo);
+
 private:
+  template <typename T>
+  FailureOr<SmallVector<OpComplianceInfo<T>>>
+  getOperatorMatchedEntries(Operation *op);
+
   OperationProfileComplianceMap profileComplianceMap;
   OperationExtensionComplianceMap extensionComplianceMap;
 };

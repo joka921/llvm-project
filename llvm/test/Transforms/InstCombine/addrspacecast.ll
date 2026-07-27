@@ -67,6 +67,29 @@ define ptr addrspace(2) @combine_addrspacecast_bitcast_2(ptr addrspace(1) %x) no
   ret ptr addrspace(2) %y
 }
 
+define b64 @do_not_combine_addrspacecast_bitcast_to_byte(ptr addrspace(1) %x) nounwind {
+; CHECK-LABEL: @do_not_combine_addrspacecast_bitcast_to_byte(
+; CHECK-NEXT:    [[Y:%.*]] = addrspacecast ptr addrspace(1) [[X:%.*]] to ptr
+; CHECK-NEXT:    [[Z:%.*]] = bitcast ptr [[Y]] to b64
+; CHECK-NEXT:    ret b64 [[Z]]
+;
+  %y = addrspacecast ptr addrspace(1) %x to ptr
+  %z = bitcast ptr %y to b64
+  ret b64 %z
+}
+
+define ptr addrspace(1) @do_not_combine_bitcast_from_byte_addrspacecast(b64 %x) nounwind {
+; CHECK-LABEL: @do_not_combine_bitcast_from_byte_addrspacecast(
+; CHECK-NEXT:    [[Y:%.*]] = bitcast b64 [[X:%.*]] to ptr
+; CHECK-NEXT:    [[Z:%.*]] = addrspacecast ptr [[Y]] to ptr addrspace(1)
+; CHECK-NEXT:    ret ptr addrspace(1) [[Z]]
+;
+  %y = bitcast b64 %x to ptr
+  %z = addrspacecast ptr %y to ptr addrspace(1)
+  ret ptr addrspace(1) %z
+}
+
+
 define ptr addrspace(2) @combine_bitcast_addrspacecast_1(ptr addrspace(1) %x) nounwind {
 ; CHECK-LABEL: @combine_bitcast_addrspacecast_1(
 ; CHECK-NEXT:    [[Z:%.*]] = addrspacecast ptr addrspace(1) [[X:%.*]] to ptr addrspace(2)
@@ -191,7 +214,7 @@ define ptr addrspace(4) @constant_fold_undef() #0 {
 
 define <4 x ptr addrspace(4)> @constant_fold_null_vector() #0 {
 ; CHECK-LABEL: @constant_fold_null_vector(
-; CHECK-NEXT:    ret <4 x ptr addrspace(4)> addrspacecast (<4 x ptr addrspace(3)> zeroinitializer to <4 x ptr addrspace(4)>)
+; CHECK-NEXT:    ret <4 x ptr addrspace(4)> <ptr addrspace(4) addrspacecast (ptr addrspace(3) null to ptr addrspace(4)), ptr addrspace(4) addrspacecast (ptr addrspace(3) null to ptr addrspace(4)), ptr addrspace(4) addrspacecast (ptr addrspace(3) null to ptr addrspace(4)), ptr addrspace(4) addrspacecast (ptr addrspace(3) null to ptr addrspace(4))>
 ;
   %cast = addrspacecast <4 x ptr addrspace(3)> zeroinitializer to <4 x ptr addrspace(4)>
   ret <4 x ptr addrspace(4)> %cast

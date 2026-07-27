@@ -164,7 +164,6 @@ static Error getRelocationValueString(const ELFObjectFile<ELFT> *Obj,
           : "+") << format("0x%" PRIx64,
                           (Addend < 0 ? -(uint64_t)Addend : (uint64_t)Addend));
   }
-  Fmt.flush();
   Result.append(FmtBuf.begin(), FmtBuf.end());
   return Error::success();
 }
@@ -291,6 +290,9 @@ template <class ELFT> void ELFDumper<ELFT>::printProgramHeaders() {
     case ELF::PT_GNU_STACK:
       outs() << "   STACK ";
       break;
+    case ELF::PT_GNU_SFRAME:
+      outs() << "  SFRAME ";
+      break;
     case ELF::PT_INTERP:
       outs() << "  INTERP ";
       break;
@@ -404,12 +406,6 @@ template <class ELFT> void ELFDumper<ELFT>::printSymbolVersion() {
     if (Shdr.sh_type != ELF::SHT_GNU_verneed &&
         Shdr.sh_type != ELF::SHT_GNU_verdef)
       continue;
-
-    ArrayRef<uint8_t> Contents =
-        unwrapOrError(Elf.getSectionContents(Shdr), FileName);
-    const typename ELFT::Shdr *StrTabSec =
-        unwrapOrError(Elf.getSection(Shdr.sh_link), FileName);
-    StringRef StrTab = unwrapOrError(Elf.getStringTable(*StrTabSec), FileName);
 
     if (Shdr.sh_type == ELF::SHT_GNU_verneed) {
       printSymbolVersionDependency(Shdr);

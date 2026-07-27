@@ -6,8 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLDB_UTILITY_SDK_H
-#define LLDB_UTILITY_SDK_H
+#ifndef LLDB_UTILITY_XCODESDK_H
+#define LLDB_UTILITY_XCODESDK_H
 
 #include "lldb/Utility/FileSpec.h"
 #include "lldb/lldb-forward.h"
@@ -38,7 +38,7 @@ public:
     watchOS,
     XRSimulator,
     XROS,
-    bridgeOS,
+    BridgeOS,
     Linux,
     unknown = -1
   };
@@ -65,7 +65,9 @@ public:
   /// parameter. For example, "MacOSX.10.14.sdk".
   XcodeSDK(std::string &&name) : m_name(std::move(name)) {}
   XcodeSDK(std::string name, FileSpec sysroot)
-      : m_name(std::move(name)), m_sysroot(std::move(sysroot)) {}
+      : m_name(std::move(name)), m_sysroot(std::move(sysroot)) {
+    assert(!m_sysroot || m_name == m_sysroot.GetFilename());
+  }
   static XcodeSDK GetAnyMacOS() { return XcodeSDK("MacOSX.sdk"); }
 
   /// The merge function follows a strict order to maintain monotonicity:
@@ -84,25 +86,10 @@ public:
   Type GetType() const;
   llvm::StringRef GetString() const;
   const FileSpec &GetSysroot() const;
-  /// Whether this Xcode SDK supports Swift.
-  bool SupportsSwift() const;
 
   /// Whether LLDB feels confident importing Clang modules from this SDK.
   static bool SDKSupportsModules(Type type, llvm::VersionTuple version);
   static bool SDKSupportsModules(Type desired_type, const FileSpec &sdk_path);
-
-  /// Returns true if the SDK for the specified triple supports
-  /// builtin modules in system headers.
-  ///
-  /// NOTE: should be kept in sync with sdkSupportsBuiltinModules in
-  /// Toolchains/Darwin.cpp
-  ///
-  /// FIXME: this function will be removed once LLDB's ClangExpressionParser
-  /// constructs the compiler instance through the driver/toolchain. See \ref
-  /// SetupImportStdModuleLangOpts
-  ///
-  static bool SDKSupportsBuiltinModules(const llvm::Triple &target_triple,
-                                        llvm::VersionTuple sdk_version);
 
   /// Return the canonical SDK name, such as "macosx" for the macOS SDK.
   static std::string GetCanonicalName(Info info);

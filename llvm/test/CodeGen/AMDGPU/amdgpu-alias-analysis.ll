@@ -1,5 +1,5 @@
-; RUN: opt -mtriple=amdgcn-- -data-layout=A5 -passes=aa-eval -aa-pipeline=amdgpu-aa -print-all-alias-modref-info -disable-output < %s 2>&1 | FileCheck %s
-; RUN: opt -mtriple=r600-- -data-layout=A5 -passes=aa-eval -aa-pipeline=amdgpu-aa -print-all-alias-modref-info -disable-output < %s 2>&1 | FileCheck %s
+; RUN: opt -mtriple=amdgpu-- -passes=aa-eval -aa-pipeline=amdgpu-aa -print-all-alias-modref-info -disable-output < %s 2>&1 | FileCheck %s
+; RUN: opt -mtriple=r600-- -passes=aa-eval -aa-pipeline=amdgpu-aa -print-all-alias-modref-info -disable-output < %s 2>&1 | FileCheck %s
 
 ; CHECK-LABEL: Function: test
 ; CHECK: NoAlias:      i8 addrspace(5)* %p, i8 addrspace(1)* %p1
@@ -176,7 +176,7 @@ define void @test_7_7(ptr addrspace(7) %p, ptr addrspace(7) %p1) {
   ret void
 }
 
-@cst = internal addrspace(4) global ptr undef, align 4
+@cst = internal addrspace(4) global ptr poison, align 4
 
 ; CHECK-LABEL: Function: test_8_0
 ; CHECK-DAG: NoAlias:   i8 addrspace(3)* %p, i8* %p1
@@ -220,7 +220,7 @@ define void @test_8_3(ptr %p) {
   ret void
 }
 
-@shm = internal addrspace(3) global [2 x i8] undef, align 4
+@shm = internal addrspace(3) global [2 x i8] poison, align 4
 
 ; CHECK-LABEL: Function: test_8_4
 ; CHECK: NoAlias:   i8* %p, i8 addrspace(3)* %p1

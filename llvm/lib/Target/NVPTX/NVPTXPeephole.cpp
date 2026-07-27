@@ -44,17 +44,11 @@ using namespace llvm;
 
 #define DEBUG_TYPE "nvptx-peephole"
 
-namespace llvm {
-void initializeNVPTXPeepholePass(PassRegistry &);
-}
-
 namespace {
 struct NVPTXPeephole : public MachineFunctionPass {
  public:
   static char ID;
-  NVPTXPeephole() : MachineFunctionPass(ID) {
-    initializeNVPTXPeepholePass(*PassRegistry::getPassRegistry());
-  }
+  NVPTXPeephole() : MachineFunctionPass(ID) {}
 
   bool runOnMachineFunction(MachineFunction &MF) override;
 
@@ -77,7 +71,7 @@ static bool isCVTAToLocalCombinationCandidate(MachineInstr &Root) {
   auto &MF = *MBB.getParent();
   // Check current instruction is cvta.to.local
   if (Root.getOpcode() != NVPTX::cvta_to_local_64 &&
-      Root.getOpcode() != NVPTX::cvta_to_local)
+      Root.getOpcode() != NVPTX::cvta_to_local_32)
     return false;
 
   auto &Op = Root.getOperand(1);
@@ -96,6 +90,11 @@ static bool isCVTAToLocalCombinationCandidate(MachineInstr &Root) {
 
   const NVPTXRegisterInfo *NRI =
       MF.getSubtarget<NVPTXSubtarget>().getRegisterInfo();
+
+  // LEA and %SPL must have the same width.
+  if ((GenericAddrDef->getOpcode() == NVPTX::LEA_ADDRi64) !=
+      (NRI->getFrameLocalRegister(MF) == NVPTX::VRFrameLocal64))
+    return false;
 
   // Check the LEA_ADDRi operand is Frame index
   auto &BaseAddrOp = GenericAddrDef->getOperand(1);

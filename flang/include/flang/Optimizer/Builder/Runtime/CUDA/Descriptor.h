@@ -26,6 +26,15 @@ namespace fir::runtime::cuda {
 void genSyncGlobalDescriptor(fir::FirOpBuilder &builder, mlir::Location loc,
                              mlir::Value hostPtr);
 
+/// Generate runtime call to check the section of a descriptor and raise an
+/// error if it is not contiguous.
+void genDescriptorCheckSection(fir::FirOpBuilder &builder, mlir::Location loc,
+                               mlir::Value desc);
+
+/// Generate a call returning (as i1) whether the device's primary context is
+/// alive, to guard scope-exit frees against a user cudaDeviceReset().
+mlir::Value genDeviceIsActive(fir::FirOpBuilder &builder, mlir::Location loc);
+
 } // namespace fir::runtime::cuda
 
 #endif // FORTRAN_OPTIMIZER_BUILDER_RUNTIME_CUDA_DESCRIPTOR_H_

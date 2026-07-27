@@ -12,11 +12,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/MC/MCAsmInfo.h"
+#include "llvm/ADT/Enum.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCStreamer.h"
+#include "llvm/MC/MCValue.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 
 using namespace llvm;
@@ -36,38 +39,14 @@ cl::opt<cl::boolOrDefault> UseLEB128Directives(
     "use-leb128-directives", cl::Hidden,
     cl::desc(
         "Disable the usage of LEB128 directives, and generate .byte instead."),
-    cl::init(cl::BOU_UNSET));
+    cl::init(cl::boolOrDefault::BOU_UNSET));
 }
 
-MCAsmInfo::MCAsmInfo() {
-  SeparatorString = ";";
-  CommentString = "#";
-  LabelSuffix = ":";
-  PrivateGlobalPrefix = "L";
-  PrivateLabelPrefix = PrivateGlobalPrefix;
-  LinkerPrivateGlobalPrefix = "";
-  InlineAsmStart = "APP";
-  InlineAsmEnd = "NO_APP";
-  Code16Directive = ".code16";
-  Code32Directive = ".code32";
-  Code64Directive = ".code64";
-  ZeroDirective = "\t.zero\t";
-  AsciiDirective = "\t.ascii\t";
-  AscizDirective = "\t.asciz\t";
-  Data8bitsDirective = "\t.byte\t";
-  Data16bitsDirective = "\t.short\t";
-  Data32bitsDirective = "\t.long\t";
-  Data64bitsDirective = "\t.quad\t";
-  GlobalDirective = "\t.globl\t";
-  WeakDirective = "\t.weak\t";
+MCAsmInfo::MCAsmInfo(const MCTargetOptions &Options) : TargetOptions(Options) {
   if (DwarfExtendedLoc != Default)
     SupportsExtendedDwarfLocDirective = DwarfExtendedLoc == Enable;
-  if (UseLEB128Directives != cl::BOU_UNSET)
-    HasLEB128Directives = UseLEB128Directives == cl::BOU_TRUE;
-  UseIntegratedAssembler = true;
-  ParseInlineAsmUsingAsmParser = false;
-  PreserveAsmComments = true;
-  PPCUseFullRegisterNames = false;
+  if (UseLEB128Directives != cl::boolOrDefault::BOU_UNSET)
+    HasLEB128Directives = UseLEB128Directives == cl::boolOrDefault::BOU_TRUE;
 }
 
 MCAsmInfo::~MCAsmInfo() = default;
@@ -83,15 +62,19 @@ MCAsmInfo::getExprForPersonalitySymbol(const MCSymbol *Sym,
   return getExprForFDESymbol(Sym, Encoding, Streamer);
 }
 
-const MCExpr *
-MCAsmInfo::getExprForFDESymbol(const MCSymbol *Sym,
-                               unsigned Encoding,
-                               MCStreamer &Streamer) const {
-  if (!(Encoding & dwarf::DW_EH_PE_pcrel))
-    return MCSymbolRefExpr::create(Sym, Streamer.getContext());
-
+const MCExpr *MCAsmInfo::getExprForFDESymbol(const MCSymbol *Sym,
+                                             unsigned Encoding,
+                                             MCStreamer &Streamer) const {
   MCContext &Context = Streamer.getContext();
   const MCExpr *Res = MCSymbolRefExpr::create(Sym, Context);
+
+  if (!(Encoding & dwarf::DW_EH_PE_pcrel))
+    return Res;
+  if (DwarfFDERelSymbolSpec) {
+    assert(Encoding & dwarf::DW_EH_PE_sdata4 && "Unexpected encoding");
+    return MCSpecifierExpr::create(Res, DwarfFDERelSymbolSpec, Context);
+  }
+
   MCSymbol *PCSym = Context.createTempSymbol();
   Streamer.emitLabel(PCSym);
   const MCExpr *PC = MCSymbolRefExpr::create(PCSym, Context);
@@ -99,10 +82,23 @@ MCAsmInfo::getExprForFDESymbol(const MCSymbol *Sym,
 }
 
 bool MCAsmInfo::isAcceptableChar(char C) const {
+  // For AIX assembler, symbols may consist of numeric digits, underscores,
+  // periods, uppercase or lowercase letters, orany combination of these.
+  // QualName is allowed for a MCSymbolXCOFF, and QualName contains '[' and ']'.
+  //
+  // Others also allow '$'. HLASM (SystemZ) also allows '#'.
+
+  if (isAlnum(C) || C == '_' || C == '.')
+    return true;
+  if (C == '[' || C == ']')
+    return isAIX();
   if (C == '@')
     return doesAllowAtInName();
-
-  return isAlnum(C) || C == '_' || C == '$' || C == '.';
+  if (C == '$')
+    return !isAIX();
+  if (C == '#')
+    return isHLASM();
+  return false;
 }
 
 bool MCAsmInfo::isValidUnquotedName(StringRef Name) const {
@@ -116,7 +112,7 @@ bool MCAsmInfo::isValidUnquotedName(StringRef Name) const {
       return false;
   }
 
-  return true;
+  return !getReservedIdentifiers().contains(CachedHashStringRef(Name.lower()));
 }
 
 bool MCAsmInfo::shouldOmitSectionDirective(StringRef SectionName) const {
@@ -125,29 +121,46 @@ bool MCAsmInfo::shouldOmitSectionDirective(StringRef SectionName) const {
         (SectionName == ".bss" && !usesELFSectionDirectiveForBSS());
 }
 
-void MCAsmInfo::initializeVariantKinds(ArrayRef<VariantKindDesc> Descs) {
-  assert(VariantKindToName.empty() && "cannot initialize twice");
-  for (auto Desc : Descs) {
+void MCAsmInfo::initializeAtSpecifiers(EnumStrings<AtSpecifierKind, 1> Descs) {
+  assert(AtSpecifierToName.empty() && "cannot initialize twice");
+  UseAtForSpecifier = true;
+  for (const auto &Desc : Descs) {
     [[maybe_unused]] auto It =
-        VariantKindToName.try_emplace(Desc.Kind, Desc.Name);
+        AtSpecifierToName.try_emplace(Desc.value(), Desc.name());
     assert(It.second && "duplicate Kind");
     [[maybe_unused]] auto It2 =
-        NameToVariantKind.try_emplace(Desc.Name.lower(), Desc.Kind);
-    // Workaround for VK_PPC_L/VK_PPC_LO ("l").
-    assert(It2.second || Desc.Name == "l");
+        NameToAtSpecifier.try_emplace(Desc.name().lower(), Desc.value());
+    assert(It2.second);
   }
 }
 
-StringRef MCAsmInfo::getVariantKindName(uint32_t Kind) const {
-  auto It = VariantKindToName.find(Kind);
-  assert(It != VariantKindToName.end() &&
-         "ensure the VariantKind is set in initializeVariantKinds");
+StringRef MCAsmInfo::getSpecifierName(uint32_t S) const {
+  auto It = AtSpecifierToName.find(S);
+  assert(It != AtSpecifierToName.end() &&
+         "ensure the specifier is set in initializeVariantKinds");
   return It->second;
 }
 
-uint32_t MCAsmInfo::getVariantKindForName(StringRef Name) const {
-  auto It = NameToVariantKind.find(Name.lower());
-  if (It != NameToVariantKind.end())
+std::optional<uint32_t> MCAsmInfo::getSpecifierForName(StringRef Name) const {
+  auto It = NameToAtSpecifier.find(Name.lower());
+  if (It != NameToAtSpecifier.end())
     return It->second;
-  return MCSymbolRefExpr::VK_Invalid;
+  return {};
+}
+
+void MCAsmInfo::printExpr(raw_ostream &OS, const MCExpr &Expr) const {
+  if (auto *SE = dyn_cast<MCSpecifierExpr>(&Expr))
+    printSpecifierExpr(OS, *SE);
+  else
+    Expr.print(OS, this);
+}
+
+bool MCAsmInfo::evaluateAsRelocatableImpl(const MCSpecifierExpr &E,
+                                          MCValue &Res,
+                                          const MCAssembler *Asm) const {
+  if (!E.getSubExpr()->evaluateAsRelocatable(Res, Asm))
+    return false;
+
+  Res.setSpecifier(E.getSpecifier());
+  return !Res.getSubSym();
 }

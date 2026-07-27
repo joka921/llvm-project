@@ -127,14 +127,14 @@ static std::string OptLLVM(const std::string &IR, CodeGenOptLevel OLvl) {
     ErrorAndExit(E);
 
   std::unique_ptr<TargetMachine> TM(TheTarget->createTargetMachine(
-      M->getTargetTriple().str(), codegen::getCPUStr(),
-      codegen::getFeaturesStr(), Options, codegen::getExplicitRelocModel(),
+      M->getTargetTriple(), codegen::getCPUStr(), codegen::getFeaturesStr(),
+      Options, codegen::getExplicitRelocModel(),
       codegen::getExplicitCodeModel(), OLvl));
   if (!TM)
     ErrorAndExit("Could not create target machine");
 
-  codegen::setFunctionAttributes(codegen::getCPUStr(),
-                                 codegen::getFeaturesStr(), *M);
+  codegen::setFunctionAttributes(*M, codegen::getCPUStr(),
+                                 codegen::getFeaturesStr());
 
   // Add a pass that writes the optimized IR to an output stream
   std::string outString;

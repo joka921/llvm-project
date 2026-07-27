@@ -415,6 +415,22 @@ public:
   void addSymbols(ThunkSection &isec) override;
 };
 
+// Hexagon CPUs need thunks for R_HEX_B{9,1{3,5},22}_PCREL,
+// R_HEX_{,GD_}PLT_B22_PCREL when their destination is out of
+// range.
+class HexagonThunk : public Thunk {
+public:
+  HexagonThunk(Ctx &ctx, const InputSection &isec, Relocation &rel,
+               Symbol &dest)
+      : Thunk(ctx, dest, 0), relOffset(rel.offset) {
+    alignment = 4;
+  }
+  uint32_t relOffset;
+  uint32_t size() override { return ctx.arg.isPic ? 12 : 8; }
+  void writeTo(uint8_t *buf) override;
+  void addSymbols(ThunkSection &isec) override;
+};
+
 // MIPS LA25 thunk
 class MipsThunk final : public Thunk {
 public:
@@ -580,7 +596,7 @@ public:
     assert(!dest.isPreemptible);
     if (std::optional<uint32_t> index =
             ctx.in.ppc64LongBranchTarget->addEntry(&dest, addend)) {
-      ctx.mainPart->relaDyn->addRelativeReloc(
+      ctx.in.relaDyn->addRelativeReloc(
           ctx.target->relativeRel, *ctx.in.ppc64LongBranchTarget,
           *index * UINT64_C(8), dest,
           addend + getPPC64GlobalEntryToLocalEntryOffset(ctx, dest.stOther),
@@ -601,7 +617,8 @@ public:
 
 Defined *Thunk::addSymbol(StringRef name, uint8_t type, uint64_t value,
                           InputSectionBase &section) {
-  Defined *d = addSyntheticLocal(ctx, name, type, value, /*size=*/0, section);
+  Defined *d =
+      addSyntheticLocal(ctx, name, type, value + offset, /*size=*/0, section);
   syms.push_back(d);
   return d;
 }
@@ -612,16 +629,16 @@ void Thunk::setOffset(uint64_t newOffset) {
   offset = newOffset;
 }
 
-// AArch64 Thunk base class.
-static uint64_t getAArch64ThunkDestVA(Ctx &ctx, const Symbol &s, int64_t a) {
-  uint64_t v = s.isInPlt(ctx) ? s.getPltVA(ctx) : s.getVA(ctx, a);
-  return v;
+uint64_t Thunk::getDestVA() const {
+  return destination.isInPlt(ctx) ? destination.getPltVA(ctx)
+                                  : destination.getVA(ctx, addend);
 }
 
+// AArch64 Thunk base class.
 bool AArch64Thunk::getMayUseShortThunk() {
   if (!mayUseShortThunk)
     return false;
-  uint64_t s = getAArch64ThunkDestVA(ctx, destination, addend);
+  uint64_t s = getDestVA();
   uint64_t p = getThunkTargetSym()->getVA(ctx);
   mayUseShortThunk = llvm::isInt<28>(s - p);
   if (!mayUseShortThunk)
@@ -634,7 +651,7 @@ void AArch64Thunk::writeTo(uint8_t *buf) {
     writeLong(buf);
     return;
   }
-  uint64_t s = getAArch64ThunkDestVA(ctx, destination, addend);
+  uint64_t s = getDestVA();
   uint64_t p = getThunkTargetSym()->getVA(ctx);
   write32(ctx, buf, 0x14000000); // b S
   ctx.target->relocateNoSym(buf, R_AARCH64_CALL26, s - p);
@@ -657,9 +674,7 @@ void AArch64ABSLongThunk::writeLong(uint8_t *buf) {
   // If mayNeedLandingPad is true then destination is an
   // AArch64BTILandingPadThunk that defines landingPad.
   assert(!mayNeedLandingPad || landingPad != nullptr);
-  uint64_t s = mayNeedLandingPad
-                   ? landingPad->getVA(ctx, 0)
-                   : getAArch64ThunkDestVA(ctx, destination, addend);
+  uint64_t s = mayNeedLandingPad ? landingPad->getVA(ctx, 0) : getDestVA();
   memcpy(buf, data, sizeof(data));
   ctx.target->relocateNoSym(buf + 8, R_AARCH64_ABS64, s);
 }
@@ -674,6 +689,9 @@ void AArch64ABSLongThunk::addSymbols(ThunkSection &isec) {
 
 void AArch64ABSLongThunk::addLongMapSyms() {
   addSymbol("$d", STT_NOTYPE, 8, *tsec);
+  // The ldr in the long Thunk requires 8-byte alignment when
+  // unaligned accesses are disabled.
+  alignment = 8;
 }
 
 void AArch64ABSXOLongThunk::writeLong(uint8_t *buf) {
@@ -687,9 +705,7 @@ void AArch64ABSXOLongThunk::writeLong(uint8_t *buf) {
   // If mayNeedLandingPad is true then destination is an
   // AArch64BTILandingPadThunk that defines landingPad.
   assert(!mayNeedLandingPad || landingPad != nullptr);
-  uint64_t s = mayNeedLandingPad
-                   ? landingPad->getVA(ctx, 0)
-                   : getAArch64ThunkDestVA(ctx, destination, addend);
+  uint64_t s = mayNeedLandingPad ? landingPad->getVA(ctx, 0) : getDestVA();
   memcpy(buf, data, sizeof(data));
   ctx.target->relocateNoSym(buf + 0, R_AARCH64_MOVW_UABS_G0_NC, s);
   ctx.target->relocateNoSym(buf + 4, R_AARCH64_MOVW_UABS_G1_NC, s);
@@ -717,9 +733,7 @@ void AArch64ADRPThunk::writeLong(uint8_t *buf) {
   // if mayNeedLandingPad is true then destination is an
   // AArch64BTILandingPadThunk that defines landingPad.
   assert(!mayNeedLandingPad || landingPad != nullptr);
-  uint64_t s = mayNeedLandingPad
-                   ? landingPad->getVA(ctx, 0)
-                   : getAArch64ThunkDestVA(ctx, destination, addend);
+  uint64_t s = mayNeedLandingPad ? landingPad->getVA(ctx, 0) : getDestVA();
   uint64_t p = getThunkTargetSym()->getVA(ctx);
   memcpy(buf, data, sizeof(data));
   ctx.target->relocateNoSym(buf, R_AARCH64_ADR_PREL_PG_HI21,
@@ -1515,6 +1529,39 @@ bool PPC64LongBranchThunk::isCompatibleWith(const InputSection &isec,
   return rel.type == R_PPC64_REL24 || rel.type == R_PPC64_REL14;
 }
 
+// Hexagon Target Thunks
+static uint64_t getHexagonThunkDestVA(Ctx &ctx, const Symbol &s, int64_t a) {
+  uint64_t v = s.isInPlt(ctx) ? s.getPltVA(ctx) : s.getVA(ctx, a);
+  return SignExtend64<32>(v);
+}
+
+void HexagonThunk::writeTo(uint8_t *buf) {
+  uint64_t s = getHexagonThunkDestVA(ctx, destination, addend);
+  uint64_t p = getThunkTargetSym()->getVA(ctx);
+
+  if (ctx.arg.isPic) {
+    write32(ctx, buf + 0, 0x00004000); // {  immext(#0)
+    ctx.target->relocateNoSym(buf, R_HEX_B32_PCREL_X, s - p);
+    write32(ctx, buf + 4, 0x6a49c00e); //    r14 = add(pc,##0) }
+    ctx.target->relocateNoSym(buf + 4, R_HEX_6_PCREL_X, s - p);
+
+    write32(ctx, buf + 8, 0x528ec000); // {  jumpr r14 }
+  } else {
+    write32(ctx, buf + 0, 0x00004000); //  { immext
+    ctx.target->relocateNoSym(buf, R_HEX_B32_PCREL_X, s - p);
+    write32(ctx, buf + 4, 0x5800c000); //    jump <> }
+    ctx.target->relocateNoSym(buf + 4, R_HEX_B22_PCREL_X, s - p);
+  }
+}
+void HexagonThunk::addSymbols(ThunkSection &isec) {
+  Symbol *enclosing = isec.getEnclosingSymbol(relOffset);
+  StringRef src = enclosing ? enclosing->getName() : isec.name;
+
+  addSymbol(
+      saver().save("__hexagon_thunk_" + destination.getName() + "_from_" + src),
+      STT_FUNC, 0, isec);
+}
+
 Thunk::Thunk(Ctx &ctx, Symbol &d, int64_t a)
     : ctx(ctx), destination(d), addend(a), offset(0) {
   destination.thunkAccessed = true;
@@ -1688,6 +1735,24 @@ static std::unique_ptr<Thunk> addThunkAVR(Ctx &ctx, RelType type, Symbol &s,
   }
 }
 
+static std::unique_ptr<Thunk> addThunkHexagon(Ctx &ctx,
+                                              const InputSection &isec,
+                                              Relocation &rel, Symbol &s) {
+  switch (rel.type) {
+  case R_HEX_B9_PCREL:
+  case R_HEX_B13_PCREL:
+  case R_HEX_B15_PCREL:
+  case R_HEX_B22_PCREL:
+  case R_HEX_PLT_B22_PCREL:
+  case R_HEX_GD_PLT_B22_PCREL:
+    return std::make_unique<HexagonThunk>(ctx, isec, rel, s);
+  default:
+    Fatal(ctx) << "unrecognized relocation " << rel.type << " to " << &s
+               << " for hexagon target";
+    llvm_unreachable("");
+  }
+}
+
 static std::unique_ptr<Thunk> addThunkMips(Ctx &ctx, RelType type, Symbol &s) {
   if ((s.stOther & STO_MIPS_MICROMIPS) && isMipsR6(ctx))
     return std::make_unique<MicroMipsR6Thunk>(ctx, s);
@@ -1757,8 +1822,11 @@ std::unique_ptr<Thunk> elf::addThunk(Ctx &ctx, const InputSection &isec,
     return addThunkPPC32(ctx, isec, rel, s);
   case EM_PPC64:
     return addThunkPPC64(ctx, rel.type, s, a);
+  case EM_HEXAGON:
+    return addThunkHexagon(ctx, isec, rel, s);
   default:
-    llvm_unreachable("add Thunk only supported for ARM, AVR, Mips and PowerPC");
+    llvm_unreachable(
+        "add Thunk only supported for ARM, AVR, Hexagon, Mips and PowerPC");
   }
 }
 

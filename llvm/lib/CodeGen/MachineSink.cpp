@@ -43,6 +43,7 @@
 #include "llvm/CodeGen/MachinePostDominators.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/MachineSizeOpts.h"
+#include "llvm/CodeGen/PostRAMachineSink.h"
 #include "llvm/CodeGen/RegisterClassInfo.h"
 #include "llvm/CodeGen/RegisterPressure.h"
 #include "llvm/CodeGen/SlotIndexes.h"
@@ -134,7 +135,7 @@ class MachineSinking {
   MachineBlockFrequencyInfo *MBFI = nullptr;
   const MachineBranchProbabilityInfo *MBPI = nullptr;
   AliasAnalysis *AA = nullptr;
-  RegisterClassInfo RegClassInfo;
+  RegisterClassInfo *RegClassInfo = nullptr;
   TargetSchedModel SchedModel;
   // Required for split critical edge
   LiveIntervals *LIS;
@@ -203,9 +204,10 @@ public:
                  MachineLoopInfo *MLI, SlotIndexes *SI, LiveIntervals *LIS,
                  MachineCycleInfo *CI, ProfileSummaryInfo *PSI,
                  MachineBlockFrequencyInfo *MBFI,
-                 const MachineBranchProbabilityInfo *MBPI, AliasAnalysis *AA)
+                 const MachineBranchProbabilityInfo *MBPI, AliasAnalysis *AA,
+                 RegisterClassInfo *RegClassInfo)
       : DT(DT), PDT(PDT), CI(CI), PSI(PSI), MBFI(MBFI), MBPI(MBPI), AA(AA),
-        LIS(LIS), SI(SI), LV(LV), MLI(MLI),
+        RegClassInfo(RegClassInfo), LIS(LIS), SI(SI), LV(LV), MLI(MLI),
         EnableSinkAndFold(EnableSinkAndFold) {}
 
   bool run(MachineFunction &MF);
@@ -257,11 +259,11 @@ private:
                                       bool &BreakPHIEdge,
                                       AllSuccsCache &AllSuccessors);
 
-  void FindCycleSinkCandidates(MachineCycle *Cycle, MachineBasicBlock *BB,
+  void FindCycleSinkCandidates(CycleRef Cycle, MachineBasicBlock *BB,
                                SmallVectorImpl<MachineInstr *> &Candidates);
 
   bool
-  aggressivelySinkIntoCycle(MachineCycle *Cycle, MachineInstr &I,
+  aggressivelySinkIntoCycle(CycleRef Cycle, MachineInstr &I,
                             DenseMap<SinkItem, MachineInstr *> &SunkInstrs);
 
   bool isProfitableToSinkTo(Register Reg, MachineInstr &MI,
@@ -292,9 +294,7 @@ class MachineSinkingLegacy : public MachineFunctionPass {
 public:
   static char ID;
 
-  MachineSinkingLegacy() : MachineFunctionPass(ID) {
-    initializeMachineSinkingLegacyPass(*PassRegistry::getPassRegistry());
-  }
+  MachineSinkingLegacy() : MachineFunctionPass(ID) {}
 
   bool runOnMachineFunction(MachineFunction &MF) override;
 
@@ -305,11 +305,15 @@ public:
     AU.addRequired<MachinePostDominatorTreeWrapperPass>();
     AU.addRequired<MachineCycleInfoWrapperPass>();
     AU.addRequired<MachineBranchProbabilityInfoWrapperPass>();
+    AU.addRequired<MachineRegisterClassInfoWrapperPass>();
     AU.addPreserved<MachineCycleInfoWrapperPass>();
     AU.addPreserved<MachineLoopInfoWrapperPass>();
+    AU.addPreserved<MachineRegisterClassInfoWrapperPass>();
     AU.addRequired<ProfileSummaryInfoWrapperPass>();
-    if (UseBlockFreqInfo)
+    if (UseBlockFreqInfo) {
       AU.addRequired<MachineBlockFrequencyInfoWrapperPass>();
+      AU.addPreserved<MachineBlockFrequencyInfoWrapperPass>();
+    }
     AU.addRequired<TargetPassConfig>();
   }
 };
@@ -326,6 +330,7 @@ INITIALIZE_PASS_DEPENDENCY(ProfileSummaryInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(MachineBranchProbabilityInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(MachineDominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(MachineCycleInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(MachineRegisterClassInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
 INITIALIZE_PASS_END(MachineSinkingLegacy, DEBUG_TYPE, "Machine code sinking",
                     false, false)
@@ -503,6 +508,13 @@ bool MachineSinking::PerformSinkAndFold(MachineInstr &MI,
         if (!RC->contains(DstReg))
           return false;
       } else if (UseInst.mayLoadOrStore()) {
+        // If the destination instruction contains more than one use of the
+        // register, we won't be able to remove the original instruction, so
+        // don't sink.
+        if (llvm::count_if(UseInst.operands(), [Reg](const MachineOperand &MO) {
+              return MO.isReg() && MO.getReg() == Reg;
+            }) > 1)
+          return false;
         ExtAddrMode AM;
         if (!TII->canFoldIntoAddrMode(UseInst, Reg, MI, AM))
           return false;
@@ -568,7 +580,7 @@ bool MachineSinking::PerformSinkAndFold(MachineInstr &MI,
       // Sink a copy of the instruction, replacing a COPY instruction.
       MachineBasicBlock::iterator InsertPt = SinkDst->getIterator();
       Register DstReg = SinkDst->getOperand(0).getReg();
-      TII->reMaterialize(*SinkDst->getParent(), InsertPt, DstReg, 0, MI, *TRI);
+      TII->reMaterialize(*SinkDst->getParent(), InsertPt, DstReg, 0, MI);
       New = &*std::prev(InsertPt);
       if (!New->getDebugLoc())
         New->setDebugLoc(SinkDst->getDebugLoc());
@@ -712,7 +724,7 @@ static bool mayLoadFromGOTOrConstantPool(MachineInstr &MI) {
 }
 
 void MachineSinking::FindCycleSinkCandidates(
-    MachineCycle *Cycle, MachineBasicBlock *BB,
+    CycleRef Cycle, MachineBasicBlock *BB,
     SmallVectorImpl<MachineInstr *> &Candidates) {
   for (auto &MI : *BB) {
     LLVM_DEBUG(dbgs() << "CycleSink: Analysing candidate: " << MI);
@@ -725,7 +737,7 @@ void MachineSinking::FindCycleSinkCandidates(
                            "target\n");
       continue;
     }
-    if (!isCycleInvariant(Cycle, MI)) {
+    if (!isCycleInvariant(*CI, Cycle, MI)) {
       LLVM_DEBUG(dbgs() << "CycleSink: Instruction is not cycle invariant\n");
       continue;
     }
@@ -772,14 +784,17 @@ MachineSinkingPass::run(MachineFunction &MF,
   auto *SI = MFAM.getCachedResult<SlotIndexesAnalysis>(MF);
   auto *LV = MFAM.getCachedResult<LiveVariablesAnalysis>(MF);
   auto *MLI = MFAM.getCachedResult<MachineLoopAnalysis>(MF);
+  auto *RegClassInfo = &MFAM.getResult<MachineRegisterClassAnalysis>(MF);
   MachineSinking Impl(EnableSinkAndFold, DT, PDT, LV, MLI, SI, LIS, CI, PSI,
-                      MBFI, MBPI, AA);
+                      MBFI, MBPI, AA, RegClassInfo);
   bool Changed = Impl.run(MF);
   if (!Changed)
     return PreservedAnalyses::all();
   auto PA = getMachineFunctionPassPreservedAnalyses();
   PA.preserve<MachineCycleAnalysis>();
   PA.preserve<MachineLoopAnalysis>();
+  if (UseBlockFreqInfo)
+    PA.preserve<MachineBlockFrequencyAnalysis>();
   return PA;
 }
 
@@ -818,9 +833,11 @@ bool MachineSinkingLegacy::runOnMachineFunction(MachineFunction &MF) {
   auto *LV = LVWrapper ? &LVWrapper->getLV() : nullptr;
   auto *MLIWrapper = getAnalysisIfAvailable<MachineLoopInfoWrapperPass>();
   auto *MLI = MLIWrapper ? &MLIWrapper->getLI() : nullptr;
+  auto *RegClassInfo =
+      &getAnalysis<MachineRegisterClassInfoWrapperPass>().getRCI();
 
   MachineSinking Impl(EnableSinkAndFold, DT, PDT, LV, MLI, SI, LIS, CI, PSI,
-                      MBFI, MBPI, AA);
+                      MBFI, MBPI, AA, RegClassInfo);
   return Impl.run(MF);
 }
 
@@ -831,8 +848,6 @@ bool MachineSinking::run(MachineFunction &MF) {
   TII = STI->getInstrInfo();
   TRI = STI->getRegisterInfo();
   MRI = &MF.getRegInfo();
-
-  RegClassInfo.runOnMachineFunction(MF);
 
   bool EverMadeChange = false;
 
@@ -873,7 +888,7 @@ bool MachineSinking::run(MachineFunction &MF) {
   }
 
   if (SinkInstsIntoCycle) {
-    SmallVector<MachineCycle *, 8> Cycles(CI->toplevel_cycles());
+    SmallVector<CycleRef, 8> Cycles(CI->toplevel_cycles());
     SchedModel.init(STI);
     bool HasHighPressure;
 
@@ -884,8 +899,8 @@ bool MachineSinking::run(MachineFunction &MF) {
          ++Stage, SunkInstrs.clear()) {
       HasHighPressure = false;
 
-      for (auto *Cycle : Cycles) {
-        MachineBasicBlock *Preheader = Cycle->getCyclePreheader();
+      for (auto Cycle : Cycles) {
+        MachineBasicBlock *Preheader = CI->getCyclePreheader(Cycle);
         if (!Preheader) {
           LLVM_DEBUG(dbgs() << "CycleSink: Can't find preheader\n");
           continue;
@@ -1106,12 +1121,12 @@ bool MachineSinking::isLegalToBreakCriticalEdge(MachineInstr &MI,
   if (!SplitEdges || FromBB == ToBB || !FromBB->isSuccessor(ToBB))
     return false;
 
-  MachineCycle *FromCycle = CI->getCycle(FromBB);
-  MachineCycle *ToCycle = CI->getCycle(ToBB);
+  CycleRef FromCycle = CI->getCycle(FromBB);
+  CycleRef ToCycle = CI->getCycle(ToBB);
 
   // Check for backedges of more "complex" cycles.
   if (FromCycle == ToCycle && FromCycle &&
-      (!FromCycle->isReducible() || FromCycle->getHeader() == ToBB))
+      (!CI->isReducible(FromCycle) || CI->getHeader(FromCycle) == ToBB))
     return false;
 
   // It's not always legal to break critical edges and sink the computation
@@ -1201,14 +1216,14 @@ MachineSinking::getBBRegisterPressure(const MachineBasicBlock &MBB,
   RegPressureTracker RPTracker(Pressure);
 
   // Initialize the register pressure tracker.
-  RPTracker.init(MBB.getParent(), &RegClassInfo, nullptr, &MBB, MBB.end(),
+  RPTracker.init(MBB.getParent(), RegClassInfo, nullptr, &MBB, MBB.end(),
                  /*TrackLaneMasks*/ false, /*TrackUntiedDefs=*/true);
 
   for (MachineBasicBlock::const_iterator MII = MBB.instr_end(),
                                          MIE = MBB.instr_begin();
        MII != MIE; --MII) {
     const MachineInstr &MI = *std::prev(MII);
-    if (MI.isDebugInstr() || MI.isPseudoProbe())
+    if (MI.isDebugOrPseudoInstr())
       continue;
     RegisterOperands RegOpers;
     RegOpers.collect(MI, *TRI, *MRI, false, false);
@@ -1237,7 +1252,7 @@ bool MachineSinking::registerPressureSetExceedsLimit(
   std::vector<unsigned> BBRegisterPressure = getBBRegisterPressure(MBB);
   for (; *PS != -1; PS++)
     if (Weight + BBRegisterPressure[*PS] >=
-        RegClassInfo.getRegPressureSetLimit(*PS))
+        RegClassInfo->getRegPressureSetLimit(*PS))
       return true;
   return false;
 }
@@ -1248,8 +1263,7 @@ bool MachineSinking::registerPressureExceedsLimit(
   std::vector<unsigned> BBRegisterPressure = getBBRegisterPressure(MBB, false);
 
   for (unsigned PS = 0; PS < BBRegisterPressure.size(); ++PS) {
-    if (BBRegisterPressure[PS] >=
-        TRI->getRegPressureSetLimit(*MBB.getParent(), PS)) {
+    if (BBRegisterPressure[PS] >= RegClassInfo->getRegPressureSetLimit(PS)) {
       return true;
     }
   }
@@ -1294,7 +1308,7 @@ bool MachineSinking::isProfitableToSinkTo(Register Reg, MachineInstr &MI,
           FindSuccToSinkTo(MI, SuccToSinkTo, BreakPHIEdge, AllSuccessors))
     return isProfitableToSinkTo(Reg, MI, SuccToSinkTo, MBB2, AllSuccessors);
 
-  MachineCycle *MCycle = CI->getCycle(MBB);
+  CycleRef MCycle = CI->getCycle(MBB);
 
   // If the instruction is not inside a cycle, it is not profitable to sink MI
   // to a post dominate block SuccToSinkTo.
@@ -1330,13 +1344,14 @@ bool MachineSinking::isProfitableToSinkTo(Register Reg, MachineInstr &MI,
       MachineInstr *DefMI = MRI->getVRegDef(Reg);
       if (!DefMI)
         continue;
-      MachineCycle *Cycle = CI->getCycle(DefMI->getParent());
+      CycleRef Cycle = CI->getCycle(DefMI->getParent());
       // DefMI is defined outside of cycle. There should be no live range
       // impact for this operand. Defination outside of cycle means:
       // 1: defination is outside of cycle.
       // 2: defination is in this cycle, but it is a PHI in the cycle header.
-      if (Cycle != MCycle || (DefMI->isPHI() && Cycle && Cycle->isReducible() &&
-                              Cycle->getHeader() == DefMI->getParent()))
+      if (Cycle != MCycle ||
+          (DefMI->isPHI() && Cycle && CI->isReducible(Cycle) &&
+           CI->getHeader(Cycle) == DefMI->getParent()))
         continue;
       // The DefMI is defined inside the cycle.
       // If sinking this operand makes some register pressure set exceed limit,
@@ -1610,11 +1625,11 @@ static void performSink(MachineInstr &MI, MachineBasicBlock &SuccToSinkTo,
   // If we cannot find a location to use (merge with), then we erase the debug
   // location to prevent debug-info driven tools from potentially reporting
   // wrong location information.
-  if (!SuccToSinkTo.empty() && InsertPos != SuccToSinkTo.end())
-    MI.setDebugLoc(DILocation::getMergedLocation(MI.getDebugLoc(),
-                                                 InsertPos->getDebugLoc()));
+  if (SuccToSinkTo.empty())
+    MI.setDebugLoc(DebugLoc::getDropped());
   else
-    MI.setDebugLoc(DebugLoc());
+    MI.setDebugLoc(DebugLoc::getMergedLocation(
+        MI.getDebugLoc(), SuccToSinkTo.findDebugLoc(InsertPos)));
 
   // Move the instruction.
   MachineBasicBlock *ParentBlock = MI.getParent();
@@ -1741,14 +1756,14 @@ bool MachineSinking::hasStoreBetween(MachineBasicBlock *From,
 /// based on the amount of sinking, or the type of ops being sunk (so long as
 /// they are safe to sink).
 bool MachineSinking::aggressivelySinkIntoCycle(
-    MachineCycle *Cycle, MachineInstr &I,
+    CycleRef Cycle, MachineInstr &I,
     DenseMap<SinkItem, MachineInstr *> &SunkInstrs) {
   // TODO: support instructions with multiple defs
   if (I.getNumDefs() > 1)
     return false;
 
   LLVM_DEBUG(dbgs() << "AggressiveCycleSink: Finding sink block for: " << I);
-  assert(Cycle->getCyclePreheader() && "Cycle sink needs a preheader block");
+  assert(CI->getCyclePreheader(Cycle) && "Cycle sink needs a preheader block");
   SmallVector<std::pair<RegSubRegPair, MachineInstr *>> Uses;
 
   MachineOperand &DefMO = I.getOperand(0);
@@ -1770,7 +1785,7 @@ bool MachineSinking::aggressivelySinkIntoCycle(
                            "can't sink.\n");
       continue;
     }
-    if (!Cycle->contains(MI->getParent())) {
+    if (!CI->contains(Cycle, MI->getParent())) {
       LLVM_DEBUG(
           dbgs() << "AggressiveCycleSink:   Use not in cycle, can't sink.\n");
       continue;
@@ -1903,8 +1918,8 @@ bool MachineSinking::SinkInstruction(MachineInstr &MI, bool &SawStore,
 
     // Don't sink instructions into a cycle.
     if (!TryBreak && CI->getCycle(SuccToSinkTo) &&
-        (!CI->getCycle(SuccToSinkTo)->isReducible() ||
-         CI->getCycle(SuccToSinkTo)->getHeader() == SuccToSinkTo)) {
+        (!CI->isReducible(CI->getCycle(SuccToSinkTo)) ||
+         CI->getHeader(CI->getCycle(SuccToSinkTo)) == SuccToSinkTo)) {
       LLVM_DEBUG(dbgs() << " *** NOTE: cycle header found\n");
       TryBreak = true;
     }
@@ -2068,25 +2083,7 @@ void MachineSinking::SalvageUnsunkDebugUsersOfCopy(
 //===----------------------------------------------------------------------===//
 namespace {
 
-class PostRAMachineSinking : public MachineFunctionPass {
-public:
-  bool runOnMachineFunction(MachineFunction &MF) override;
-
-  static char ID;
-  PostRAMachineSinking() : MachineFunctionPass(ID) {}
-  StringRef getPassName() const override { return "PostRA Machine Sink"; }
-
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.setPreservesCFG();
-    MachineFunctionPass::getAnalysisUsage(AU);
-  }
-
-  MachineFunctionProperties getRequiredProperties() const override {
-    return MachineFunctionProperties().set(
-        MachineFunctionProperties::Property::NoVRegs);
-  }
-
-private:
+class PostRAMachineSinkingImpl {
   /// Track which register units have been modified and used.
   LiveRegUnits ModifiedRegUnits, UsedRegUnits;
 
@@ -2100,13 +2097,36 @@ private:
   /// successors.
   bool tryToSinkCopy(MachineBasicBlock &BB, MachineFunction &MF,
                      const TargetRegisterInfo *TRI, const TargetInstrInfo *TII);
+
+public:
+  bool run(MachineFunction &MF);
 };
+
+class PostRAMachineSinkingLegacy : public MachineFunctionPass {
+public:
+  bool runOnMachineFunction(MachineFunction &MF) override;
+
+  static char ID;
+  PostRAMachineSinkingLegacy() : MachineFunctionPass(ID) {}
+  StringRef getPassName() const override { return "PostRA Machine Sink"; }
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.setPreservesCFG();
+    AU.addPreserved<MachineRegisterClassInfoWrapperPass>();
+    MachineFunctionPass::getAnalysisUsage(AU);
+  }
+
+  MachineFunctionProperties getRequiredProperties() const override {
+    return MachineFunctionProperties().setNoVRegs();
+  }
+};
+
 } // namespace
 
-char PostRAMachineSinking::ID = 0;
-char &llvm::PostRAMachineSinkingID = PostRAMachineSinking::ID;
+char PostRAMachineSinkingLegacy::ID = 0;
+char &llvm::PostRAMachineSinkingID = PostRAMachineSinkingLegacy::ID;
 
-INITIALIZE_PASS(PostRAMachineSinking, "postra-machine-sink",
+INITIALIZE_PASS(PostRAMachineSinkingLegacy, "postra-machine-sink",
                 "PostRA Machine Sink", false, false)
 
 static bool aliasWithRegsInLiveIn(MachineBasicBlock &MBB, Register Reg,
@@ -2182,11 +2202,9 @@ static void clearKillFlags(MachineInstr *MI, MachineBasicBlock &CurBB,
 static void updateLiveIn(MachineInstr *MI, MachineBasicBlock *SuccBB,
                          const SmallVectorImpl<unsigned> &UsedOpsInCopy,
                          const SmallVectorImpl<Register> &DefedRegsInCopy) {
-  MachineFunction &MF = *SuccBB->getParent();
-  const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
   for (Register DefReg : DefedRegsInCopy)
-    for (MCPhysReg S : TRI->subregs_inclusive(DefReg))
-      SuccBB->removeLiveIn(S);
+    SuccBB->removeLiveInOverlappedWith(DefReg);
+
   for (auto U : UsedOpsInCopy)
     SuccBB->addLiveIn(MI->getOperand(U).getReg());
   SuccBB->sortUniqueLiveIns();
@@ -2227,10 +2245,10 @@ static bool hasRegisterDependency(MachineInstr *MI,
   return HasRegDependency;
 }
 
-bool PostRAMachineSinking::tryToSinkCopy(MachineBasicBlock &CurBB,
-                                         MachineFunction &MF,
-                                         const TargetRegisterInfo *TRI,
-                                         const TargetInstrInfo *TII) {
+bool PostRAMachineSinkingImpl::tryToSinkCopy(MachineBasicBlock &CurBB,
+                                             MachineFunction &MF,
+                                             const TargetRegisterInfo *TRI,
+                                             const TargetInstrInfo *TII) {
   SmallPtrSet<MachineBasicBlock *, 2> SinkableBBs;
   // FIXME: For now, we sink only to a successor which has a single predecessor
   // so that we can directly sink COPY instructions to the successor without
@@ -2284,6 +2302,10 @@ bool PostRAMachineSinking::tryToSinkCopy(MachineBasicBlock &CurBB,
       continue;
     }
 
+    // Don't postRASink instructions that the target prefers not to sink.
+    if (!TII->shouldPostRASink(MI))
+      continue;
+
     if (MI.isDebugOrPseudoInstr())
       continue;
 
@@ -2326,8 +2348,7 @@ bool PostRAMachineSinking::tryToSinkCopy(MachineBasicBlock &CurBB,
       for (MCRegUnit Unit : TRI->regunits(MO.getReg())) {
         for (const auto &MIRegs : SeenDbgInstrs.lookup(Unit)) {
           auto &Regs = DbgValsToSinkMap[MIRegs.first];
-          for (Register Reg : MIRegs.second)
-            Regs.push_back(Reg);
+          llvm::append_range(Regs, MIRegs.second);
         }
       }
     }
@@ -2356,10 +2377,7 @@ bool PostRAMachineSinking::tryToSinkCopy(MachineBasicBlock &CurBB,
   return Changed;
 }
 
-bool PostRAMachineSinking::runOnMachineFunction(MachineFunction &MF) {
-  if (skipFunction(MF.getFunction()))
-    return false;
-
+bool PostRAMachineSinkingImpl::run(MachineFunction &MF) {
   bool Changed = false;
   const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
   const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
@@ -2370,4 +2388,24 @@ bool PostRAMachineSinking::runOnMachineFunction(MachineFunction &MF) {
     Changed |= tryToSinkCopy(BB, MF, TRI, TII);
 
   return Changed;
+}
+
+bool PostRAMachineSinkingLegacy::runOnMachineFunction(MachineFunction &MF) {
+  if (skipFunction(MF.getFunction()))
+    return false;
+
+  return PostRAMachineSinkingImpl().run(MF);
+}
+
+PreservedAnalyses
+PostRAMachineSinkingPass::run(MachineFunction &MF,
+                              MachineFunctionAnalysisManager &MFAM) {
+  MFPropsModifier _(*this, MF);
+
+  if (!PostRAMachineSinkingImpl().run(MF))
+    return PreservedAnalyses::all();
+
+  PreservedAnalyses PA = getMachineFunctionPassPreservedAnalyses();
+  PA.preserveSet<CFGAnalyses>();
+  return PA;
 }

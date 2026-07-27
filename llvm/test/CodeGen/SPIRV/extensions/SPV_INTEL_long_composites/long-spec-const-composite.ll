@@ -18,10 +18,10 @@ target triple = "spir64-unknown-unknown"
 ; CHECK: %[[#TStruct:]] = OpTypeStruct %[[#TArr]] %[[#TInt]] %[[#TInt]] %[[#TInt]]
 ; CHECK-NEXT: OpTypeStructContinuedINTEL %[[#TInt]] %[[#TInt]] %[[#TInt]] %[[#TInt]] %[[#TInt]] %[[#TInt]] %[[#TInt]]{{$}}
 
-; CHECK: %[[#First]] = OpSpecConstant %[[#TFloat]]
-; CHECK: OpSpecConstantComposite %[[#TArr]] %[[#First]]
+; CHECK-DAG: %[[#First]] = OpSpecConstant %[[#TFloat]]
+; CHECK-DAG: OpSpecConstantComposite %[[#TArr]] %[[#First]]
 
-; CHECK: %[[#Last]] = OpSpecConstant %[[#TInt]]
+; CHECK-DAG: %[[#Last]] = OpSpecConstant %[[#TInt]]
 ; CHECK: OpSpecConstantComposite %[[#TStruct]]
 ; CHECK-NEXT: OpSpecConstantCompositeContinuedINTEL %[[#]] %[[#]] %[[#]] %[[#]] %[[#]] %[[#]] %[[#]] %[[#Last]]
 

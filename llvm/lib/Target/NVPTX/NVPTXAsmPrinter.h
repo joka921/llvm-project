@@ -22,6 +22,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineLoopInfo.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugLoc.h"
@@ -58,6 +59,7 @@
 namespace llvm {
 
 class MCOperand;
+class NVPTXTargetStreamer;
 
 class LLVM_LIBRARY_VISIBILITY NVPTXAsmPrinter : public AsmPrinter {
 
@@ -88,7 +90,7 @@ class LLVM_LIBRARY_VISIBILITY NVPTXAsmPrinter : public AsmPrinter {
     }
 
   private:
-    const unsigned size;   // size of the buffer in bytes
+    const unsigned Size;               // size of the buffer in bytes
     std::vector<unsigned char> buffer; // the buffer
     SmallVector<unsigned, 4> symbolPosInBuffer;
     SmallVector<const Value *, 4> Symbols;
@@ -105,33 +107,34 @@ class LLVM_LIBRARY_VISIBILITY NVPTXAsmPrinter : public AsmPrinter {
     const bool EmitGeneric;
 
   public:
-    AggBuffer(unsigned size, const NVPTXAsmPrinter &AP)
-        : size(size), buffer(size), curpos(0), AP(AP),
+    AggBuffer(unsigned Size, const NVPTXAsmPrinter &AP)
+        : Size(Size), buffer(Size), curpos(0), AP(AP),
           EmitGeneric(AP.EmitGeneric) {}
+
+    unsigned getBufferSize() const { return Size; }
+
+    // Number of bytes written so far.
+    unsigned getCurpos() const { return curpos; }
 
     // Copy Num bytes from Ptr.
     // if Bytes > Num, zero fill up to Bytes.
-    unsigned addBytes(unsigned char *Ptr, int Num, int Bytes) {
-      assert((curpos + Num) <= size);
-      assert((curpos + Bytes) <= size);
-      for (int i = 0; i < Num; ++i) {
-        buffer[curpos] = Ptr[i];
-        curpos++;
-      }
-      for (int i = Num; i < Bytes; ++i) {
-        buffer[curpos] = 0;
-        curpos++;
-      }
-      return curpos;
+    void addBytes(const unsigned char *Ptr, unsigned Num, unsigned Bytes) {
+      for (unsigned I : llvm::seq(Num))
+        addByte(Ptr[I]);
+      if (Bytes > Num)
+        addZeros(Bytes - Num);
     }
 
-    unsigned addZeros(int Num) {
-      assert((curpos + Num) <= size);
-      for (int i = 0; i < Num; ++i) {
-        buffer[curpos] = 0;
-        curpos++;
+    void addByte(uint8_t Byte) {
+      assert(curpos < Size);
+      buffer[curpos] = Byte;
+      curpos++;
+    }
+
+    void addZeros(unsigned Num) {
+      for ([[maybe_unused]] unsigned _ : llvm::seq(Num)) {
+        addByte(0);
       }
-      return curpos;
     }
 
     void addSymbol(const Value *GVar, const Value *GVarBeforeStripping) {
@@ -149,10 +152,15 @@ class LLVM_LIBRARY_VISIBILITY NVPTXAsmPrinter : public AsmPrinter {
 
   friend class AggBuffer;
 
-private:
+public:
+  static char ID;
+
   StringRef getPassName() const override { return "NVPTX Assembly Printer"; }
 
+private:
   const Function *F;
+
+  NVPTXTargetStreamer *getTargetStreamer() const;
 
   void emitStartOfAsmFile(Module &M) override;
   void emitBasicBlockStart(const MachineBasicBlock &MBB) override;
@@ -173,7 +181,7 @@ private:
                           bool processDemoted, const NVPTXSubtarget &STI);
   void emitGlobals(const Module &M);
   void emitGlobalAlias(const Module &M, const GlobalAlias &GA) override;
-  void emitHeader(Module &M, raw_ostream &O, const NVPTXSubtarget &STI);
+  void emitHeader(Module &M, const NVPTXSubtarget &STI);
   void emitKernelFunctionDirectives(const Function &F, raw_ostream &O) const;
   void emitVirtualRegister(unsigned int vr, raw_ostream &);
   void emitFunctionParamList(const Function *, raw_ostream &O);
@@ -181,6 +189,10 @@ private:
   void encodeDebugInfoRegisterNumbers(const MachineFunction &MF);
   void printReturnValStr(const Function *, raw_ostream &O);
   void printReturnValStr(const MachineFunction &MF, raw_ostream &O);
+  void emitCallPrototype(const CallBase &CB, unsigned UniqueCallSite,
+                         raw_ostream &O) const;
+  void emitJumpTable(const MachineJumpTableEntry &MJT, unsigned MJTI,
+                     raw_ostream &O) const;
   bool PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
                        const char *ExtraCode, raw_ostream &) override;
   void printOperand(const MachineInstr *MI, unsigned OpNum, raw_ostream &O);
@@ -190,10 +202,18 @@ private:
   const MCExpr *lowerConstantForGV(const Constant *CV,
                                    bool ProcessingGeneric) const;
   void printMCExpr(const MCExpr &Expr, raw_ostream &OS) const;
+  /// Emit a blob of inline asm to the output streamer.
+  void emitInlineAsm(StringRef Str, const MCSubtargetInfo &STI,
+                     const MCTargetOptions &MCOptions, const MDNode *LocMDNode,
+                     InlineAsm::AsmDialect Dialect,
+                     const MachineInstr *MI) override;
 
 protected:
   bool doInitialization(Module &M) override;
   bool doFinalization(Module &M) override;
+
+  /// Create NVPTX-specific DwarfDebug handler.
+  DwarfDebug *createDwarfDebug() override;
 
 private:
   bool GlobalsEmitted;
@@ -212,12 +232,17 @@ private:
 
   void emitPTXGlobalVariable(const GlobalVariable *GVar, raw_ostream &O,
                              const NVPTXSubtarget &STI);
+  void emitPTXGlobalVariableDefinition(const GlobalVariable *GVar,
+                                       raw_ostream &O,
+                                       const NVPTXSubtarget &STI,
+                                       bool EmitInitializer);
   void emitPTXAddressSpace(unsigned int AddressSpace, raw_ostream &O) const;
   std::string getPTXFundamentalTypeStr(Type *Ty, bool = true) const;
   void printScalarConstant(const Constant *CPV, raw_ostream &O);
   void printFPConstant(const ConstantFP *Fp, raw_ostream &O) const;
   void bufferLEByte(const Constant *CPV, int Bytes, AggBuffer *aggBuffer);
   void bufferAggregateConstant(const Constant *CV, AggBuffer *aggBuffer);
+  void bufferAggregateConstVec(const ConstantVector *CV, AggBuffer *aggBuffer);
 
   void emitLinkageDirective(const GlobalValue *V, raw_ostream &O);
   void emitDeclarations(const Module &, raw_ostream &O);
@@ -243,7 +268,7 @@ private:
 
 public:
   NVPTXAsmPrinter(TargetMachine &TM, std::unique_ptr<MCStreamer> Streamer)
-      : AsmPrinter(TM, std::move(Streamer)),
+      : AsmPrinter(TM, std::move(Streamer), ID),
         EmitGeneric(static_cast<NVPTXTargetMachine &>(TM).getDrvInterface() ==
                     NVPTX::CUDA) {}
 

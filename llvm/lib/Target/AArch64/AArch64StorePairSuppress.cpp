@@ -16,6 +16,7 @@
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineTraceMetrics.h"
+#include "llvm/CodeGen/RegisterClassInfo.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetSchedule.h"
 #include "llvm/Support/Debug.h"
@@ -38,9 +39,7 @@ class AArch64StorePairSuppress : public MachineFunctionPass {
 
 public:
   static char ID;
-  AArch64StorePairSuppress() : MachineFunctionPass(ID) {
-    initializeAArch64StorePairSuppressPass(*PassRegistry::getPassRegistry());
-  }
+  AArch64StorePairSuppress() : MachineFunctionPass(ID) {}
 
   StringRef getPassName() const override { return STPSUPPRESS_PASS_NAME; }
 
@@ -53,6 +52,7 @@ private:
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
+    AU.addPreserved<MachineRegisterClassInfoWrapperPass>();
     AU.addRequired<MachineTraceMetricsWrapperPass>();
     AU.addPreserved<MachineTraceMetricsWrapperPass>();
     MachineFunctionPass::getAnalysisUsage(AU);
@@ -135,7 +135,7 @@ bool AArch64StorePairSuppress::runOnMachineFunction(MachineFunction &MF) {
   if (!ST.enableStorePairSuppress())
     return false;
 
-  TII = static_cast<const AArch64InstrInfo *>(ST.getInstrInfo());
+  TII = ST.getInstrInfo();
   TRI = ST.getRegisterInfo();
   MRI = &MF.getRegInfo();
   SchedModel.init(&ST);

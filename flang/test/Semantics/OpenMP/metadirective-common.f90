@@ -21,6 +21,11 @@ subroutine f02
   !$omp & when(user={condition(score(-2): .true.)}: nothing)
 end
 
+subroutine f02_zero_score
+  !$omp metadirective &
+  !$omp & when(user={condition(score(0): .true.)}: nothing)
+end
+
 subroutine f03(x)
   integer :: x
   !$omp metadirective &
@@ -35,3 +40,8 @@ subroutine f04
   !$omp & when(target_device={device_num("device", "foo"(1))}: nothing)
 end
 
+subroutine f05
+  !$omp metadirective &
+!ERROR: 'context-selector' modifier is required
+  !$omp & when(nothing)
+end

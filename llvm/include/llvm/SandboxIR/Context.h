@@ -15,6 +15,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/SandboxIR/Tracker.h"
 #include "llvm/SandboxIR/Type.h"
+#include "llvm/Support/Compiler.h"
 
 #include <cstdint>
 
@@ -25,10 +26,11 @@ class Argument;
 class BBIterator;
 class Constant;
 class Module;
+class Region;
 class Value;
 class Use;
 
-class Context {
+class LLVM_ABI Context {
 public:
   // A EraseInstrCallback receives the instruction about to be erased.
   using EraseInstrCallback = std::function<void(Instruction *)>;
@@ -49,7 +51,7 @@ public:
     // Uses a 64-bit integer so we don't have to worry about the unlikely case
     // of overflowing a 32-bit counter.
     using ValTy = uint64_t;
-    static constexpr const ValTy InvalidVal = 0;
+    static constexpr ValTy InvalidVal = 0;
 
   private:
     // Default initialization results in an invalid ID.
@@ -69,6 +71,7 @@ protected:
   friend class Type;              // For LLVMCtx.
   friend class PointerType;       // For LLVMCtx.
   friend class IntegerType;       // For LLVMCtx.
+  friend class ByteType;          // For LLVMCtx.
   friend class StructType;        // For LLVMCtx.
   friend class Region;            // For LLVMCtx.
   friend class IRSnapshotChecker; // To snapshot LLVMModuleToModuleMap.
@@ -130,6 +133,7 @@ protected:
   }
   /// Get or create a sandboxir::Constant from an existing LLVM IR \p LLVMC.
   Constant *getOrCreateConstant(llvm::Constant *LLVMC);
+  friend class ConstantDataSequential; // For getOrCreateConstant().
   friend class Utils; // For getMemoryBase
 
   void runEraseInstrCallbacks(Instruction *I);
@@ -170,8 +174,10 @@ protected:
   friend ExtractValueInst; // For createExtractValueInst()
   InsertValueInst *createInsertValueInst(llvm::InsertValueInst *IVI);
   friend InsertValueInst; // For createInsertValueInst()
-  BranchInst *createBranchInst(llvm::BranchInst *I);
-  friend BranchInst; // For createBranchInst()
+  UncondBrInst *createUncondBrInst(llvm::UncondBrInst *UBI);
+  friend UncondBrInst; // For createUncondBrInst()
+  CondBrInst *createCondBrInst(llvm::CondBrInst *CBI);
+  friend CondBrInst; // For createCondBrInst()
   LoadInst *createLoadInst(llvm::LoadInst *LI);
   friend LoadInst; // For createLoadInst()
   StoreInst *createStoreInst(llvm::StoreInst *SI);
@@ -227,7 +233,7 @@ protected:
 
 public:
   Context(LLVMContext &LLVMCtx);
-  ~Context();
+  virtual ~Context();
   /// Clears function-level state.
   void clear();
 
@@ -235,9 +241,9 @@ public:
   /// Convenience function for `getTracker().save()`
   void save() { IRTracker.save(); }
   /// Convenience function for `getTracker().revert()`
-  void revert() { IRTracker.revert(); }
+  void revert(bool RevertAll = false) { IRTracker.revert(RevertAll); }
   /// Convenience function for `getTracker().accept()`
-  void accept() { IRTracker.accept(); }
+  void accept(bool AcceptAll = false) { IRTracker.accept(AcceptAll); }
 
   sandboxir::Value *getValue(llvm::Value *V) const;
   const sandboxir::Value *getValue(const llvm::Value *V) const {
@@ -251,7 +257,7 @@ public:
   Type *getType(llvm::Type *LLVMTy) {
     if (LLVMTy == nullptr)
       return nullptr;
-    auto Pair = LLVMTypeToTypeMap.insert({LLVMTy, nullptr});
+    auto Pair = LLVMTypeToTypeMap.try_emplace(LLVMTy);
     auto It = Pair.first;
     if (Pair.second)
       It->second = std::unique_ptr<Type, TypeDeleter>(new Type(LLVMTy, *this));
@@ -304,12 +310,6 @@ template <> struct DenseMapInfo<sandboxir::Context::CallbackID> {
   using CallbackID = sandboxir::Context::CallbackID;
   using ReprInfo = DenseMapInfo<CallbackID::ValTy>;
 
-  static CallbackID getEmptyKey() {
-    return CallbackID{ReprInfo::getEmptyKey()};
-  }
-  static CallbackID getTombstoneKey() {
-    return CallbackID{ReprInfo::getTombstoneKey()};
-  }
   static unsigned getHashValue(const CallbackID &ID) {
     return ReprInfo::getHashValue(ID.Val);
   }

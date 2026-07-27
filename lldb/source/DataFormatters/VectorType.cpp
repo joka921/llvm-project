@@ -55,6 +55,8 @@ static CompilerType GetCompilerTypeForFormat(lldb::Format format,
 
   case lldb::eFormatFloat:
     return type_system->GetBasicTypeFromAST(lldb::eBasicTypeFloat);
+  case lldb::eFormatFloat128:
+    return type_system->GetBasicTypeFromAST(lldb::eBasicTypeFloat128);
 
   case lldb::eFormatHex:
   case lldb::eFormatHexUppercase:
@@ -269,14 +271,6 @@ public:
     return lldb::ChildCacheState::eRefetch;
   }
 
-  size_t GetIndexOfChildWithName(ConstString name) override {
-    const char *item_name = name.GetCString();
-    uint32_t idx = ExtractIndexFromString(item_name);
-    if (idx < UINT32_MAX && idx >= CalculateNumChildrenIgnoringErrors())
-      return UINT32_MAX;
-    return idx;
-  }
-
 private:
   lldb::Format m_parent_format = eFormatInvalid;
   lldb::Format m_item_format = eFormatInvalid;
@@ -312,7 +306,7 @@ bool lldb_private::formatters::VectorTypeSummaryProvider(
     const char *child_value = child_sp->GetValueAsCString();
     if (child_value && *child_value) {
       if (first) {
-        s.Printf("%s", child_value);
+        s.PutCString(child_value);
         first = false;
       } else {
         s.Printf(", %s", child_value);

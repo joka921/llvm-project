@@ -27,6 +27,10 @@ add_llvm_component_library(LLVMipo
   IROutliner.cpp
   InferFunctionAttrs.cpp
   Inliner.cpp
+  Instrumentor.cpp
+  InstrumentorUtils.cpp
+  InstrumentorConfigFile.cpp
+  InstrumentorStubPrinter.cpp
   Internalize.cpp
   LoopExtractor.cpp
   LowerTypeTests.cpp
@@ -62,9 +66,11 @@ add_llvm_component_library(LLVMipo
   BitReader
   BitWriter
   Core
+  Demangle
   FrontendOpenMP
   InstCombine
   IRReader
+  Demangle
   Linker
   Object
   ProfileData

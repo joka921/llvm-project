@@ -8,13 +8,9 @@
 
 // UNSUPPORTED: no-exceptions
 
-// XFAIL: FROZEN-CXX03-HEADERS-FIXME
-
-// After changing the alignment of the allocated pointer from 16 to 8, the exception
-// thrown is no longer `bad_alloc` but instead length_error on systems using new
-// headers but a dylib that doesn't contain 04ce0ba.
-//
-// XFAIL: using-built-library-before-llvm-19
+// This test is sensitive what __STDCPP_DEFAULT_NEW_ALIGNMENT__ is set to. Enable aligned-new for GCC so that GCC
+// defines the macro
+// ADDITIONAL_COMPILE_FLAGS(gcc): -faligned-new
 
 // <string>
 

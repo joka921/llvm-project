@@ -11,18 +11,17 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Basic/ExpressionTraits.h"
-#include "llvm/Support/ErrorHandling.h"
 #include <cassert>
 using namespace clang;
 
 static constexpr const char *ExpressionTraitNames[] = {
 #define EXPRESSION_TRAIT(Spelling, Name, Key) #Name,
-#include "clang/Basic/TokenKinds.def"
+#include "clang/Basic/Traits.inc"
 };
 
 static constexpr const char *ExpressionTraitSpellings[] = {
 #define EXPRESSION_TRAIT(Spelling, Name, Key) #Spelling,
-#include "clang/Basic/TokenKinds.def"
+#include "clang/Basic/Traits.inc"
 };
 
 const char *clang::getTraitName(ExpressionTrait T) {

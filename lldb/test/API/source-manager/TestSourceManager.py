@@ -30,12 +30,13 @@ def ansi_color_surround_regex(inner_regex_text):
 
 class SourceManagerTestCase(TestBase):
     NO_DEBUG_INFO_TESTCASE = True
+    SHARED_BUILD_TESTCASE = False
 
     def setUp(self):
         # Call super's setUp().
         TestBase.setUp(self)
         # Find the line number to break inside main().
-        self.file = self.getBuildArtifact("main-copy.c")
+        self.file = os.path.realpath(self.getBuildArtifact("main-copy.c"))
         self.line = line_number("main.c", "// Set break point at this line.")
 
     def modify_content(self):
@@ -129,6 +130,7 @@ class SourceManagerTestCase(TestBase):
             stream.GetData(),
             "Source code displayed correctly:\n" + stream.GetData(),
             exe=False,
+            ordered=False,
             patterns=["=>", "%d.*Hello world" % self.line, needle_regex],
         )
 

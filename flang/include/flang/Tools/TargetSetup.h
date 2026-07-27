@@ -13,7 +13,6 @@
 #include "flang/Evaluate/target.h"
 #include "flang/Frontend/TargetOptions.h"
 #include "llvm/Target/TargetMachine.h"
-#include <cfloat>
 
 namespace Fortran::tools {
 
@@ -29,6 +28,10 @@ namespace Fortran::tools {
     targetCharacteristics.set_hasSubnormalFlushingControl(/*kind=*/3);
     targetCharacteristics.set_hasSubnormalFlushingControl(/*kind=*/4);
     targetCharacteristics.set_hasSubnormalFlushingControl(/*kind=*/8);
+    // ieee_denorm exception support is nonstandard.
+    targetCharacteristics.set_hasSubnormalExceptionSupport(/*kind=*/3);
+    targetCharacteristics.set_hasSubnormalExceptionSupport(/*kind=*/4);
+    targetCharacteristics.set_hasSubnormalExceptionSupport(/*kind=*/8);
   }
 
   if (targetTriple.isARM() || targetTriple.isAArch64()) {
@@ -43,12 +46,14 @@ namespace Fortran::tools {
   }
 
   switch (targetTriple.getArch()) {
-  case llvm::Triple::ArchType::amdgcn:
+  case llvm::Triple::ArchType::amdgpu:
   case llvm::Triple::ArchType::x86_64:
     break;
   default:
     targetCharacteristics.DisableType(
         Fortran::common::TypeCategory::Real, /*kind=*/10);
+    targetCharacteristics.DisableType(
+        Fortran::common::TypeCategory::Complex, /*kind=*/10);
     break;
   }
 
@@ -62,11 +67,16 @@ namespace Fortran::tools {
   constexpr bool f128Support = false;
 #endif
 
-  if constexpr (!f128Support)
+  if constexpr (!f128Support) {
     targetCharacteristics.DisableType(Fortran::common::TypeCategory::Real, 16);
+    targetCharacteristics.DisableType(
+        Fortran::common::TypeCategory::Complex, 16);
+  }
 
-  for (auto realKind : targetOptions.disabledRealKinds)
+  for (auto realKind : targetOptions.disabledRealKinds) {
     targetCharacteristics.DisableType(common::TypeCategory::Real, realKind);
+    targetCharacteristics.DisableType(common::TypeCategory::Complex, realKind);
+  }
 
   for (auto intKind : targetOptions.disabledIntegerKinds)
     targetCharacteristics.DisableType(common::TypeCategory::Integer, intKind);
@@ -82,6 +92,10 @@ namespace Fortran::tools {
 
   if (targetTriple.isOSWindows())
     targetCharacteristics.set_isOSWindows(true);
+
+  // Currently the integer kind happens to be the same as the byte size
+  targetCharacteristics.set_integerKindForPointer(
+      targetTriple.getArchPointerBitWidth() / 8);
 
   // TODO: use target machine data layout to set-up the target characteristics
   // type size and alignment info.

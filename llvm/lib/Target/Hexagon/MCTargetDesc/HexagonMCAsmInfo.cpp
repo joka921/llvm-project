@@ -11,29 +11,34 @@
 //===----------------------------------------------------------------------===//
 
 #include "HexagonMCAsmInfo.h"
+#include "MCTargetDesc/HexagonMCExpr.h"
+#include "llvm/ADT/Enum.h"
 #include "llvm/MC/MCExpr.h"
 
 using namespace llvm;
 
-const MCAsmInfo::VariantKindDesc variantKindDescs[] = {
-    {MCSymbolRefExpr::VK_DTPREL, "DTPREL"},
-    {MCSymbolRefExpr::VK_Hexagon_GD_GOT, "GDGOT"},
-    {MCSymbolRefExpr::VK_Hexagon_GD_PLT, "GDPLT"},
-    {MCSymbolRefExpr::VK_GOT, "GOT"},
-    {MCSymbolRefExpr::VK_GOTREL, "GOTREL"},
-    {MCSymbolRefExpr::VK_Hexagon_IE, "IE"},
-    {MCSymbolRefExpr::VK_Hexagon_IE_GOT, "IEGOT"},
-    {MCSymbolRefExpr::VK_Hexagon_LD_GOT, "LDGOT"},
-    {MCSymbolRefExpr::VK_Hexagon_LD_PLT, "LDPLT"},
-    {MCSymbolRefExpr::VK_PCREL, "PCREL"},
-    {MCSymbolRefExpr::VK_PLT, "PLT"},
-    {MCSymbolRefExpr::VK_TPREL, "TPREL"},
+constexpr EnumStringDef<MCAsmInfo::AtSpecifierKind> AtSpecifierDefs[] = {
+    {{"DTPREL"}, HexagonMCExpr::VK_DTPREL},
+    {{"GDGOT"}, HexagonMCExpr::VK_GD_GOT},
+    {{"GDPLT"}, HexagonMCExpr::VK_GD_PLT},
+    {{"GOT"}, HexagonMCExpr::VK_GOT},
+    {{"GOTREL"}, HexagonMCExpr::VK_GOTREL},
+    {{"IE"}, HexagonMCExpr::VK_IE},
+    {{"IEGOT"}, HexagonMCExpr::VK_IE_GOT},
+    {{"LDGOT"}, HexagonMCExpr::VK_LD_GOT},
+    {{"LDPLT"}, HexagonMCExpr::VK_LD_PLT},
+    {{"PCREL"}, HexagonMCExpr::VK_PCREL},
+    {{"PLT"}, HexagonMCExpr::VK_PLT},
+    {{"TPREL"}, HexagonMCExpr::VK_TPREL},
 };
+constexpr auto atSpecifiers = BUILD_ENUM_STRINGS(AtSpecifierDefs);
 
 // Pin the vtable to this file.
 void HexagonMCAsmInfo::anchor() {}
 
-HexagonMCAsmInfo::HexagonMCAsmInfo(const Triple &TT) {
+HexagonMCAsmInfo::HexagonMCAsmInfo(const Triple &TT,
+                                   const MCTargetOptions &Options)
+    : MCAsmInfoELF(Options) {
   Data16bitsDirective = "\t.half\t";
   Data32bitsDirective = "\t.word\t";
   Data64bitsDirective = nullptr;  // .xword is only supported by V9.
@@ -43,6 +48,7 @@ HexagonMCAsmInfo::HexagonMCAsmInfo(const Triple &TT) {
   LCOMMDirectiveAlignmentType = LCOMM::ByteAlignment;
   InlineAsmStart = "# InlineAsm Start";
   InlineAsmEnd = "# InlineAsm End";
+  UsesSetToEquateSymbol = true;
   ZeroDirective = "\t.space\t";
   AscizDirective = "\t.string\t";
 
@@ -51,5 +57,5 @@ HexagonMCAsmInfo::HexagonMCAsmInfo(const Triple &TT) {
   ExceptionsType = ExceptionHandling::DwarfCFI;
   UseLogicalShr = false;
 
-  initializeVariantKinds(variantKindDescs);
+  initializeAtSpecifiers(atSpecifiers);
 }

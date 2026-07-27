@@ -24,7 +24,7 @@
   _obj1.get().method();
   (*_obj2).method();
   _obj3->method();
-  // expected-warning@-1{{Call argument for 'this' parameter is uncounted and unsafe}}
+  // expected-warning@-1{{Function argument 'self->_obj3' (parameter 'this' to 'RefCountable::method') is a raw pointer to RefPtr-capable type 'RefCountable'}}
 }
 
 - (RefPtr<RefCountable>)_protectedRefCountable {
@@ -49,4 +49,8 @@ public:
 
 static void foo(WrapperObj *configuration) {
   configuration._protectedWebExtensionControllerConfiguration->copy();
+}
+
+void log(RefCountable* obj) {
+  os_log_msg(os_log_create("WebKit", "DOM"), OS_LOG_TYPE_INFO, "obj: %p next: %p", obj, obj->next());
 }

@@ -353,13 +353,13 @@ TEST(CXXConstructorDecl, NoRetFunTypeLocRange) {
 
 TEST(CXXConstructorDecl, DefaultedCtorLocRange) {
   RangeVerifier<CXXConstructorDecl> Verifier;
-  Verifier.expectRange(1, 11, 1, 23);
+  Verifier.expectRange(1, 11, 1, 17);
   EXPECT_TRUE(Verifier.match("class C { C() = default; };", functionDecl()));
 }
 
 TEST(CXXConstructorDecl, DeletedCtorLocRange) {
   RangeVerifier<CXXConstructorDecl> Verifier;
-  Verifier.expectRange(1, 11, 1, 22);
+  Verifier.expectRange(1, 11, 1, 17);
   EXPECT_TRUE(Verifier.match("class C { C() = delete; };", functionDecl()));
 }
 
@@ -1094,11 +1094,11 @@ class ConceptSpecializationExprConceptReferenceRangeVerifier
 protected:
   SourceRange getRange(const VarTemplateDecl &Node) override {
     assert(Node.hasAssociatedConstraints());
-    SmallVector<const Expr *, 3> ACs;
+    SmallVector<AssociatedConstraint, 3> ACs;
     Node.getAssociatedConstraints(ACs);
-    for (const Expr *Constraint : ACs) {
+    for (const AssociatedConstraint &AC : ACs) {
       if (const ConceptSpecializationExpr *CSConstraint =
-              dyn_cast<ConceptSpecializationExpr>(Constraint)) {
+              dyn_cast<ConceptSpecializationExpr>(AC.ConstraintExpr)) {
         return CSConstraint->getConceptReference()->getSourceRange();
       }
     }

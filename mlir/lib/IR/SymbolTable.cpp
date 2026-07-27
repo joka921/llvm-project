@@ -10,7 +10,6 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
 #include "llvm/ADT/SetVector.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSwitch.h"
 #include <optional>
@@ -121,7 +120,7 @@ SymbolTable::SymbolTable(Operation *symbolTableOp)
          "expected operation to have SymbolTable trait");
   assert(symbolTableOp->getNumRegions() == 1 &&
          "expected operation to have a single region");
-  assert(llvm::hasSingleElement(symbolTableOp->getRegion(0)) &&
+  assert(symbolTableOp->getRegion(0).hasOneBlock() &&
          "expected operation to have a single block");
 
   StringAttr symbolNameId = StringAttr::get(symbolTableOp->getContext(),
@@ -131,10 +130,13 @@ SymbolTable::SymbolTable(Operation *symbolTableOp)
     if (!name)
       continue;
 
-    auto inserted = symbolTable.insert({name, &op});
-    (void)inserted;
-    assert(inserted.second &&
-           "expected region to contain uniquely named symbol operations");
+    // Silently skip duplicate symbol names. Duplicate symbols are an
+    // invalid IR condition diagnosed by the SymbolTable trait's
+    // verifyRegionTrait. The constructor may be called before verification
+    // completes (e.g., when IsolatedFromAbove ops look up symbols in an
+    // ancestor symbol table during verification), so an assert here would
+    // crash instead of producing a proper diagnostic.
+    symbolTable.try_emplace(name, &op);
   }
 }
 
@@ -414,30 +416,24 @@ static LogicalResult lookupSymbolInImpl(
   assert(symbolTableOp->hasTrait<OpTrait::SymbolTable>());
 
   // Lookup the root reference for this symbol.
-  symbolTableOp = lookupSymbolFn(symbolTableOp, symbol.getRootReference());
-  if (!symbolTableOp)
+  auto *symbolOp = lookupSymbolFn(symbolTableOp, symbol.getRootReference());
+  if (!symbolOp)
     return failure();
-  symbols.push_back(symbolTableOp);
+  symbols.push_back(symbolOp);
 
-  // If there are no nested references, just return the root symbol directly.
-  ArrayRef<FlatSymbolRefAttr> nestedRefs = symbol.getNestedReferences();
-  if (nestedRefs.empty())
-    return success();
-
-  // Verify that the root is also a symbol table.
-  if (!symbolTableOp->hasTrait<OpTrait::SymbolTable>())
-    return failure();
-
-  // Otherwise, lookup each of the nested non-leaf references and ensure that
-  // each corresponds to a valid symbol table.
-  for (FlatSymbolRefAttr ref : nestedRefs.drop_back()) {
-    symbolTableOp = lookupSymbolFn(symbolTableOp, ref.getAttr());
-    if (!symbolTableOp || !symbolTableOp->hasTrait<OpTrait::SymbolTable>())
+  // Lookup each of the nested references.
+  for (FlatSymbolRefAttr ref : symbol.getNestedReferences()) {
+    // Check that we have a valid symbol table to lookup ref.
+    if (!symbolOp->hasTrait<OpTrait::SymbolTable>())
       return failure();
-    symbols.push_back(symbolTableOp);
+    symbolOp = lookupSymbolFn(symbolOp, ref.getAttr());
+    // If the nested symbol is private, lookup failed.
+    if (!symbolOp || SymbolTable::getSymbolVisibility(symbolOp) ==
+                         SymbolTable::Visibility::Private)
+      return failure();
+    symbols.push_back(symbolOp);
   }
-  symbols.push_back(lookupSymbolFn(symbolTableOp, symbol.getLeafReference()));
-  return success(symbols.back());
+  return success();
 }
 
 LogicalResult
@@ -480,11 +476,56 @@ raw_ostream &mlir::operator<<(raw_ostream &os,
 // SymbolTable Trait Types
 //===----------------------------------------------------------------------===//
 
+/// Verify the symbol uses held by the types owned by `op`: its operand,
+/// result, and block-argument types, and any types nested within its
+/// attributes. `op` is the anchor used for symbol lookups. `verifiedTypes`
+/// records the types already verified within the current symbol table so that
+/// each type, which may be uniqued and shared across many positions or
+/// operations, is verified at most once. Verification fails fast on the first
+/// invalid symbol use.
+static LogicalResult verifyOpTypeSymbolUses(Operation *op,
+                                            SymbolTableCollection &symbolTable,
+                                            SetVector<Type> &verifiedTypes) {
+  // Walk `type` and any nested type parameters reachable from it, verifying
+  // each not-yet-seen type and interrupting on the first failure.
+  auto verify = [&](Type type) {
+    return type.walk<WalkOrder::PreOrder>([&](Type nestedType) {
+      if (!verifiedTypes.insert(nestedType))
+        return WalkResult::advance();
+      if (auto user = dyn_cast<SymbolUserTypeInterface>(nestedType))
+        if (failed(user.verifySymbolUses(op, symbolTable)))
+          return WalkResult::interrupt();
+      return WalkResult::advance();
+    });
+  };
+
+  for (Type type : op->getOperandTypes())
+    if (verify(type).wasInterrupted())
+      return failure();
+  for (Type type : op->getResultTypes())
+    if (verify(type).wasInterrupted())
+      return failure();
+  for (Region &region : op->getRegions())
+    for (Block &block : region)
+      for (BlockArgument argument : block.getArguments())
+        if (verify(argument.getType()).wasInterrupted())
+          return failure();
+
+  // Verify types nested within the operation's attributes.
+  WalkResult attrResult =
+      op->getAttrDictionary().walk<WalkOrder::PreOrder>([&](Type type) {
+        if (verify(type).wasInterrupted())
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+      });
+  return failure(attrResult.wasInterrupted());
+}
+
 LogicalResult detail::verifySymbolTable(Operation *op) {
   if (op->getNumRegions() != 1)
     return op->emitOpError()
            << "Operations with a 'SymbolTable' must have exactly one region";
-  if (!llvm::hasSingleElement(op->getRegion(0)))
+  if (!op->getRegion(0).hasOneBlock())
     return op->emitOpError()
            << "Operations with a 'SymbolTable' must have exactly one block";
 
@@ -510,9 +551,27 @@ LogicalResult detail::verifySymbolTable(Operation *op) {
 
   // Verify any nested symbol user operations.
   SymbolTableCollection symbolTable;
+  // walkSymbolTable does not descend into nested symbol tables, so every
+  // operation visited here shares the same nearest symbol table. A uniqued
+  // attribute or type therefore resolves its symbol uses identically
+  // regardless of which operation anchors the lookup, so each is verified at
+  // most once across the whole scope.
+  SetVector<Attribute> verifiedAttrs;
+  SetVector<Type> verifiedTypes;
   auto verifySymbolUserFn = [&](Operation *op) -> std::optional<WalkResult> {
     if (SymbolUserOpInterface user = dyn_cast<SymbolUserOpInterface>(op))
-      return WalkResult(user.verifySymbolUses(symbolTable));
+      if (failed(user.verifySymbolUses(symbolTable)))
+        return WalkResult::interrupt();
+    for (auto &attr : op->getDiscardableAttrs()) {
+      if (auto user = dyn_cast<SymbolUserAttrInterface>(attr.getValue())) {
+        if (!verifiedAttrs.insert(attr.getValue()))
+          continue;
+        if (failed(user.verifySymbolUses(op, symbolTable)))
+          return WalkResult::interrupt();
+      }
+    }
+    if (failed(verifyOpTypeSymbolUses(op, symbolTable, verifiedTypes)))
+      return WalkResult::interrupt();
     return WalkResult::advance();
   };
 
@@ -759,6 +818,7 @@ static bool isReferencePrefixOf(SymbolRefAttr subRef, SymbolRefAttr ref) {
 
 //===----------------------------------------------------------------------===//
 // SymbolTable::getSymbolUses
+//===----------------------------------------------------------------------===//
 
 /// The implementation of SymbolTable::getSymbolUses below.
 template <typename FromT>
@@ -789,6 +849,7 @@ auto SymbolTable::getSymbolUses(Region *from) -> std::optional<UseRange> {
 
 //===----------------------------------------------------------------------===//
 // SymbolTable::getSymbolUses
+//===----------------------------------------------------------------------===//
 
 /// The implementation of SymbolTable::getSymbolUses below.
 template <typename SymbolT, typename IRUnitT>
@@ -806,9 +867,9 @@ static std::optional<SymbolTable::UseRange> getSymbolUsesImpl(SymbolT symbol,
 }
 
 /// Get all of the uses of the given symbol that are nested within the given
-/// operation 'from', invoking the provided callback for each. This does not
-/// traverse into any nested symbol tables. This function returns std::nullopt
-/// if there are any unknown operations that may potentially be symbol tables.
+/// operation 'from'. This does not traverse into any nested symbol tables.
+/// This function returns std::nullopt if there are any unknown operations that
+/// may potentially be symbol tables.
 auto SymbolTable::getSymbolUses(StringAttr symbol, Operation *from)
     -> std::optional<UseRange> {
   return getSymbolUsesImpl(symbol, from);
@@ -828,6 +889,7 @@ auto SymbolTable::getSymbolUses(Operation *symbol, Region *from)
 
 //===----------------------------------------------------------------------===//
 // SymbolTable::symbolKnownUseEmpty
+//===----------------------------------------------------------------------===//
 
 /// The implementation of SymbolTable::symbolKnownUseEmpty below.
 template <typename SymbolT, typename IRUnitT>
@@ -863,6 +925,7 @@ bool SymbolTable::symbolKnownUseEmpty(Operation *symbol, Region *from) {
 
 //===----------------------------------------------------------------------===//
 // SymbolTable::replaceAllSymbolUses
+//===----------------------------------------------------------------------===//
 
 /// Generates a new symbol reference attribute with a new leaf reference.
 static SymbolRefAttr generateNewRefAttr(SymbolRefAttr oldAttr,
@@ -994,6 +1057,10 @@ SymbolTable &SymbolTableCollection::getSymbolTable(Operation *op) {
   return *it.first->second;
 }
 
+void SymbolTableCollection::invalidateSymbolTable(Operation *op) {
+  symbolTables.erase(op);
+}
+
 //===----------------------------------------------------------------------===//
 // LockedSymbolTableCollection
 //===----------------------------------------------------------------------===//
@@ -1092,7 +1159,7 @@ void SymbolUserMap::replaceAllUsesWith(Operation *symbol,
   if (newSymbol != symbol) {
     // Transfer over the users to the new symbol.  The reference to the old one
     // is fetched again as the iterator is invalidated during the insertion.
-    auto newIt = symbolToUsers.try_emplace(newSymbol, SetVector<Operation *>{});
+    auto newIt = symbolToUsers.try_emplace(newSymbol);
     auto oldIt = symbolToUsers.find(symbol);
     assert(oldIt != symbolToUsers.end() && "missing old users list");
     if (newIt.second)
@@ -1125,3 +1192,5 @@ ParseResult impl::parseOptionalVisibilityKeyword(OpAsmParser &parser,
 
 /// Include the generated symbol interfaces.
 #include "mlir/IR/SymbolInterfaces.cpp.inc"
+#include "mlir/IR/SymbolInterfacesAttrInterface.cpp.inc"
+#include "mlir/IR/SymbolInterfacesTypeInterface.cpp.inc"
